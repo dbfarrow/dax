@@ -1,0 +1,57 @@
+#
+# Inspired by justinsteven's jax... a replacement for my kali VM
+#
+
+FROM debian:latest
+
+RUN apt-get update && apt-get install -y \
+	apt-utils \
+	apt-transport-https \
+	build-essential \
+	ca-certificates \
+	curl \
+	default-jdk \
+	ftp \
+	gdb \
+	git \
+	locales \
+	lsb-release \
+	netcat \
+	nmap \
+	man \
+	procps \
+	python-pip \
+	python-virtualenv \
+	rbenv \
+	ruby-full \
+	sudo \
+	tmux \
+	vim \
+	wget \
+	zsh
+
+RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > /tmp/msfinstall \
+	&& chmod 755 /tmp/msfinstall \
+	&& /tmp/msfinstall \
+	&& pip install pwntools \
+	&& pip install cheat
+
+RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
+	&& useradd -u $euid -g $gid -m -s $shell $user \
+	&& usermod -a -G sudo $user \
+	&& echo $user:$passwd | chpasswd \
+	&& echo "done setting up user"
+
+COPY --chown=$user:$gid dotfiles/ /home/$user/
+
+# move these instructions to the right place before the next complete rebuild
+#
+# add new install stuff here until ready to rebuild the base image
+#
+# end of temp instructions
+
+
+USER $user	
+WORKDIR /home/$user
+CMD ["/bin/zsh"]
+

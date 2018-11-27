@@ -1,0 +1,31 @@
+# HUMAN_FORMATTED_DATA
+# list one per line
+
+# these are basic filesystem items
+no 00 # normal
+fi 00 # file
+di 00 96 # directory
+ln 00 36 # link
+pi 40 33 # pipe
+so 00 35 #
+bd 40 33 01
+cd 40 33 01
+or 01 05 37 41
+mi 01 05 37 41
+ex 00 91 # executable
+*.ai 00 91 # adobe ill
+*.doc 00 91 # msword shit
+
+# data, such as .db, .csv
+*.csv 95
+*.dsv 95
+*.db 95
+*.sql 95
+*.meta 95
+# CONFS
+*.xml 95
+*.yaml 95
+*.yml 95
+*.conf 95
+# [a-z0-9]*rc
+
