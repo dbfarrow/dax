@@ -1,0 +1,24 @@
+# DAX config file for a bare tools enviroment. No working directory
+# will be mounted
+image: dfarrow/dax:latest
+
+features: 
+  - optdir
+  - cheatdir
+  - workdir
+
+optdir:
+  host: /Users/dfarrow/fatsec/opt
+  container: /home/dfarrow/opt
+
+cheatdir:
+  host: /Users/dfarrow/fatsec/cheat
+  container: /home/dfarrow/.cheat
+
+workdir:
+  container: /home/dfarrow/work
+
+msf:
+  host: /Users/dfarrow/.msf4
+  container: /home/dfarrow/.msf4
+
