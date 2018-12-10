@@ -21,31 +21,27 @@ def load_config():
 	with open(DAX_CONFIG, 'r') as deffile:
 		defaults = yaml.load(deffile)
 		defaults['envname'] = 'DAX'
-		defaults['cwd'] = os.environ['HOME']
 
-	# look for a .dax.yaml file in the current directory. If it doesn't
-	# exist, walk up the directory tree until we find one. 
 	cwd = os.getcwd()
-	cfgfile = ""
-	while (cwd != "/"):
+	if (not cwd.startswith(home)):
+		print "dax must be run from somewhere under your home dir"
+		exit(-1)
+	defaults['cwd'] = cwd
 
-		#print("looking for config file in {}".format(cwd))
-		cfgfile = "{}/.dax.yaml".format(cwd)
-		if os.path.isfile(cfgfile):
-			#print("config file is in {}".format(cfgfile))
-			with open(cfgfile, 'r') as ymlfile:
-				config = yaml.load(ymlfile)
-				config['envname'] = os.path.basename(cwd)
-			
-			# merge the defaults and the environment config together
-			# and return it
-			defaults['cwd'] = cwd
-			defaults.update(config)
-			return defaults
-		else:
-			# Otherwise, keep looking
-			cwd = os.path.dirname(cwd)
+	print("looking for config file in {}".format(cwd))
+	cfgfile = "{}/.dax.yaml".format(cwd)
+	config = {}
 
+	if os.path.isfile(cfgfile):
+		print("config file is in {}".format(cfgfile))
+		with open(cfgfile, 'r') as ymlfile:
+			config = yaml.load(ymlfile)
+
+	config['envname'] = cwd.replace(home, "").replace("/", "", 1).replace("/", "-")
+
+	# merge the defaults and the environment config together # and return it
+	defaults['cfgdir'] = cwd
+	defaults.update(config)
 	return defaults
 	
 def add_feature(feature, config):
@@ -86,7 +82,7 @@ def feature_workdir(config):
 	
 	cwd = config['cwd']
 	opts = []
-	if (cwd == os.environ['HOME']):
+	if (not cwd.startswith(os.environ['HOME'])):
 		print("DAX is running outside any specific environment... mounting /tmp as working dir")
 		tmppath = "/tmp/dax"
 		if (os.path.isdir(tmppath) == False):
