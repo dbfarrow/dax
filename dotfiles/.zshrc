@@ -26,3 +26,4 @@ export LS_COLORS='no=00:fi=00:di=36:ln=35:pi=30;44:so=35;44:do=35;44:bd=33;44:cd
 ENV_AUTH=fusion
 export EDITOR=/usr/bin/vi
 
+export GOPATH=~/work
