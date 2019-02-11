@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
 	ca-certificates \
 	curl \
 	default-jdk \
-	dnsutil \
+	dnsutils \
 	ftp \
 	gdb \
 	git \
@@ -24,10 +24,13 @@ RUN apt-get update && apt-get install -y \
 	man \
 	procps \
 	python-pip \
+	python3-pip \
 	python-virtualenv \
 	rbenv \
 	ruby-full \
+	socat \
 	sudo \
+	tcpdump \
 	tmux \
 	vim \
 	wget \
@@ -37,7 +40,8 @@ RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/conf
 	&& chmod 755 /tmp/msfinstall \
 	&& /tmp/msfinstall \
 	&& pip install pwntools \
-	&& pip install cheat
+	&& pip install cheat \
+	&& pip install awscli
 
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
 	&& useradd -u $euid -g $gid -m -s $shell $user \

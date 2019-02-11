@@ -114,6 +114,8 @@ def feature_X11(config):
 		'DISPLAY={}:0'.format(IP),
 		'--volume',
 		'/tmp/.X11-unix:/tmp/.X11-unix',
+		'-p',  
+		'8080:8080'
 	]
 	return opts
 
