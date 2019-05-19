@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import yaml
+from util import dax_print
 
 DAX_TMPL_FILE = './Dockerfile.tmpl'
 
@@ -31,27 +32,43 @@ def get_version():
 def get_dax_passwd():
 	
 	try:
+		# For the lazy among us, we can store the default password for the 
+		# container in the build dir.
 		pwfile = "./.daxpw"
 		stat = os.stat(pwfile)
 		if (os.stat(pwfile).st_mode == 33152):
-			print("file perms = {}".format(os.stat(pwfile).st_mode))
+			dax_print("[-]   read password from .daxpw")
 			with open("./.daxpw", "r") as vfile:
 				return vfile.readline().rsplit()[0]
 		else:
-			print("password file must be read only for the owner")
-			exit(-1)
+			dax_print("[!] password file must be read only for the owner")
 
 	except:
-		print("If you tire of typing in a password for dax, put it in {} and set the permissions to 0600... then try again".format(pwfile))
+		dax_print("[-]   if you tire of typing in a password for dax, put it in {} and set the permissions to 0600... then try again".format(pwfile))
 		return raw_input("Enter a password for the dax container:")
-		exit(-1)
+
+	# If we get here, there was a .daxpw file, it didn't have perms of 0600. When I put
+	# the exit in the else statement above, the exit() call appears to have raised
+	# an exception that was caught in the except clause... wierd. So here we are
+	exit(-1)
+
+#
+# I've noticed that not all systems user $USER for the current user name (looking at you Ubuntu).
+# So here's a little help not failing to get the current user's name.
+#
+def get_username():
+	try:
+		return os.environ['USER']
+	except:
+		return os.environ['LOGNAME']
+
 
 def get_user_info():
 
 	opts = []
 
 	opts.append('--build-arg')
-	opts.append('user={}'.format(os.environ['USER']))
+	opts.append('user={}'.format(get_username()))
 	opts.append('--build-arg')
 	opts.append('user_id={}'.format(os.geteuid()))
 	opts.append('--build-arg')
@@ -61,10 +78,12 @@ def get_user_info():
 
 def build_dockerfile():
 	
+	dax_print("[+] building Dockerfile from Dockerfile.tmpl and magic")
+
 	cmd = []
 	cmd.append('sed')
 	cmd.append('-e')
-	cmd.append("'s/$user/{}/g'".format(os.environ['USER']))
+	cmd.append("'s/$user/{}/g'".format(get_username()))
 	cmd.append('-e')
 	cmd.append("'s/$euid/{}/g'".format(os.geteuid()))
 	cmd.append('-e')
@@ -81,6 +100,8 @@ def build_dockerfile():
 
 def build_container():
 
+	dax_print("[+] building container")
+
 	# build the base command
 	cmd = []
 	cmd.append('docker')
@@ -94,6 +115,21 @@ def build_container():
 	
 	runcmd(cmd)
 
+def tag_container():
+	
+	cmd = []
+	cmd.append("docker")
+	cmd.append("rmi")
+	cmd.append("dfarrow/dax:latest")
+	runcmd(cmd)
+
+	cmd = []
+	cmd.append("docker")
+	cmd.append("tag")
+	cmd.append('dfarrow/dax:{}'.format(get_version()))
+	cmd.append("dfarrow/dax:latest")
+	runcmd(cmd)
+
 def cleanup():
 	
 	cmd = []
@@ -104,7 +140,7 @@ def cleanup():
 
 def runcmd(cmd):
 
-	print(' '.join(cmd))
+	dax_print("[-]   " + ' '.join(cmd))
 	if (args.testOnly != True):
 		if sys.version_info < (3, 7, 0):
 			os.system(' '.join(cmd))
@@ -122,5 +158,7 @@ if __name__ == "__main__":
 	args = parse_cmdline()
 	build_dockerfile()
 	build_container()
+	tag_container()
 	cleanup()
+	dax_print("[+] Commence to take over the world...")
 	

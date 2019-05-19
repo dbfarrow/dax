@@ -11,11 +11,13 @@ RUN apt-get update && apt-get install -y \
 	ca-certificates \
 	curl \
 	default-jdk \
+	openjdk-8-jre \
 	dnsutils \
 	ftp \
 	gdb \
 	git \
 	golang \
+	iproute2 \
 	locales \
 	lsb-release \
 	netcat \
@@ -41,7 +43,7 @@ RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/conf
 	&& /tmp/msfinstall \
 	&& pip install pwntools \
 	&& pip install cheat \
-	&& pip install awscli
+	&& pip3 install awscli
 
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
 	&& useradd -u $euid -g $gid -m -s $shell $user \
@@ -51,12 +53,11 @@ RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
 
 COPY --chown=$user:$gid dotfiles/ /home/$user/
 
-# move these instructions to the right place before the next complete rebuild
 #
 # add new install stuff here until ready to rebuild the base image
-#
-# end of temp instructions
+# move these instructions to the right place before the next complete rebuild
 
+# end of temp instructions
 
 USER $user	
 WORKDIR /home/$user

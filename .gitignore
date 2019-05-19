@@ -1,4 +1,8 @@
-dax2.7/
-dax3/
+venv-2.7/
+venv-3/
 .daxpw
 jchrome
+dotfiles/.aws/
+.daxpw
+*.pyc
+Dockerfile

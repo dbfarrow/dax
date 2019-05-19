@@ -1,24 +1,30 @@
-# DAX config file for a bare tools enviroment. No working directory
-# will be mounted
+# DAX config file for a bare tools enviroment. The current working dir
+# will be mounted as the work directory. 
+#
+# If there are features that you want to define to be available to any 
+# instance then define their configuration here and reference them
+# in the local .dax.yaml file feature key or on the command line 
+# with -f
+#
+
 image: dfarrow/dax:latest
 
 features: 
-  - optdir
-  - cheatdir
   - workdir
+  - optdir
+
+workdir:
+  container: /home/dfarrow/work
 
 optdir:
   host: /Users/dfarrow/fatsec/opt
   container: /home/dfarrow/opt
 
-cheatdir:
-  host: /Users/dfarrow/fatsec/cheat
-  container: /home/dfarrow/.cheat
-
-workdir:
-  container: /home/dfarrow/work
-
 msf:
   host: /Users/dfarrow/.msf4
   container: /home/dfarrow/.msf4
+
+awsdir:
+  host: /Users/dfarrow/opt/dax/dotfiles/.aws
+  container: /home/dfarrow/.aws
 
