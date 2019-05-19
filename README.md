@@ -3,14 +3,14 @@
 Dockerizes my security tools*.
 
 1. [Prerequisites](#prerequisites)
-2. [Building](#building)
+1. [Building](#building)
   1. [Dotfiles](#dotfiles) 
-3. [Running](#running)
+1. [Running](#running)
   1. [Usage](#usage)
-  2. [Configuration](#configuration)
-  3. [Features](#features)
-  4. [Adding Features](#adding-features)
-4. [Origins](#origins)
+  1. [Configuration](#configuration)
+  1. [Features](#features)
+  1. [Adding Features](#adding-features)
+1. [Origins](#origins)
 
 
 Dax is motivated by the ideal of infrastructure as code: It should be a simple and repeatable process to create a consistent working environment on a brand new machine. Such a process makes recovery from system failure a quick and simple thing.
@@ -56,14 +56,14 @@ Run the build script
 [+] building Dockerfile from Dockerfile.tmpl and magic
 [-]   if you tire of typing in a password for dax, put it in ./.daxpw and set the permissions to 0600... then try again
 Enter a password for the dax container: <types: mysupersecretpassword>
-[-]   sed -e 's/$user/dfarrow/g' -e 's/$euid/501/g' -e 's/$gid/20/g' -e 's/$passwd/mysupersecretpassword/g' -e 's/$shell/\/bin\/zsh/g' ./Dockerfile.tmpl > ./Dockerfile
+[-]   sed -e 's/$user/dfarrow/g' -e 's/$euid/501/g' -e 's/$gid/20/g' -e 's/$passwd/mysupersecretpassword/g' -e 's/$shell/\/bin\/zsh/g' ./Dockerfile.tmpl > ./Dockerfile
 [+] building container
-[-]   docker build --build-arg user=dfarrow --build-arg user_id=501 --build-arg user_gid=20 -t dfarrow/dax:1.0 .
+[-]  docker build --build-arg user=dfarrow --build-arg user_id=501 --build-arg user_gid=20 -t dfarrow/dax:1.0 .
 <snip>
 [-]   docker rmi dfarrow/dax:latest
 [-]   docker tag dfarrow/dax:1.0 dfarrow/dax:latest
 [-]   /bin/rm -f ./Dockerfile
-[+] Commence to take over the world...
+[+] Commence to take over the world...
 
 ```
 The Dockerfile that builds the dax image is built from the Dockerfile.tmpl file (because of technical challenges I could not overcome then and cannot remember now).
@@ -127,7 +127,7 @@ Dax has a global configuration file that defines the base image for the environm
 
 #### ~/.dax.yaml
 
-```
+```yaml
 # DAX config file for a bare tools enviroment. The current working dir
 # will be mounted as the work directory. 
 #
@@ -204,7 +204,7 @@ By default, when starting dax, the current directory will be mapped to `~/work` 
 
 Example config:
 
-```
+```yaml
 workdir:
   container: /home/dfarrow/work
 ```
@@ -219,7 +219,7 @@ Use this feature to map into the dax instances tools that don't require installa
 
 Example config:
 
-```
+```yaml
 optdir:
   host: /Users/dfarrow/fatsec/opt
   container: /home/dfarrow/opt
@@ -238,7 +238,7 @@ By default, no ports are exposed from the container when it starts. To expose a 
 
 Example config:
 
-```
+```yaml
 ports:
   - 8000:80
   - 8443:443
@@ -255,7 +255,7 @@ This feature makes your AWS client access tokens available to the running contai
 
 Example config:
 
-```
+```yaml
 awsdir:
   host: /Users/dfarrow/opt/dax/dotfiles/.aws
   container: /home/dfarrow/.aws
@@ -276,7 +276,7 @@ The feature also exposes a single port, `4444`, by default. Use the `-p` option 
 
 Example config:
 
-```
+```yaml
 msf:
   host: /Users/dfarrow/.msf4
   container: /home/dfarrow/.msf4
@@ -302,7 +302,7 @@ On MacOS, the following command does the trick: `xhost + <hostip>`
 
 To add a new feature to dax, implement a function in `daxrun.py` following the naming and calling convention shown below:
 
-```
+```python
 def feature_hosttmp(config):
 	opts = []
 	opts.append("-v")
