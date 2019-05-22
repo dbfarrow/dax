@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
 	gdb \
 	git \
 	golang \
+	inetutils-ping \
 	iproute2 \
 	locales \
 	lsb-release \
@@ -56,7 +57,6 @@ COPY --chown=$user:$gid dotfiles/ /home/$user/
 #
 # add new install stuff here until ready to rebuild the base image
 # move these instructions to the right place before the next complete rebuild
-
 # end of temp instructions
 
 USER $user	

@@ -2,7 +2,6 @@ venv-2.7/
 venv-3/
 .daxpw
 jchrome
-dotfiles/.aws/
 .daxpw
 *.pyc
 Dockerfile

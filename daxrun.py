@@ -92,6 +92,10 @@ def feature_aws(config):
 	dax_print("[!]   a future version of DAX will support only exposing STS tokens in the container.")
 	return add_volume(config, "awsdir")
 
+def feature_ssh(config):
+	dax_print("[!]   WARNING: your SSH keys are available inside the dax container.")
+	return add_volume(config, "sshdir")
+
 def feature_workdir(config):
 	
 	cwd = config['cwd']
