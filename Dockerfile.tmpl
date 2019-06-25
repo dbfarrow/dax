@@ -47,12 +47,12 @@ RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/conf
 	&& pip3 install awscli
 
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
-	&& useradd -u $euid -g $gid -m -s $shell $user \
+	&& useradd -m -s $shell $user \
 	&& usermod -a -G sudo $user \
 	&& echo $user:$passwd | chpasswd \
 	&& echo "done setting up user"
 
-COPY --chown=$user:$gid dotfiles/ /home/$user/
+COPY --chown=$user dotfiles/ /home/$user/
 
 #
 # add new install stuff here until ready to rebuild the base image
