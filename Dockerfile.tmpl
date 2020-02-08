@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y \
 	tcpdump \
 	tmux \
 	vim \
+	virtualenv \
 	wget \
 	zsh
 
@@ -55,6 +56,11 @@ RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
 	&& echo "done setting up user"
 
 COPY --chown=$user dotfiles/ /home/$user/
+
+RUN apt-get install -y \
+	openvpn && \
+    mknod /dev/net/tun c 10 200 && \
+    chmod 600 /dev/net/tun 
 
 #
 # add new install stuff here until ready to rebuild the base image

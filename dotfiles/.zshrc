@@ -27,3 +27,4 @@ ENV_AUTH=fusion
 export EDITOR=/usr/bin/vi
 
 export GOPATH=~/work
+export PATH=$PATH:~/dax

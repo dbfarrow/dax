@@ -96,6 +96,14 @@ def feature_ssh(config):
 	dax_print("[!]   WARNING: your SSH keys are available inside the dax container.")
 	return add_volume(config, "sshdir")
 
+def feature_ovpn(config):
+	dax_print("[!]   WARNING: ovpn feature not implemented yet.")
+	opts = []
+	opts.append("--cap-add=NET_ADMIN")
+	opts.append("--device=/dev/net/tun")
+	opts.append("--sysctl net.ipv6.conf.all.disable_ipv6=0")
+	return opts
+
 def feature_workdir(config):
 	
 	cwd = config['cwd']
