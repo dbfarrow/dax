@@ -46,7 +46,6 @@ RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/conf
 	&& chmod 755 /tmp/msfinstall \
 	&& /tmp/msfinstall \
 	&& pip install pwntools \
-	&& pip install cheat \
 	&& pip3 install awscli
 
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
@@ -57,10 +56,10 @@ RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
 
 COPY --chown=$user dotfiles/ /home/$user/
 
-RUN apt-get install -y \
-	openvpn && \
-    mknod /dev/net/tun c 10 200 && \
-    chmod 600 /dev/net/tun 
+#RUN apt-get install -y \
+	#openvpn && \
+    #mknod /dev/net/tun c 10 200 && \
+    #chmod 600 /dev/net/tun 
 
 #
 # add new install stuff here until ready to rebuild the base image

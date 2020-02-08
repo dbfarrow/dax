@@ -21,7 +21,9 @@ cat <<EOF > ~dfarrow/finish.sh
 #!/bin/bash
 
 git clone git@github.com:dbfarrow/dax.git
+cd dax && git checkout ansible && cd ..
 git clone git@github.com:dbfarrow/shello-world.git
+cd shello-world && git checkout shared-vpc && cd ..
 
 cat <<FIN > ~dfarrow/.dax.yaml
 # DAX config file for a bare tools enviroment. The current working dir
@@ -37,38 +39,24 @@ image: dfarrow/dax:latest
 
 features: 
   - workdir
-  - optdir
+  - ssh
 
 workdir:
   container: /home/dfarrow/work
-
-optdir:
-  host: /home/dfarrow/fatsec/opt
-  container: /home/dfarrow/opt
-
-msf:
-  host: /home/dfarrow/.msf4
-  container: /home/dfarrow/.msf4
-
-awsdir:
-  host: /home/dfarrow/.aws
-  container: /home/dfarrow/.aws
 
 sshdir:
   host: /home/dfarrow/.ssh
   container: /home/dfarrow/.ssh
 
-gpgdir:
-  host: /home/dfarrow/.gnupg
-  container: /home/dfarrow/.gnupg
 FIN
-
-chown dfarrow:dfarrow ~dfarrow/finish.sh
-chmod 0755 ~dfarrow/finish.sh
 
 cd dax && ./daxbuild.py
 
 EOF
+
+chown dfarrow:dfarrow ~dfarrow/finish.sh
+chmod 0755 ~dfarrow/finish.sh
+
 
 echo ""
 echo ""
