@@ -14,17 +14,20 @@ RUN apt-get update && apt-get install -y \
 	openjdk-8-jre \
 	dnsutils \
 	ftp \
+	gcc-multilib \
 	gdb \
 	git \
 	golang \
 	inetutils-ping \
 	iproute2 \
+    jq \
 	locales \
 	lsb-release \
 	netcat \
 	net-tools \
 	nmap \
 	man \
+	pass \
 	procps \
 	python-pip \
 	python3-pip \
@@ -36,23 +39,36 @@ RUN apt-get update && apt-get install -y \
 	tcpdump \
 	tmux \
 	vim \
+	virtualenv \
 	wget \
 	zsh
 
+# install metasploit and pwntools
 RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > /tmp/msfinstall \
 	&& chmod 755 /tmp/msfinstall \
 	&& /tmp/msfinstall \
-	&& pip install pwntools \
-	&& pip install cheat \
-	&& pip3 install awscli
+	&& pip install pwntools
 
+# install AWS CLI v2
+RUN apt-get install -y libssl-dev libffi-dev \
+    && cd /tmp \ 
+    && curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
+    && unzip awscliv2.zip \
+    && ./aws/install
+
+# setup my user
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
-	&& useradd -u $euid -g $gid -m -s $shell $user \
+	&& useradd -m -s $shell $user \
 	&& usermod -a -G sudo $user \
 	&& echo $user:$passwd | chpasswd \
 	&& echo "done setting up user"
 
-COPY --chown=$user:$gid dotfiles/ /home/$user/
+COPY --chown=$user dotfiles/ /home/$user/
+
+#RUN apt-get install -y \
+	#openvpn && \
+    #mknod /dev/net/tun c 10 200 && \
+    #chmod 600 /dev/net/tun 
 
 #
 # add new install stuff here until ready to rebuild the base image
@@ -60,6 +76,15 @@ COPY --chown=$user:$gid dotfiles/ /home/$user/
 # end of temp instructions
 
 USER $user	
+
+# install Azure CLI - must be installed as the user...
+RUN cd tmp/ \
+    && curl -L https://aka.ms/InstallAzureCli -o a \
+    && echo "\n\n\n\n" > ./b \
+    && /bin/sed -e 's|/dev/tty|./b|' -i a \
+    && /bin/bash a \
+    && rm a b
+
 WORKDIR /home/$user
 CMD ["/bin/zsh"]
 

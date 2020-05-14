@@ -28,3 +28,11 @@ awsdir:
   host: /Users/dfarrow/opt/dax/dotfiles/.aws
   container: /home/dfarrow/.aws
 
+sshdir:
+  host: /Users/dfarrow/opt/dax/dotfiles/.ssh
+  container: /home/dfarrow/.ssh
+
+gpgdir:
+  host: /Users/dfarrow/opt/dax/dotfiles/.gnupg
+  container: /home/dfarrow/.gnupg
+
