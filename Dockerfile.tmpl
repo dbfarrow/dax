@@ -4,6 +4,8 @@
 
 FROM ubuntu:latest
 
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y \
 	apt-utils \
 	apt-transport-https \
@@ -29,9 +31,8 @@ RUN apt-get update && apt-get install -y \
 	man \
 	pass \
 	procps \
-	python-pip \
 	python3-pip \
-	python-virtualenv \
+	python3-virtualenv \
 	rbenv \
 	ruby-full \
 	socat \
@@ -57,7 +58,8 @@ RUN apt-get install -y libssl-dev libffi-dev \
     && ./aws/install
 
 # setup my user
-RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen && locale-gen \
+RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
+    && locale-gen \
 	&& useradd -m -s $shell $user \
 	&& usermod -a -G sudo $user \
 	&& echo $user:$passwd | chpasswd \

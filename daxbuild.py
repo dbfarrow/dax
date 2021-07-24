@@ -9,7 +9,7 @@ import os.path
 import socket
 import subprocess
 import sys
-import yaml
+#import yaml
 from util import dax_print
 
 DAX_TMPL_FILE = './Dockerfile.tmpl'
