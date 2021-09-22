@@ -9,7 +9,7 @@ import os.path
 import socket
 import subprocess
 import sys
-import yaml
+import json
 from util import dax_print
 
 def load_config():
@@ -17,8 +17,8 @@ def load_config():
 	# load the system defaults from $HOME/.dax.yaml. This file contains
 	# the base image and features to use by default. It also defines
 	# the default parameters for other builtin features
-	with open("{}/.dax.yaml".format(os.environ['HOME']), 'r') as deffile:
-		defaults = yaml.load(deffile)
+	with open("{}/.dax.json".format(os.environ['HOME']), 'r') as deffile:
+		defaults = json.load(deffile)
 		defaults['envname'] = 'DAX'
 
 	# Dax will launch the specified container with the current directory
