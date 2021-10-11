@@ -1,0 +1,20 @@
+#!/bin/bash
+
+DEBUG=0
+
+# This script must be run from ~/work/bnsec-auto-matator
+DIR=~/work/bnsec-auto-matator
+echo "[+] changing directory to: $DIR"
+cd "$DIR"
+echo "[+] proceeding to rock your world"
+
+if [ ! -d "./scanners/node_modules" ]; then
+    echo "Before this will work you need to copy the node_modules out of the matator image to your local disk."
+    exit -1
+fi
+
+docker run --rm -it \
+    -v "$HOME/.aws/credentials:/root/.aws/credentials" \
+    -v $(pwd):/app \
+    --entrypoint /bin/zsh dax:matator 
+
