@@ -45,10 +45,10 @@ RUN apt-get update && apt-get install -y \
 	zsh
 
 # install metasploit and pwntools
-RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > /tmp/msfinstall \
-	&& chmod 755 /tmp/msfinstall \
-	&& /tmp/msfinstall \
-	&& pip install pwntools
+#RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > /tmp/msfinstall \
+#	&& chmod 755 /tmp/msfinstall \
+#	&& /tmp/msfinstall \
+#	&& pip install pwntools
 
 # install AWS CLI v2
 RUN apt-get install -y libssl-dev libffi-dev \
@@ -65,12 +65,9 @@ RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
 	&& echo $user:$passwd | chpasswd \
 	&& echo "done setting up user"
 
+RUN pip install scoutsuite
 COPY --chown=$user dotfiles/ /home/$user/
 
-#RUN apt-get install -y \
-	#openvpn && \
-    #mknod /dev/net/tun c 10 200 && \
-    #chmod 600 /dev/net/tun 
 
 #
 # add new install stuff here until ready to rebuild the base image
@@ -80,12 +77,12 @@ COPY --chown=$user dotfiles/ /home/$user/
 USER $user	
 
 # install Azure CLI - must be installed as the user...
-RUN cd tmp/ \
-    && curl -L https://aka.ms/InstallAzureCli -o a \
-    && echo "\n\n\n\n" > ./b \
-    && /bin/sed -e 's|/dev/tty|./b|' -i a \
-    && /bin/bash a \
-    && rm a b
+#RUN cd tmp/ \
+#    && curl -L https://aka.ms/InstallAzureCli -o a \
+#    && echo "\n\n\n\n" > ./b \
+#    && /bin/sed -e 's|/dev/tty|./b|' -i a \
+#    && /bin/bash a \
+#    && rm a b
 
 WORKDIR /home/$user
 CMD ["/bin/zsh"]

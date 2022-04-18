@@ -28,3 +28,13 @@ export EDITOR=/usr/bin/vi
 
 export GOPATH=~/work
 export PATH=$PATH:~/dax:~/bin
+
+function aws_login() {
+    eval $(~/opt/aws_login.py $*)
+}
+
+function aws_logout() {
+    unset AWS_ACCESS_KEY_ID
+    unset AWS_SECRET_ACCESS_KEY
+    unset AWS_SESSION_TOKEN
+}
