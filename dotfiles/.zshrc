@@ -12,8 +12,8 @@ autoload -Uz compinit
 compinit
 # End of lines added by compinstall
 
-alias grep='grep --color --exclude="*\.svn*" -I'
-alias egrep='egrep --color --exclude="*\.svn*" -I'
+alias grep='grep --color -I'
+alias egrep='egrep --color -I'
 alias ls='ls -lhFG --color=auto'
 alias l='ls -lFG --color=auto'
 alias la='ls -alFG --color=auto'
@@ -38,3 +38,10 @@ function aws_logout() {
     unset AWS_SECRET_ACCESS_KEY
     unset AWS_SESSION_TOKEN
 }
+
+#if mac...
+#export LSCOLORS='gxfxcxdxbxGxDxabagacad'
+#alias ls='ls -lhFG'
+#alias l='ls -lFG'
+#alias la='ls -alFG'
+
