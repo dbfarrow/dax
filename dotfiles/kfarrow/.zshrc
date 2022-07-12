@@ -14,7 +14,7 @@ compinit
 
 alias grep='grep --color -I'
 alias egrep='egrep --color -I'
-alias ls='ls -lhFG --color=auto'
+alias ls='ls -lah --color=auto'
 alias l='ls -lFG --color=auto'
 alias la='ls -alFG --color=auto'
 alias nocolor='sed -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[m|K]//g"'
