@@ -5,3 +5,6 @@ jchrome
 .daxpw
 *.pyc
 Dockerfile
+
+venv
+dotfiles/kfarrow/.config/cheat

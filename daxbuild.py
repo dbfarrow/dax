@@ -45,7 +45,7 @@ def get_dax_passwd():
 
 	except:
 		dax_print("[-]   if you tire of typing in a password for dax, put it in {} and set the permissions to 0600... then try again".format(pwfile))
-		return raw_input("Enter a password for the dax container:")
+		return input("Enter a password for the dax container:")
 
 	# If we get here, there was a .daxpw file, it didn't have perms of 0600. When I put
 	# the exit in the else statement above, the exit() call appears to have raised
@@ -83,13 +83,16 @@ def build_dockerfile():
 	cmd = []
 	cmd.append('sed')
 	cmd.append('-e')
-	cmd.append("'s/$user/{}/g'".format(get_username()))
+	#cmd.append("'s/\$user/{}/g'".format(get_username()))
+	cmd.append(f"'s/$user/{get_username()}/g'")
 	cmd.append('-e')
 	cmd.append("'s/$euid/{}/g'".format(os.geteuid()))
 	cmd.append('-e')
 	cmd.append("'s/$gid/{}/g'".format(os.getgid()))
 	cmd.append('-e')
 	cmd.append("'s/$passwd/{}/g'".format(get_dax_passwd()))
+	cmd.append('-e')
+	cmd.append("'s/$home/{}/g'".format(os.path.expanduser('~').replace("/","\/")))
 	cmd.append('-e')
 	#cmd.append("'s/$shell/{}/g'".format(os.environ['SHELL']))
 	cmd.append("'s/$shell/\/bin\/{}/g'".format('zsh'))
@@ -110,7 +113,7 @@ def build_container():
 	if (args.clean):
 		cmd.append('--no-cache')
 	cmd.append('-t')
-	cmd.append('dfarrow/dax:{}'.format(get_version()))
+	cmd.append(f'{get_username()}/dax:{get_version()}')
 	cmd.append('.')
 	
 	runcmd(cmd)
@@ -120,14 +123,14 @@ def tag_container():
 	cmd = []
 	cmd.append("docker")
 	cmd.append("rmi")
-	cmd.append("dfarrow/dax:latest")
+	cmd.append(f"{get_username()}/dax:latest")
 	runcmd(cmd)
 
 	cmd = []
 	cmd.append("docker")
 	cmd.append("tag")
-	cmd.append('dfarrow/dax:{}'.format(get_version()))
-	cmd.append("dfarrow/dax:latest")
+	cmd.append(f'{get_username()}/dax:{get_version()}')
+	cmd.append(f"{get_username()}/dax:latest")
 	runcmd(cmd)
 
 def cleanup():
@@ -145,7 +148,9 @@ def runcmd(cmd):
 		if sys.version_info < (3, 7, 0):
 			os.system(' '.join(cmd))
 		else:
-			subprocess.run(cmd)
+			# i don't know why this doesn't work. cutting and pasting the output works just fine.
+			#subprocess.run(cmd)
+			os.system(' '.join(cmd))
 
 
 

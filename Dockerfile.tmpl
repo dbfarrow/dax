@@ -7,48 +7,55 @@ FROM ubuntu:latest
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
-	apt-utils \
-	apt-transport-https \
-	build-essential \
-	ca-certificates \
-	curl \
-	default-jdk \
-	openjdk-8-jre \
-	dnsutils \
-	ftp \
-	gcc-multilib \
-	gdb \
-	git \
-	golang \
-	inetutils-ping \
-	iproute2 \
+    apt-utils \
+    apt-transport-https \
+    build-essential \
+    ca-certificates \
+    curl \
+#   default-jdk \
+#   openjdk-8-jre \
+    dnsutils \
+    ftp \
+#   gcc-multilib \
+#   gdb \
+    git \
+    golang \
+    inetutils-ping \
+    iproute2 \
     jq \
-	locales \
-	lsb-release \
-	netcat \
-	net-tools \
-	nmap \
-	man \
-	pass \
-	procps \
-	python3-pip \
-	python3-virtualenv \
-	rbenv \
-	ruby-full \
-	socat \
-	sudo \
-	tcpdump \
-	tmux \
-	vim \
-	virtualenv \
-	wget \
-	zsh
+    locales \
+    lsb-release \
+    netcat \
+    net-tools \
+    nmap \
+    man \
+    pass \
+    procps \
+    python3-pip \
+    python3-virtualenv \
+    rbenv \
+    ruby-full \
+    socat \
+    sudo \
+    tcpdump \
+    tmux \
+    vim \
+    virtualenv \
+    wget \
+    zsh
+
+# install cheat
+RUN cd /tmp \
+  && wget https://github.com/cheat/cheat/releases/download/4.2.5/cheat-linux-amd64.gz \
+  && gunzip cheat-linux-amd64.gz \
+  && chmod +x cheat-linux-amd64 \
+  && sudo mv cheat-linux-amd64 /usr/local/bin/cheat
 
 # install metasploit and pwntools
 #RUN curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > /tmp/msfinstall \
-#	&& chmod 755 /tmp/msfinstall \
-#	&& /tmp/msfinstall \
-#	&& pip install pwntools
+#    && chmod 755 /tmp/msfinstall \
+#    && /tmp/msfinstall \
+#    && pip install pwntools
 
 # install AWS CLI v2
 RUN apt-get install -y libssl-dev libffi-dev \
@@ -60,13 +67,13 @@ RUN apt-get install -y libssl-dev libffi-dev \
 # setup my user
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
     && locale-gen \
-	&& useradd -m -s $shell $user \
-	&& usermod -a -G sudo $user \
-	&& echo $user:$passwd | chpasswd \
-	&& echo "done setting up user"
+    && useradd -m -s $shell $user \
+    && usermod -a -G sudo $user \
+    && echo $user:$passwd | chpasswd \
+    && echo "done setting up user"
 
 RUN pip install scoutsuite
-COPY --chown=$user dotfiles/ /home/$user/
+COPY --chown=$user dotfiles/$user/ /home/$user/
 
 
 #
@@ -74,15 +81,15 @@ COPY --chown=$user dotfiles/ /home/$user/
 # move these instructions to the right place before the next complete rebuild
 # end of temp instructions
 
-USER $user	
+USER $user    
 
 # install Azure CLI - must be installed as the user...
-#RUN cd tmp/ \
-#    && curl -L https://aka.ms/InstallAzureCli -o a \
-#    && echo "\n\n\n\n" > ./b \
-#    && /bin/sed -e 's|/dev/tty|./b|' -i a \
-#    && /bin/bash a \
-#    && rm a b
+RUN cd tmp/ \
+    && curl -L https://aka.ms/InstallAzureCli -o a \
+    && echo "\n\n\n\n" > ./b \
+    && /bin/sed -e 's|/dev/tty|./b|' -i a \
+    && /bin/bash a \
+    && rm a b
 
 WORKDIR /home/$user
 CMD ["/bin/zsh"]
