@@ -16,6 +16,7 @@ COPY ./dotfiles/.mylscolors /root/.mylscolors
 COPY ./dotfiles/.tmux.conf /root/.tmux.conf
 COPY ./dotfiles/.vimrc /root/.vimrc
 COPY ./dotfiles/.zshrc /root/.zshrc
+COPY ./dotfiles/desert.vim /root/.vim/colors/desert.vim
 
 CMD ["/bin/zsh"]
 

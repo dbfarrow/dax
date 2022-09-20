@@ -12,6 +12,7 @@ autoload -Uz compinit
 compinit
 # End of lines added by compinstall
 
+alias vi=vim
 alias grep='grep --color -I'
 alias egrep='egrep --color -I'
 alias ls='ls -lhFG --color=auto'

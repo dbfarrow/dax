@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # script to instantiate a DAX container tailored for a specific environment
 #
@@ -37,12 +37,12 @@ def load_config():
 	# run from. The settings in the current directory will override the 
 	# settings from the global config file	
 	dax_print("[+] looking for config file in {}".format(cwd))
-	cfgfile = "{}/.dax.yaml".format(cwd)
+	cfgfile = "{}/.dax.json".format(cwd)
 	config = {}
 	if os.path.isfile(cfgfile):
 		dax_print("[-]   config file is in {}".format(cfgfile))
 		with open(cfgfile, 'r') as ymlfile:
-			config = yaml.load(ymlfile)
+			config = json.load(ymlfile)
 
 	config['envname'] = cwd.replace(home, "").replace("/", "", 1).replace("/", "-")
 	features = None
