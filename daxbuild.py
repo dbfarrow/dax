@@ -101,7 +101,6 @@ RUN apt-get update && apt-get install -y \\
 	openjdk-8-jre \\
 	dnsutils \\
 	ftp \\
-	gcc-multilib \\
 	gdb \\
 	git \\
 	golang \\
