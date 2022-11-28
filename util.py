@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 
 def dax_print(msg):
 
