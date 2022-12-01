@@ -27,6 +27,7 @@ if __name__ == '__main__':
     os.unsetenv('AWS_SESSION_TOKEN')
 
     serial = 'arn:aws:iam::276883211366:mfa/'
+    serial = 'arn:aws:iam::460352771856:mfa/'
     serial += user
 
     #print('Enter your MFA code: ', end='')

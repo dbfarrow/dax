@@ -45,3 +45,4 @@ function aws_logout() {
 #alias l='ls -lFG'
 #alias la='ls -alFG'
 
+alias getcode="jq -r '.cells[] | select(.cell_type |contains(\"code\")) | .source[]'"
