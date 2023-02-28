@@ -52,21 +52,23 @@ pip install -r requirements.txt
 Run the build script
 
 ```
-./daxbuild.py
-[+] building Dockerfile from Dockerfile.tmpl and magic
+[davefarrow@RCM-X36W4YWF7: /Users/davefarrow/opt/dax] % daxbuild.py
+[+] building Dockerfile from inline dockerfile and magic
 [-]   if you tire of typing in a password for dax, put it in ./.daxpw and set the permissions to 0600... then try again
-Enter a password for the dax container: <types: mysupersecretpassword>
-[-]   sed -e 's/$user/dfarrow/g' -e 's/$euid/501/g' -e 's/$gid/20/g' -e 's/$passwd/mysupersecretpassword/g' -e 's/$shell/\/bin\/zsh/g' ./Dockerfile.tmpl > ./Dockerfile
+Enter a password for the dax container:<redacted>
 [+] building container
-[-]  docker build --build-arg user=dfarrow --build-arg user_id=501 --build-arg user_gid=20 -t dfarrow/dax:1.0 .
+[-]   docker build --build-arg user=davefarrow --build-arg user_id=502 --build-arg user_gid=20 --platform=linux/amd64 -t dfarrow/dax:1.0 .
+[+] Building 67.0s (12/12) FINISHED
 <snip>
+Use 'docker scan' to run Snyk tests against images to find vulnerabilities and learn how to fix them
 [-]   docker rmi dfarrow/dax:latest
+Untagged: dfarrow/dax:latest
+Deleted: sha256:6cfabbafba3ce8e43a87f5e99d2a8b090a0926f7900aea845838b3c510d0be9f
 [-]   docker tag dfarrow/dax:1.0 dfarrow/dax:latest
-[-]   /bin/rm -f ./Dockerfile
 [+] Commence to take over the world...
 
 ```
-The Dockerfile that builds the dax image is built from the Dockerfile.tmpl file (because of technical challenges I could not overcome then and cannot remember now).
+The Dockerfile that builds the dax image is built from the inline dockerfile file (because of technical challenges I could not overcome then and cannot remember now).
 
 The dax container is created to match the machine it was built on. For eamples, if your username is leethaxor and your userid is 31337, then the image will contain a user leethaxor with a userid of 31337. The user will be a member of the sudo group. The build script will prompt you for as password to set for the user. You will need to know this password in order to sudo in the container.
 

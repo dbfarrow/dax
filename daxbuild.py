@@ -76,7 +76,7 @@ def get_user_info():
 
 def build_dockerfile():
     
-    dax_print("[+] building Dockerfile from Dockerfile.tmpl and magic")
+    dax_print("[+] building Dockerfile from inline dockerfile and magic")
 
     with open('./Dockerfile', 'w') as df:
         user = get_username()
@@ -149,7 +149,7 @@ RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \\
 	&& echo {user}:{passwd} | chpasswd \\
 	&& echo "done setting up user"
 
-RUN pip install scoutsuite
+#RUN pip install scoutsuite
 COPY --chown={user} dotfiles/ /home/{user}/
 
 
@@ -168,6 +168,10 @@ USER {user}
 #    && /bin/bash a \\
 #    && rm a b
 
+# install rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs >> /tmp/sh.rustup.rs \\
+    && sh /tmp/sh.rustup.rs -y
+
 WORKDIR /home/{user}
 CMD ["/bin/zsh"]
 ''')
@@ -183,6 +187,7 @@ def build_container():
     cmd.append('docker')
     cmd.append('build')
     cmd.extend(get_user_info())
+    cmd.append('--platform=linux/amd64')
     if (args.clean):
         cmd.append('--no-cache')
     cmd.append('-t')
