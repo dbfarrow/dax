@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import sys
 import socket as _socket
@@ -231,12 +232,69 @@ def cmd_build(args):
     dax_print("[+] Commence to take over the world...")
 
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-t', dest='test_only', action='store_true')
-    parser.add_argument('command')
-    parser.add_argument('-c', dest='clean', action='store_true')
+def cmd_run(args):
+    config = load_config()
+    username = _get_username()
+    config['_container_home'] = '/home/{}'.format(username)
+
+    name = config['envname']
+    cmd = [
+        'docker', 'run', '-it', '--rm',
+        '--platform=linux/amd64',
+        '--name', name,
+        '-h', '{}.fatsec.docker'.format(name),
+    ]
+
+    features = list(config['features'])
+    if args.features:
+        features.extend(args.features.split(','))
+
+    if args.ports:
+        config.setdefault('ports', []).extend(args.ports)
+        if 'ports' not in features:
+            features.append('ports')
+
+    for feature in features:
+        cmd.extend(_add_feature(feature, config))
+
+    cmd.append(config['image'])
+
+    dax_print("[+] running: " + ' '.join(cmd))
+    if not args.test_only:
+        subprocess.run(cmd)
+
+
+def cmd_features(args):
+    _print_features()
+
+
+def main():
+    parser = argparse.ArgumentParser(description='DAX - Docker-based environment manager')
+    parser.add_argument('-t', dest='test_only', action='store_true',
+                        help='test only - print the docker command and exit')
+
+    subparsers = parser.add_subparsers(dest='command', required=True)
+
+    build_p = subparsers.add_parser('build', help='Build the dax Docker image')
+    build_p.add_argument('-c', dest='clean', action='store_true',
+                         help='clean build - do not use cached images')
+
+    run_p = subparsers.add_parser('run', help='Launch a dax container')
+    run_p.add_argument('-f', dest='features', help='comma-separated features to include')
+    run_p.add_argument('-p', dest='ports', action='append',
+                       help='port mapping host:container (repeatable)')
+
+    subparsers.add_parser('features', help='List available features')
+
     args = parser.parse_args()
+
     if args.command == 'build':
         cmd_build(args)
+    elif args.command == 'run':
+        cmd_run(args)
+    elif args.command == 'features':
+        cmd_features(args)
+
+
+if __name__ == '__main__':
+    main()
