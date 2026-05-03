@@ -14,7 +14,7 @@ def _write_yaml(path, data):
 def test_load_config_reads_home_defaults(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     home.mkdir()
-    workdir = tmp_path / 'work'
+    workdir = tmp_path / 'home' / 'work'
     workdir.mkdir()
 
     defaults = {
