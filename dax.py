@@ -3,6 +3,7 @@
 import os
 import sys
 import socket as _socket
+import subprocess
 from pathlib import Path
 import yaml
 from util import dax_print
@@ -164,3 +165,78 @@ def _print_features():
     for name in sorted(globals()):
         if name.startswith('feature_'):
             dax_print("\t{}".format(name[len('feature_'):]))
+
+
+def _get_version():
+    with open(Path(__file__).parent / 'VERSION', 'r') as f:
+        return f.readline().split()[0]
+
+
+def _get_dax_passwd():
+    pwfile = Path(__file__).parent / '.daxpw'
+    try:
+        mode = os.stat(pwfile).st_mode
+        if oct(mode)[-4:] == '0600':
+            dax_print("[-]   reading password from .daxpw")
+            return pwfile.read_text().split()[0]
+        else:
+            dax_print("[!] .daxpw must have permissions 0600")
+            sys.exit(-1)
+    except FileNotFoundError:
+        dax_print("[-]   if you tire of typing a password, put it in .daxpw with chmod 0600")
+        return input("Enter a password for the dax container: ")
+
+
+def _get_user_build_args():
+    username = _get_username()
+    return [
+        '--build-arg', 'user={}'.format(username),
+        '--build-arg', 'user_id={}'.format(os.geteuid()),
+        '--build-arg', 'user_gid={}'.format(os.getgid()),
+    ]
+
+
+def _runcmd(cmd, test_only=False):
+    dax_print("[-]   " + ' '.join(cmd))
+    if not test_only:
+        subprocess.run(cmd)
+
+
+def cmd_build(args):
+    dax_print("[+] building Dockerfile from template")
+    user = _get_username()
+    shell = os.environ.get('SHELL', '/bin/zsh')
+    passwd = _get_dax_passwd()
+
+    dockerfile = render_dockerfile(user, shell, passwd)
+    with open('Dockerfile', 'w') as f:
+        f.write(dockerfile)
+
+    version = _get_version()
+    image_tag = 'dfarrow/dax:{}'.format(version)
+    latest_tag = 'dfarrow/dax:latest'
+
+    dax_print("[+] building container")
+    build_cmd = ['docker', 'build'] + _get_user_build_args() + ['--platform=linux/amd64']
+    if args.clean:
+        build_cmd.append('--no-cache')
+    build_cmd += ['-t', image_tag, '.']
+    _runcmd(build_cmd, args.test_only)
+
+    dax_print("[+] tagging container")
+    _runcmd(['docker', 'rmi', latest_tag], args.test_only)
+    _runcmd(['docker', 'tag', image_tag, latest_tag], args.test_only)
+
+    _runcmd(['/bin/rm', '-f', './Dockerfile'], args.test_only)
+    dax_print("[+] Commence to take over the world...")
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-t', dest='test_only', action='store_true')
+    parser.add_argument('command')
+    parser.add_argument('-c', dest='clean', action='store_true')
+    args = parser.parse_args()
+    if args.command == 'build':
+        cmd_build(args)
