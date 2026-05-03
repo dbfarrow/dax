@@ -29,7 +29,6 @@ def load_config():
 
     with open(os.path.join(home, '.dax.yaml'), 'r') as f:
         defaults = yaml.safe_load(f)
-    defaults['envname'] = 'DAX'
 
     defaults['cwd'] = cwd
 
