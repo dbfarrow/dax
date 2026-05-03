@@ -1,0 +1,74 @@
+#
+# Inspired by justinsteven's jax... a replacement for my kali VM
+#
+
+FROM ubuntu:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+	apt-utils \
+	apt-transport-https \
+	build-essential \
+	ca-certificates \
+	curl \
+	default-jdk \
+	openjdk-8-jre \
+	dnsutils \
+	ftp \
+	gdb \
+	git \
+	golang \
+	inetutils-ping \
+	iproute2 \
+    jq \
+	locales \
+	lsb-release \
+	netcat \
+	net-tools \
+	nmap \
+	man \
+	pass \
+	procps \
+	python3-pip \
+	python3-virtualenv \
+	rbenv \
+	ruby-full \
+	socat \
+	sudo \
+	tcpdump \
+	tmux \
+	unzip \
+	vim \
+	virtualenv \
+	wget \
+	zsh
+
+# install AWS CLI v2
+RUN apt-get install -y libssl-dev libffi-dev \
+    && cd /tmp \
+    && curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
+    && unzip awscliv2.zip \
+    && ./aws/install
+
+# install Node.js and Claude CLI
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y nodejs \
+    && npm install -g @anthropic-ai/claude-code
+
+# setup user
+RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
+    && locale-gen \
+	&& useradd -m -s %%SHELL%% %%USER%% \
+	&& usermod -a -G sudo %%USER%% \
+	&& echo %%USER%%:%%PASSWD%% | chpasswd \
+	&& echo "done setting up user"
+
+USER %%USER%%
+
+# install rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs >> /tmp/sh.rustup.rs \
+    && sh /tmp/sh.rustup.rs -y
+
+WORKDIR /home/%%USER%%
+CMD ["/bin/zsh"]
