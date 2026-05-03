@@ -25,7 +25,7 @@ We take this idea one step further and maintain that it should be simple and rep
 
 To build DAX you will need the following:
 
-* Python - either 2.7 or 3.x
+* Python 3.7+
 * virtualenv
 * git
 * docker
@@ -238,7 +238,7 @@ The feature also exposes a single port, `4444`, by default. Use the `-p` option 
 Example config:
 
 ```yaml
-msf:
+msfdir:
   host: /Users/dfarrow/.msf4
   container: /home/dfarrow/.msf4
 ```

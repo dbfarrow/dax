@@ -71,4 +71,4 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs >> /tmp/sh.rustup.
     && sh /tmp/sh.rustup.rs -y
 
 WORKDIR /home/%%USER%%
-CMD ["/bin/zsh"]
+CMD ["%%SHELL%%"]

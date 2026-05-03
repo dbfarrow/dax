@@ -30,8 +30,12 @@ def load_config():
         dax_print("[!] dax must be run from somewhere under your home dir")
         sys.exit(-1)
 
-    with open(os.path.join(home, '.dax.yaml'), 'r') as f:
-        defaults = yaml.safe_load(f)
+    try:
+        with open(os.path.join(home, '.dax.yaml'), 'r') as f:
+            defaults = yaml.safe_load(f)
+    except FileNotFoundError:
+        dax_print("[!] no ~/.dax.yaml found. Copy dax-defaults.yaml to ~/.dax.yaml and configure it.")
+        sys.exit(-1)
 
     defaults['cwd'] = cwd
 
@@ -43,7 +47,6 @@ def load_config():
         with open(local_cfg_path, 'r') as f:
             local = yaml.safe_load(f) or {}
 
-    defaults['cfgdir'] = cwd
     defaults['envname'] = cwd.replace(home, '').lstrip('/').replace('/', '-')
 
     local_features = local.pop('features', [])
@@ -70,10 +73,7 @@ def _add_volume(config, feature_key):
 
 
 def feature_workdir(config):
-    cwd = config['cwd']
-    if not cwd.startswith(os.environ.get('HOME', '')):
-        dax_print("[+] DAX is running outside home... mounting cwd as working dir")
-    return ['--volume={}:{}'.format(cwd, config['workdir']['container'])]
+    return ['--volume={}:{}'.format(config['cwd'], config['workdir']['container'])]
 
 
 def feature_optdir(config):
