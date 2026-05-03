@@ -145,19 +145,6 @@ features:
 
 ## <a id='features'></a>Features
 
-```
-usage: daxrun.py [-h] [-t] [-f FEATURES] [-p PORTS] [--showFeatures]
-
-Start a docker container for a specific environment.
-
-optional arguments:
-  -h, --help      show this help message and exit
-  -t              test only - just print the docker command and exit
-  -f FEATURES     list of comma separated features to include
-  -p PORTS        additional ports to map <host-port>:<container-port>
-  --showFeatures  lists available features
-
-```
 The following features are currently supported:
 
 | name | description |  
@@ -294,7 +281,7 @@ From inside the container, `ssh -A user@host` will forward the agent onward to r
 
 ### <a id='adding-features'></a>Adding features
 
-To add a new feature to dax, implement a function in `daxrun.py` following the naming and calling convention shown below:
+To add a new feature to dax, implement a function in `dax.py` following the naming and calling convention shown below:
 
 ```python
 def feature_hosttmp(config):
