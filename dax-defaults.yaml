@@ -12,20 +12,20 @@ workdir:
   container: work
 
 optdir:
-  host: /Users/dfarrow/opt/dax-opt
-  container: /home/dfarrow/opt
+  host: ~/opt/dax-opt
+  container: ~/opt
 
 awsdir:
-  host: /Users/dfarrow/.aws
-  container: /home/dfarrow/.aws
+  host: ~/.aws
+  container: ~/.aws
 
 gpgdir:
-  host: /Users/dfarrow/.gnupg
-  container: /home/dfarrow/.gnupg
+  host: ~/.gnupg
+  container: ~/.gnupg
 
 msfdir:
-  host: /Users/dfarrow/.msf4
-  container: /home/dfarrow/.msf4
+  host: ~/.msf4
+  container: ~/.msf4
 
 dotfiles:
   ro:

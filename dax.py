@@ -92,7 +92,9 @@ def _container_home(config):
 
 
 def _add_volume(config, feature_key):
-    return ['--volume={}:{}'.format(config[feature_key]['host'], config[feature_key]['container'])]
+    host = os.path.expanduser(config[feature_key]['host'])
+    container = config[feature_key]['container'].replace('~', _container_home(config), 1)
+    return ['--volume={}:{}'.format(host, container)]
 
 
 def feature_workdir(config):
