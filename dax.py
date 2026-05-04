@@ -79,7 +79,8 @@ def _add_volume(config, feature_key):
 
 
 def feature_workdir(config):
-    return ['--volume={}:{}'.format(config['cwd'], config['workdir']['container'])]
+    container = os.path.join(_container_home(config), config['workdir']['container'])
+    return ['--volume={}:{}'.format(config['cwd'], container)]
 
 
 def feature_optdir(config):

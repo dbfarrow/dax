@@ -17,11 +17,12 @@ from dax import (
 
 def test_feature_workdir_mounts_cwd():
     config = {
-        'cwd': '/Users/dfarrow/work/project',
-        'workdir': {'container': '/home/dfarrow/work'},
+        'cwd': '/Users/davefarrow/work/project',
+        'workdir': {'container': 'work'},
+        '_container_home': '/home/davefarrow',
     }
     opts = feature_workdir(config)
-    assert '--volume=/Users/dfarrow/work/project:/home/dfarrow/work' in opts
+    assert '--volume=/Users/davefarrow/work/project:/home/davefarrow/work' in opts
 
 
 def test_feature_optdir_mounts_volume():

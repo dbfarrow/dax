@@ -5,7 +5,7 @@ features:
   - optdir
 
 workdir:
-  container: /home/dfarrow/work
+  container: work
 
 optdir:
   host: /Users/dfarrow/opt/dax-opt
