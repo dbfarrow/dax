@@ -6,7 +6,6 @@ FROM ubuntu:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-%%CA_CERT_BLOCK%%
 RUN apt-get update && apt-get install -y \
 	apt-utils \
 	apt-transport-https \
@@ -36,6 +35,7 @@ RUN apt-get update && apt-get install -y \
 	wget \
 	zsh
 
+%%CA_CERT_BLOCK%%
 # install AWS CLI v2
 RUN apt-get install -y libssl-dev libffi-dev \
     && cd /tmp \
