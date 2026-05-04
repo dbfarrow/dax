@@ -66,9 +66,5 @@ RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
 
 USER %%USER%%
 
-# install rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs >> /tmp/sh.rustup.rs \
-    && sh /tmp/sh.rustup.rs -y
-
 WORKDIR /home/%%USER%%
 CMD ["%%SHELL%%"]
