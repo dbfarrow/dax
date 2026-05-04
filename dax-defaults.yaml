@@ -3,7 +3,6 @@ image: dfarrow/dax:latest
 features:
   - workdir
   - optdir
-  - ssh
 
 workdir:
   container: /home/dfarrow/work
