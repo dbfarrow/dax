@@ -1,5 +1,9 @@
 image: dax:latest
 
+# optional: path to a custom CA certificate to install during dax build
+# useful when behind a TLS-inspecting proxy (e.g. Zscaler)
+# ca_cert: ~/.zscaler-ca.crt
+
 features:
   - workdir
   - optdir

@@ -5,3 +5,4 @@ jchrome
 .daxpw
 *.pyc
 Dockerfile
+*.crt

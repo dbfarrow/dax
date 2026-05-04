@@ -20,12 +20,29 @@ def _template_path():
     return Path(__file__).parent / 'Dockerfile.tmpl'
 
 
-def render_dockerfile(user, shell, passwd):
+def render_dockerfile(user, shell, passwd, ca_cert_block=''):
     content = _template_path().read_text()
     content = content.replace('%%USER%%', user)
     content = content.replace('%%SHELL%%', shell)
     content = content.replace('%%PASSWD%%', passwd)
+    content = content.replace('%%CA_CERT_BLOCK%%', ca_cert_block)
     return content
+
+
+def _get_ca_cert_path():
+    try:
+        with open(os.path.join(os.environ['HOME'], '.dax.yaml'), 'r') as f:
+            config = yaml.safe_load(f)
+        path = config.get('ca_cert')
+        if not path:
+            return None
+        path = os.path.expanduser(path)
+        if not os.path.exists(path):
+            dax_print("[!] ca_cert not found at {}".format(path))
+            return None
+        return path
+    except FileNotFoundError:
+        return None
 
 
 def load_config():
@@ -211,12 +228,24 @@ def _runcmd(cmd, test_only=False):
 
 
 def cmd_build(args):
+    import shutil
     dax_print("[+] building Dockerfile from template")
     user = _get_username()
     shell = os.environ.get('SHELL', '/bin/zsh')
     passwd = _get_dax_passwd()
 
-    dockerfile = render_dockerfile(user, shell, passwd)
+    ca_cert_path = _get_ca_cert_path()
+    ca_cert_block = ''
+    if ca_cert_path:
+        dax_print("[-]   installing CA cert from {}".format(ca_cert_path))
+        shutil.copy(ca_cert_path, './ca.crt')
+        ca_cert_block = (
+            '# install custom CA certificate\n'
+            'COPY ca.crt /usr/local/share/ca-certificates/\n'
+            'RUN update-ca-certificates\n'
+        )
+
+    dockerfile = render_dockerfile(user, shell, passwd, ca_cert_block)
     with open('Dockerfile', 'w') as f:
         f.write(dockerfile)
 
@@ -235,7 +264,7 @@ def cmd_build(args):
     _runcmd(['docker', 'rmi', latest_tag], args.test_only)
     _runcmd(['docker', 'tag', image_tag, latest_tag], args.test_only)
 
-    _runcmd(['/bin/rm', '-f', './Dockerfile'], args.test_only)
+    _runcmd(['/bin/rm', '-f', './Dockerfile', './ca.crt'], args.test_only)
     dax_print("[+] Commence to take over the world...")
 
 
