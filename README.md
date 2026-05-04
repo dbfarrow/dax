@@ -34,24 +34,26 @@ To build DAX you will need the following:
 
 ## <a id='building'></a>Building
 
-Clone the repository and install dependencies:
+Clone the repository and install:
 
 ```
 git clone https://github.com/dbfarrow/dax.git
 cd dax
-pip install -r requirements.txt
+pip install -e .
 ```
+
+This installs the `dax` command globally so you can run it from any directory.
 
 Build the image:
 
 ```
-python dax.py build
+dax build
 ```
 
 Use `-c` for a clean build (no cache):
 
 ```
-python dax.py build -c
+dax build -c
 ```
 
 The build script will prompt for a container password unless a `.daxpw` file exists with `0600` permissions.

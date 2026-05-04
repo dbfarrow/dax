@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dax"
+version = "1.0"
+requires-python = ">=3.7"
+dependencies = ["pyyaml"]
+
+[project.scripts]
+dax = "dax:main"
+
+[tool.setuptools]
+py-modules = ["dax"]
