@@ -145,12 +145,12 @@ def feature_dotfiles(config):
     opts = []
     container_home = _container_home(config)
     for f in config.get('dotfiles', {}).get('ro', []):
-        host_path = os.path.expanduser(f)
-        dest = os.path.join(container_home, os.path.basename(f))
+        host_path = os.path.expanduser(f.rstrip('/'))
+        dest = os.path.join(container_home, Path(host_path).name)
         opts.append('--volume={}:{}:ro'.format(host_path, dest))
     for f in config.get('dotfiles', {}).get('rw', []):
-        host_path = os.path.expanduser(f)
-        dest = os.path.join(container_home, os.path.basename(f))
+        host_path = os.path.expanduser(f.rstrip('/'))
+        dest = os.path.join(container_home, Path(host_path).name)
         opts.append('--volume={}:{}'.format(host_path, dest))
     return opts
 
