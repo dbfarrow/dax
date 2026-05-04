@@ -15,6 +15,12 @@ optdir:
   host: ~/opt/dax-opt
   container: ~/opt
 
+claudedir:
+  mount: ~/.claude
+
+githubdir:
+  mount: ~/.config/gh
+
 awsdir:
   mount: ~/.aws
 

@@ -116,6 +116,14 @@ def feature_aws(config):
     return _add_volume(config, 'awsdir')
 
 
+def feature_claude(config):
+    return _add_volume(config, 'claudedir')
+
+
+def feature_github(config):
+    return _add_volume(config, 'githubdir')
+
+
 def feature_msf(config):
     opts = _add_volume(config, 'msfdir')
     opts += ['-p', '4444:4444']
