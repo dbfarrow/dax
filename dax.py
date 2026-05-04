@@ -221,8 +221,8 @@ def cmd_build(args):
         f.write(dockerfile)
 
     version = _get_version()
-    image_tag = 'dfarrow/dax:{}'.format(version)
-    latest_tag = 'dfarrow/dax:latest'
+    image_tag = 'dax:{}'.format(version)
+    latest_tag = 'dax:latest'
 
     dax_print("[+] building container")
     build_cmd = ['docker', 'build'] + _get_user_build_args() + ['--platform=linux/amd64']
