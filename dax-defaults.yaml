@@ -16,16 +16,13 @@ optdir:
   container: ~/opt
 
 awsdir:
-  host: ~/.aws
-  container: ~/.aws
+  mount: ~/.aws
 
 gpgdir:
-  host: ~/.gnupg
-  container: ~/.gnupg
+  mount: ~/.gnupg
 
 msfdir:
-  host: ~/.msf4
-  container: ~/.msf4
+  mount: ~/.msf4
 
 dotfiles:
   ro:

@@ -92,8 +92,13 @@ def _container_home(config):
 
 
 def _add_volume(config, feature_key):
-    host = os.path.expanduser(config[feature_key]['host'])
-    container = config[feature_key]['container'].replace('~', _container_home(config), 1)
+    entry = config[feature_key]
+    if 'mount' in entry:
+        host = os.path.expanduser(entry['mount'])
+        container = entry['mount'].replace('~', _container_home(config), 1)
+    else:
+        host = os.path.expanduser(entry['host'])
+        container = entry['container'].replace('~', _container_home(config), 1)
     return ['--volume={}:{}'.format(host, container)]
 
 
