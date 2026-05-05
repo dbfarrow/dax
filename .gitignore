@@ -4,5 +4,7 @@ venv-3/
 jchrome
 .daxpw
 *.pyc
+__pycache__/
+dax.egg-info/
 Dockerfile
 *.crt
