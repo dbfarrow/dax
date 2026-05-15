@@ -43,15 +43,25 @@ RUN apt-get install -y libssl-dev libffi-dev \
     && unzip awscliv2.zip \
     && ./aws/install
 
-# install Node.js and Claude CLI
+# install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y gh
+
+# install Node.js and Claude CLI and auggie
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g @anthropic-ai/claude-code
+    && npm install -g @augmentcode/auggie
 
 # setup user
+ARG user_id=1000
+
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
     && locale-gen \
-	&& useradd -m -s %%SHELL%% %%USER%% \
+	&& useradd -m -s %%SHELL%% -u ${user_id} %%USER%% \
 	&& usermod -a -G sudo %%USER%% \
 	&& echo %%USER%%:%%PASSWD%% | chpasswd \
 	&& echo "done setting up user"
