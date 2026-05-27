@@ -25,7 +25,7 @@ We take this idea one step further and maintain that it should be simple and rep
 
 To build DAX you will need the following:
 
-* Python - either 2.7 or 3.x
+* Python 3.7+
 * virtualenv
 * git
 * docker
@@ -34,92 +34,66 @@ To build DAX you will need the following:
 
 ## <a id='building'></a>Building
 
-Clone the repository
+Clone the repository and install:
 
 ```
 git clone https://github.com/dbfarrow/dax.git
-```
-
-Select your python version and establish a virtual environemnt
-
-```
 cd dax
-virtualenv --python=python2.7 venv
-source venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
-Run the build script
+This installs the `dax` command globally so you can run it from any directory.
+
+Build the image:
 
 ```
-[davefarrow@RCM-X36W4YWF7: /Users/davefarrow/opt/dax] % daxbuild.py
-[+] building Dockerfile from inline dockerfile and magic
-[-]   if you tire of typing in a password for dax, put it in ./.daxpw and set the permissions to 0600... then try again
-Enter a password for the dax container:<redacted>
-[+] building container
-[-]   docker build --build-arg user=davefarrow --build-arg user_id=502 --build-arg user_gid=20 --platform=linux/amd64 -t dfarrow/dax:1.0 .
-[+] Building 67.0s (12/12) FINISHED
-<snip>
-Use 'docker scan' to run Snyk tests against images to find vulnerabilities and learn how to fix them
-[-]   docker rmi dfarrow/dax:latest
-Untagged: dfarrow/dax:latest
-Deleted: sha256:6cfabbafba3ce8e43a87f5e99d2a8b090a0926f7900aea845838b3c510d0be9f
-[-]   docker tag dfarrow/dax:1.0 dfarrow/dax:latest
-[+] Commence to take over the world...
+dax build
+```
+
+Use `-c` for a clean build (no cache):
 
 ```
-The Dockerfile that builds the dax image is built from the inline dockerfile file (because of technical challenges I could not overcome then and cannot remember now).
+dax build -c
+```
 
-The dax container is created to match the machine it was built on. For eamples, if your username is leethaxor and your userid is 31337, then the image will contain a user leethaxor with a userid of 31337. The user will be a member of the sudo group. The build script will prompt you for as password to set for the user. You will need to know this password in order to sudo in the container.
-
-If you do not want to type in a password whenever you build dax you can put the password in a file named ```.daxpw``` in the same directory as the ```daxbuild.py``` script. The file must have ```0600``` permissions or it won't be used. If you don't use the password file the password you supply will be visible in the terminal output but will not be recorded in your shell history. It will also be visible in the final Dockerfile. So don't use a password you can't afford to burn.
+The build script will prompt for a container password unless a `.daxpw` file exists with `0600` permissions.
 
 ### <a id='dotfiles'></a>Dotfiles
 
-Dax will copy all files in DAXHOME/dotfiles into the `~/`. Use this to ensure that the dax environment has your favorite `.zshrc`, `.vimrc`, `.tmux.conf`, and other configuration files. 
+Dotfiles are mounted from the host at runtime rather than baked into the image. Configure them in `~/.dax.yaml` under the `dotfiles` key:
 
-NOTE: dax currently forces the user shell to be /bin/zsh. 
+```yaml
+dotfiles:
+  ro:
+    - ~/.zshrc
+    - ~/.vimrc
+    - ~/.gitconfig
+    - ~/.tmux.conf
+  rw:
+    - ~/.zsh_history
+```
 
-The files are copied during the build process. A future version will probably implement [the suggestion in this reddit thread](https://www.reddit.com/r/docker/comments/6h2c44/copying_files_into_a_container_when_calling_run/) to sync the dotfiles in your host home directory when the container is started.
+Files in `ro` are mounted read-only. Files in `rw` are mounted read-write. The `dotfiles/` directory in the repo is no longer used.
 
 ## <a id='running'></a>Running
 
 ### <a id='usage'></a>Usage
 ```
-usage: daxrun.py [-h] [-t] [-f FEATURES] [-p PORTS] [--showFeatures]
-
-Start a docker container for a specific environment.
+usage: dax.py [-h] [-t] {build,run,features} ...
 
 optional arguments:
-  -h, --help      show this help message and exit
-  -t              test only - just print the docker command and exit
-  -f FEATURES     list of comma separated features to include
-  -p PORTS        additional ports to map <host-port>:<container-port>
-  --showFeatures  lists available features
+  -h, --help   show this help message and exit
+  -t           test only - print the docker command and exit
 
+subcommands:
+  build        Build the dax Docker image
+  run          Launch a dax container
+  features     List available features
+
+dax.py run [-f FEATURES] [-p PORTS]
+  -f FEATURES  comma-separated features to include
+  -p PORTS     port mapping host:container (repeatable)
 ```
-
-Test run with a default enviroment:
-
-```
-[dfarrow@dfarrow-MBP: ~/fatsec/code/nomnom] $ daxrun.py
-[+] looking for config file in /Users/dfarrow/fatsec/code/nomnom
-[+] adding workdir
-[+] adding optdir
-[+] running: docker run -it --rm --name fatsec-code-nomnom -h fatsec-code-nomnom.fatsec.docker --volume=/Users/dfarrow/fatsec/code/nomnom:/home/dfarrow/work --volume=/Users/dfarrow/fatsec/opt:/home/dfarrow/opt dfarrow/dax:latest
-[dfarrow@fatsec-code-nomnom: /home/dfarrow] % 
-[dfarrow@fatsec-code-nomnom: /home/dfarrow] % id
-uid=501(dfarrow) gid=20(dialout) groups=20(dialout),27(sudo)
-[dfarrow@fatsec-code-nomnom: /home/dfarrow] % hostname
-fatsec-code-nomnom.fatsec.docker
-```
-Breaking down the command line we see:
-
-1. Docker will create an instance of the `dfarrow/dax:latest` image named fatsec-code-nomnom (the name of the instance is derived from the path that dax is started from).
-2. The instance will be deleted when it exits.
-3. The current directory will be mounted to `~/work` in the running instance
-4. The optdir feature will maps `~/fatsec/opt` to `~/opt` in the instance. The path to the `opt` dir is configurable
-5. The user is dropped at a shell prompt in the running instance
 
 
 
@@ -173,19 +147,6 @@ features:
 
 ## <a id='features'></a>Features
 
-```
-usage: daxrun.py [-h] [-t] [-f FEATURES] [-p PORTS] [--showFeatures]
-
-Start a docker container for a specific environment.
-
-optional arguments:
-  -h, --help      show this help message and exit
-  -t              test only - just print the docker command and exit
-  -f FEATURES     list of comma separated features to include
-  -p PORTS        additional ports to map <host-port>:<container-port>
-  --showFeatures  lists available features
-
-```
 The following features are currently supported:
 
 | name | description |  
@@ -279,7 +240,7 @@ The feature also exposes a single port, `4444`, by default. Use the `-p` option 
 Example config:
 
 ```yaml
-msf:
+msfdir:
   host: /Users/dfarrow/.msf4
   container: /home/dfarrow/.msf4
 ```
@@ -300,9 +261,29 @@ Before running dax with this feature, start the X11 service in your host if it's
 
 On MacOS, the following command does the trick: `xhost + <hostip>`
 
+---
+
+#### ssh
+
+SSH access inside the container uses agent forwarding via Docker Desktop's host agent socket. No private keys are ever copied into the container.
+
+Make sure your keys are loaded before launching:
+
+```
+ssh-add ~/.ssh/id_rsa
+```
+
+Then use the `ssh` feature:
+
+```
+python dax.py run -f ssh
+```
+
+From inside the container, `ssh -A user@host` will forward the agent onward to remote hosts.
+
 ### <a id='adding-features'></a>Adding features
 
-To add a new feature to dax, implement a function in `daxrun.py` following the naming and calling convention shown below:
+To add a new feature to dax, implement a function in `dax.py` following the naming and calling convention shown below:
 
 ```python
 def feature_hosttmp(config):

@@ -1,38 +1,40 @@
-# DAX config file for a bare tools enviroment. The current working dir
-# will be mounted as the work directory. 
-#
-# If there are features that you want to define to be available to any 
-# instance then define their configuration here and reference them
-# in the local .dax.yaml file feature key or on the command line 
-# with -f
-#
+image: dax:latest
 
-image: dfarrow/dax:latest
+# optional: path to a custom CA certificate to install during dax build
+# useful when behind a TLS-inspecting proxy (e.g. Zscaler)
+# ca_cert: ~/.zscaler-ca.crt
 
-features: 
+features:
   - workdir
   - optdir
 
 workdir:
-  container: /home/dfarrow/work
+  container: work
 
 optdir:
-  host: /Users/dfarrow/fatsec/opt
-  container: /home/dfarrow/opt
+  host: ~/opt/dax-opt
+  container: ~/opt
 
-msf:
-  host: /Users/dfarrow/.msf4
-  container: /home/dfarrow/.msf4
+claudedir:
+  mount: ~/.claude
+
+githubdir:
+  mount: ~/.config/gh
 
 awsdir:
-  host: /Users/dfarrow/opt/dax/dotfiles/.aws
-  container: /home/dfarrow/.aws
-
-sshdir:
-  host: /Users/dfarrow/opt/dax/dotfiles/.ssh
-  container: /home/dfarrow/.ssh
+  mount: ~/.aws
 
 gpgdir:
-  host: /Users/dfarrow/opt/dax/dotfiles/.gnupg
-  container: /home/dfarrow/.gnupg
+  mount: ~/.gnupg
 
+msfdir:
+  mount: ~/.msf4
+
+dotfiles:
+  ro:
+    - ~/.zshrc
+    - ~/.vimrc
+    - ~/.gitconfig
+    - ~/.tmux.conf
+  rw:
+    - ~/.zsh_history
