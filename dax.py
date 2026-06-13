@@ -79,8 +79,6 @@ def load_config():
     return defaults
 
 
-# Docker Desktop on Mac exposes the SSH agent via this fixed path
-_SSH_AGENT_SOCK = '/run/host-services/ssh-auth.sock'
 
 
 def _get_username():
@@ -139,13 +137,19 @@ def feature_ovpn(config):
     ]
 
 
+_DOCKER_DESKTOP_SSH_SOCK = '/run/host-services/ssh-auth.sock'
+
 def feature_ssh(config):
-    if not os.path.exists(_SSH_AGENT_SOCK):
-        dax_print("[!] SSH agent socket not found at {}. Run ssh-add first.".format(_SSH_AGENT_SOCK))
+    sock = os.environ.get('SSH_AUTH_SOCK', '')
+    if not sock or not os.path.exists(sock):
+        sock = _DOCKER_DESKTOP_SSH_SOCK
+    if not sock:
+        dax_print("[!] No SSH agent socket found. Run ssh-add first.")
         return []
     return [
-        '--mount', 'type=bind,src={},target=/ssh-agent'.format(_SSH_AGENT_SOCK),
+        '--volume', '{}:/ssh-agent'.format(sock),
         '-e', 'SSH_AUTH_SOCK=/ssh-agent',
+        '--group-add', '0',
     ]
 
 
