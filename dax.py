@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import os
+import shutil
 import sys
 import socket as _socket
 import subprocess
@@ -118,6 +120,10 @@ def feature_claude(config):
     return _add_volume(config, 'claudedir')
 
 
+def feature_auggie(config):
+    return _add_volume(config, 'auggiedir')
+
+
 def feature_github(config):
     return _add_volume(config, 'githubdir')
 
@@ -143,7 +149,7 @@ def feature_ssh(config):
     sock = os.environ.get('SSH_AUTH_SOCK', '')
     if not sock or not os.path.exists(sock):
         sock = _DOCKER_DESKTOP_SSH_SOCK
-    if not sock:
+    if not sock or not os.path.exists(sock):
         dax_print("[!] No SSH agent socket found. Run ssh-add first.")
         return []
     return [
@@ -151,6 +157,37 @@ def feature_ssh(config):
         '-e', 'SSH_AUTH_SOCK=/ssh-agent',
         '--group-add', '0',
     ]
+
+
+def _is_port_free(port):
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+        try:
+            s.bind(('', port))
+            return True
+        except OSError:
+            return False
+
+
+def _find_preview_port(cwd, base=8000, spread=1000):
+    digest = int(hashlib.md5(cwd.encode()).hexdigest(), 16)
+    candidate = base + (digest % spread)
+    for _ in range(spread):
+        if _is_port_free(candidate):
+            return candidate
+        candidate = base + ((candidate - base + 1) % spread)
+    raise RuntimeError("no free port found in range {}-{}".format(base, base + spread - 1))
+
+
+def feature_webpreview(config):
+    port = config.get('webpreview', {}).get('port') or _find_preview_port(config['cwd'])
+    shell = os.environ.get('SHELL', '/bin/zsh')
+    container_home = _container_home(config)
+    work_subdir = config.get('workdir', {}).get('container', 'work')
+    preview_dir = os.path.join(container_home, work_subdir)
+    dax_print("[-]   webpreview port: {}".format(port))
+    config['_shell_cmd'] = 'DAX_PREVIEW_PORT={} DAX_PREVIEW_DIR={} dax-preview & exec {}'.format(
+        port, preview_dir, shell)
+    return ['-p', '{}:{}'.format(port, port)]
 
 
 def feature_dotfiles(config):
@@ -247,7 +284,6 @@ def _runcmd(cmd, test_only=False):
 
 
 def cmd_build(args):
-    import shutil
     dax_print("[+] building Dockerfile from template")
     user = _get_username()
     shell = os.environ.get('SHELL', '/bin/zsh')
@@ -314,6 +350,9 @@ def cmd_run(args):
 
     cmd.append(config['image'])
 
+    if '_shell_cmd' in config:
+        cmd += ['/bin/sh', '-c', config['_shell_cmd']]
+
     dax_print("[+] running: " + ' '.join(cmd))
     if not args.test_only:
         subprocess.run(cmd)
@@ -321,6 +360,77 @@ def cmd_run(args):
 
 def cmd_features(args):
     _print_features()
+
+
+def cmd_backup(args):
+    home = os.path.expanduser('~')
+    repo_root = Path(__file__).parent
+    backup_dir = repo_root / 'backup'
+
+    try:
+        with open(os.path.join(home, '.dax.yaml'), 'r') as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        dax_print("[!] no ~/.dax.yaml found")
+        sys.exit(1)
+
+    paths = []
+    for f in config.get('dotfiles', {}).get('ro', []):
+        paths.append(f)
+    for f in config.get('dotfiles', {}).get('rw', []):
+        paths.append(f)
+    for f in config.get('backup', []):
+        paths.append(f)
+
+    seen = set()
+    updated = []
+    skipped = []
+    unchanged = []
+
+    for entry in paths:
+        expanded = os.path.expanduser(entry.rstrip('/'))
+        if expanded in seen:
+            continue
+        seen.add(expanded)
+
+        if not os.path.exists(expanded):
+            skipped.append(entry)
+            continue
+
+        rel = os.path.relpath(expanded, home)
+        dest = backup_dir / rel
+
+        if os.path.isdir(expanded):
+
+            changed = False
+            for src_root, dirs, files in os.walk(expanded):
+                for fname in files:
+                    src_file = Path(src_root) / fname
+                    dst_file = dest / os.path.relpath(src_file, expanded)
+                    dst_file.parent.mkdir(parents=True, exist_ok=True)
+                    if not dst_file.exists() or src_file.read_bytes() != dst_file.read_bytes():
+                        shutil.copy2(str(src_file), str(dst_file))
+                        changed = True
+            if changed:
+                updated.append(entry)
+            else:
+                unchanged.append(entry)
+        else:
+
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            src_bytes = Path(expanded).read_bytes()
+            if not dest.exists() or src_bytes != dest.read_bytes():
+                shutil.copy2(expanded, str(dest))
+                updated.append(entry)
+            else:
+                unchanged.append(entry)
+
+    for e in updated:
+        dax_print("[+] backed up: {}".format(e))
+    for e in unchanged:
+        dax_print("[-] unchanged: {}".format(e))
+    for e in skipped:
+        dax_print("[-] skipped (not found): {}".format(e))
 
 
 def main():
@@ -340,6 +450,7 @@ def main():
                        help='port mapping host:container (repeatable)')
 
     subparsers.add_parser('features', help='List available features')
+    subparsers.add_parser('backup', help='Back up dotfiles and config to backup/')
 
     args = parser.parse_args()
 
@@ -349,6 +460,8 @@ def main():
         cmd_run(args)
     elif args.command == 'features':
         cmd_features(args)
+    elif args.command == 'backup':
+        cmd_backup(args)
 
 
 if __name__ == '__main__':
