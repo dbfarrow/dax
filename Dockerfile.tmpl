@@ -43,15 +43,221 @@ RUN apt-get install -y libssl-dev libffi-dev \
     && unzip awscliv2.zip \
     && ./aws/install
 
-# install Node.js and Claude CLI
+# install GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y gh
+
+# install Node.js and Claude CLI and auggie
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y nodejs \
-    && npm install -g @anthropic-ai/claude-code
+    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @augmentcode/auggie
+
+# install markdown renderer for dax-preview
+RUN pip3 install --break-system-packages markdown pyyaml
+
+# install dax-preview web server
+RUN cat > /usr/local/bin/dax-preview << 'PYEOF'
+#!/usr/bin/env python3
+"""dax-preview — markdown, JSON, and YAML rendering HTTP server."""
+import datetime
+import http.server
+import io
+import json
+import os
+import html as html_module
+
+try:
+    import markdown
+    HAS_MARKDOWN = True
+except ImportError:
+    HAS_MARKDOWN = False
+
+CSS = """<style>
+body{max-width:CONTENT_WIDTH;margin:40px auto;padding:0 20px;
+     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+     line-height:1.6;color:#24292e}
+pre{background:#f6f8fa;padding:16px;border-radius:6px;overflow-x:auto}
+code{background:#f6f8fa;padding:2px 4px;border-radius:3px;font-size:90%}
+pre code{background:none;padding:0;font-size:87%}
+a{color:#0366d6}
+h1,h2,h3{border-bottom:1px solid #eaecef;padding-bottom:.3em}
+blockquote{border-left:4px solid #dfe2e5;margin:0;padding:0 16px;color:#6a737d}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #dfe2e5;padding:6px 12px}
+th{background:#f6f8fa;text-align:left}
+td.size{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.date{white-space:nowrap;color:#586069}
+img{max-width:100%}
+</style>"""
+
+PAGE_WIDTHS = {'letter': '6.5in', 'a4': '170mm'}
+
+
+def _read_width_config():
+    try:
+        with open(os.path.expanduser('~/.dax-preview-width')) as f:
+            val = f.read().strip().lower()
+        if val in PAGE_WIDTHS:
+            return PAGE_WIDTHS[val]
+        return f'{max(10, min(100, int(val)))}%'
+    except Exception:
+        return '800px'
+
+
+def _human_size(b):
+    if b < 1024:
+        return f'{b} B'
+    for unit in ('K', 'M', 'G', 'T'):
+        b /= 1024
+        if b < 1024:
+            return f'{b:.1f} {unit}'
+    return f'{b:.1f} T'
+
+
+def _code_page(title, content, width):
+    css = CSS.replace('CONTENT_WIDTH', width)
+    body = f'<pre><code>{html_module.escape(content)}</code></pre>'
+    return (
+        f'<!DOCTYPE html><html><head>'
+        f'<meta charset="utf-8"><title>{html_module.escape(title)}</title>'
+        f'{css}</head><body>{body}</body></html>'
+    ).encode('utf-8')
+
+
+class PreviewHandler(http.server.SimpleHTTPRequestHandler):
+    def list_directory(self, path):
+        try:
+            entries = list(os.scandir(path))
+        except PermissionError:
+            self.send_error(403, 'Permission denied')
+            return None
+
+        entries.sort(key=lambda e: (not e.is_dir(), e.name.lower()))
+
+        width = _read_width_config()
+        css = CSS.replace('CONTENT_WIDTH', width)
+        display_path = html_module.escape(self.path)
+
+        rows = []
+        if self.path != '/':
+            rows.append('<tr><td><a href="../">../</a></td><td class="size">—</td><td class="date">—</td></tr>')
+
+        for entry in entries:
+            try:
+                stat = entry.stat()
+            except OSError:
+                continue
+            is_dir = entry.is_dir()
+            name = html_module.escape(entry.name)
+            href = name + ('/' if is_dir else '')
+            label = name + ('/' if is_dir else '')
+            size = '—' if is_dir else _human_size(stat.st_size)
+            mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+            rows.append(
+                f'<tr>'
+                f'<td><a href="{href}">{label}</a></td>'
+                f'<td class="size">{size}</td>'
+                f'<td class="date">{mtime}</td>'
+                f'</tr>'
+            )
+
+        table = (
+            '<table><thead><tr>'
+            '<th>Name</th><th style="text-align:right">Size</th><th>Modified</th>'
+            '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table>'
+        )
+        page = (
+            f'<!DOCTYPE html><html><head>'
+            f'<meta charset="utf-8"><title>Index of {display_path}</title>'
+            f'{css}</head><body>'
+            f'<h2>Index of {display_path}</h2>{table}'
+            f'</body></html>'
+        ).encode('utf-8')
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(page)))
+        self.end_headers()
+        return io.BytesIO(page)
+
+    def send_head(self):
+        width = _read_width_config()
+        path = self.translate_path(self.path)
+
+        if HAS_MARKDOWN and os.path.isfile(path) and path.endswith('.md'):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    source = f.read()
+                title = html_module.escape(os.path.basename(path))
+                body = markdown.markdown(source, extensions=['fenced_code', 'tables', 'toc'], tab_length=2)
+                css = CSS.replace('CONTENT_WIDTH', width)
+                page = (
+                    f'<!DOCTYPE html><html><head>'
+                    f'<meta charset="utf-8"><title>{title}</title>'
+                    f'{css}</head><body>{body}</body></html>'
+                ).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(page)))
+                self.end_headers()
+                return io.BytesIO(page)
+            except Exception:
+                pass
+
+        if os.path.isfile(path) and path.endswith('.json'):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                pretty = json.dumps(data, indent=2, ensure_ascii=False)
+                encoded = _code_page(os.path.basename(path), pretty, width)
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(encoded)))
+                self.end_headers()
+                return io.BytesIO(encoded)
+            except Exception:
+                pass
+
+        if os.path.isfile(path) and path.endswith(('.yaml', '.yml')):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    source = f.read()
+                encoded = _code_page(os.path.basename(path), source, width)
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(encoded)))
+                self.end_headers()
+                return io.BytesIO(encoded)
+            except Exception:
+                pass
+
+        return super().send_head()
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+if __name__ == '__main__':
+    import functools
+    port = int(os.environ.get('DAX_PREVIEW_PORT', '8080'))
+    serve_dir = os.path.expanduser(os.environ.get('DAX_PREVIEW_DIR', '.'))
+    print(f'dax-preview serving {serve_dir} on http://localhost:{port}')
+    handler = functools.partial(PreviewHandler, directory=serve_dir)
+    httpd = http.server.ThreadingHTTPServer(('0.0.0.0', port), handler)
+    httpd.serve_forever()
+PYEOF
+RUN chmod +x /usr/local/bin/dax-preview
 
 # setup user
+ARG user_id=1000
+
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
     && locale-gen \
-	&& useradd -m -s %%SHELL%% %%USER%% \
+	&& useradd -m -s %%SHELL%% -u ${user_id} %%USER%% \
 	&& usermod -a -G sudo %%USER%% \
 	&& echo %%USER%%:%%PASSWD%% | chpasswd \
 	&& echo "done setting up user"
