@@ -5,8 +5,6 @@ dax is a Docker-based development environment manager. It reads `~/.dax.yaml`
 features (volume mounts, port mappings, etc.) assembled from named feature
 functions in `dax.py`.
 
-## Current branch: feature/dax2.0
-
 ## Completed
 
 - **Auto port assignment for webpreview**: `_find_preview_port(cwd)` hashes the
