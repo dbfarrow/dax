@@ -69,12 +69,19 @@ import io
 import json
 import os
 import html as html_module
+import urllib.parse
 
 try:
     import markdown
     HAS_MARKDOWN = True
 except ImportError:
     HAS_MARKDOWN = False
+
+_SKIP_DIRS = frozenset({
+    '.git', '__pycache__', 'node_modules', '.venv', 'venv',
+    '.tox', 'dist', 'build', '.mypy_cache', '.pytest_cache',
+    '.next', '.cache', '.parcel-cache',
+})
 
 _BOOK_ICON = (
     '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" width="16" '
@@ -86,6 +93,48 @@ _BOOK_ICON = (
     '2.5H1.5v9h3.757a3.75 3.75 0 0 1 1.994.574ZM8.755 4.75l-.004 7.322a3.752 3.752 0 0 '
     '1 1.992-.572H14.5v-9h-3.495a2.25 2.25 0 0 0-2.25 2.25Z"></path></svg>'
 )
+
+_CHEVRON = (
+    '<svg class="chevron" width="12" height="12" viewBox="0 0 12 12" '
+    'fill="currentColor" style="flex-shrink:0">'
+    '<path d="M4.7 10L9 6 4.7 2 4 2.7 7.6 6 4 9.3z"/></svg>'
+)
+
+_ICON_DIR = (
+    '<svg width="16" height="16" viewBox="0 0 16 16" '
+    'style="flex-shrink:0;color:#54aeff" fill="currentColor">'
+    '<path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 '
+    '0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 '
+    '5.55 1 5 1Z"/></svg>'
+)
+
+_ICON_FILE = (
+    '<svg width="16" height="16" viewBox="0 0 16 16" '
+    'style="flex-shrink:0;color:#57606a" fill="currentColor">'
+    '<path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c'
+    '.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 '
+    '14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 '
+    '.25-.25V6h-2.75A1.75 1.75 0 0 1 8.75 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688Z"'
+    '/></svg>'
+)
+
+_TREE_JS = """<script>
+(function(){
+  var P='daxpt:';
+  document.querySelectorAll('.file-tree details[data-path]').forEach(function(el){
+    if(sessionStorage.getItem(P+el.dataset.path)==='1') el.open=true;
+  });
+  document.querySelectorAll('.file-tree details[data-path]').forEach(function(el){
+    el.addEventListener('toggle',function(){
+      if(el.open) sessionStorage.setItem(P+el.dataset.path,'1');
+      else sessionStorage.removeItem(P+el.dataset.path);
+    });
+  });
+  document.querySelectorAll('.file-tree summary a').forEach(function(a){
+    a.addEventListener('click',function(e){ e.stopPropagation(); });
+  });
+})();
+</script>"""
 
 CSS = """<style>
 body{max-width:CONTENT_WIDTH;margin:40px auto;padding:0 20px;
@@ -112,6 +161,27 @@ img{max-width:100%}
 .readme-hdr{background:#f6f8fa;padding:10px 16px;border-bottom:1px solid #d0d7de;
             font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px;color:#24292f}
 .readme-body{padding:20px 40px}
+.gh-layout{display:flex;align-items:flex-start}
+.file-tree-pane{width:256px;flex-shrink:0;border-right:1px solid #d0d7de;background:#fff;
+                position:sticky;top:0;max-height:100vh;overflow-y:auto;padding:8px 0;z-index:1}
+.content-pane{flex:1;min-width:0;padding:0 24px;max-width:CONTENT_WIDTH}
+.file-tree ul{list-style:none;margin:0;padding:0}
+.file-tree li{margin:0}
+.file-tree details>ul{padding-left:12px}
+.file-tree details>summary{list-style:none;display:flex;align-items:center;gap:4px;
+  padding:3px 8px;cursor:pointer;font-size:12px;color:#24292f;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;user-select:none}
+.file-tree details>summary::-webkit-details-marker{display:none}
+.file-tree details>summary:hover{background:#f6f8fa}
+.file-tree details>summary.active-dir{background:#ddf4ff;color:#0969da;font-weight:600}
+.file-tree .chevron{transition:transform 0.12s;color:#848d97;flex-shrink:0}
+.file-tree details[open]>summary .chevron{transform:rotate(90deg)}
+.file-tree a{display:flex;align-items:center;gap:4px;padding:3px 8px;color:#24292f;
+  text-decoration:none;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-tree a:hover{background:#f6f8fa}
+.file-tree a.active{background:#ddf4ff;color:#0969da;font-weight:600}
+.file-tree summary a{padding:0;flex:1;min-width:0;color:inherit}
+.file-tree summary a:hover{background:none}
 </style>"""
 
 PAGE_WIDTHS = {'letter': '6.5in', 'a4': '170mm'}
@@ -138,13 +208,61 @@ def _human_size(b):
     return f'{b:.1f} T'
 
 
-def _code_page(title, content, width):
+def _build_tree_nodes(root, active_path, rel='', depth=0, max_depth=8):
+    abs_dir = os.path.join(root, rel) if rel else root
+    try:
+        entries = sorted(os.scandir(abs_dir), key=lambda e: (not e.is_dir(), e.name.lower()))
+    except (PermissionError, OSError):
+        return ''
+    parts = []
+    for entry in entries:
+        if entry.is_dir() and entry.name in _SKIP_DIRS:
+            continue
+        child_rel = (rel + '/' + entry.name).lstrip('/') if rel else entry.name
+        url_path = '/' + child_rel
+        esc_name = html_module.escape(entry.name)
+        if entry.is_dir():
+            url_dir = url_path + '/'
+            esc_href = html_module.escape(url_dir)
+            is_ancestor = active_path == url_dir or active_path.startswith(url_dir)
+            open_attr = ' open' if is_ancestor else ''
+            sum_cls = ' class="active-dir"' if active_path == url_dir else ''
+            inner = _build_tree_nodes(root, active_path, child_rel, depth + 1, max_depth) if depth < max_depth else ''
+            parts.append(
+                f'<li><details{open_attr} data-path="{esc_href}">'
+                f'<summary{sum_cls}>{_CHEVRON}<a href="{esc_href}">{_ICON_DIR}{esc_name}</a></summary>'
+                f'<ul>{inner}</ul>'
+                f'</details></li>'
+            )
+        else:
+            esc_href = html_module.escape(url_path)
+            a_cls = ' class="active"' if active_path == url_path else ''
+            parts.append(f'<li><a href="{esc_href}"{a_cls}>{_ICON_FILE}{esc_name}</a></li>')
+    return ''.join(parts)
+
+
+def _tree_sidebar(root, active_path):
+    try:
+        inner = _build_tree_nodes(root, active_path)
+    except Exception:
+        inner = ''
+    return f'<nav class="file-tree-pane"><div class="file-tree"><ul>{inner}</ul></div></nav>'
+
+
+def _page_shell(title, body_html, width, serve_root, active_path):
     css = CSS.replace('CONTENT_WIDTH', width)
-    body = f'<pre><code>{html_module.escape(content)}</code></pre>'
+    if width.endswith('px'):
+        try:
+            wider = str(int(width[:-2]) + 256) + 'px'
+            css += f'<style>body{{max-width:{wider};padding:0 16px}}</style>'
+        except ValueError:
+            pass
+    tree = _tree_sidebar(serve_root, active_path)
+    content = f'<div class="gh-layout">{tree}<div class="content-pane">{body_html}</div></div>'
     return (
         f'<!DOCTYPE html><html><head>'
         f'<meta charset="utf-8"><title>{html_module.escape(title)}</title>'
-        f'{css}</head><body>{body}</body></html>'
+        f'{css}</head><body>{content}{_TREE_JS}</body></html>'
     ).encode('utf-8')
 
 
@@ -159,7 +277,7 @@ class PreviewHandler(http.server.SimpleHTTPRequestHandler):
         entries.sort(key=lambda e: (not e.is_dir(), e.name.lower()))
 
         width = _read_width_config()
-        css = CSS.replace('CONTENT_WIDTH', width)
+        active = urllib.parse.unquote(self.path)
         display_path = html_module.escape(self.path)
 
         rows = []
@@ -211,13 +329,8 @@ class PreviewHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     pass
 
-        page = (
-            f'<!DOCTYPE html><html><head>'
-            f'<meta charset="utf-8"><title>Index of {display_path}</title>'
-            f'{css}</head><body>'
-            f'<h2>Index of {display_path}</h2>{table}{readme_html}'
-            f'</body></html>'
-        ).encode('utf-8')
+        body_html = f'<h2>Index of {display_path}</h2>{table}{readme_html}'
+        page = _page_shell(f'Index of {self.path}', body_html, width, self.directory, active)
 
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -228,19 +341,15 @@ class PreviewHandler(http.server.SimpleHTTPRequestHandler):
     def send_head(self):
         width = _read_width_config()
         path = self.translate_path(self.path)
+        active = urllib.parse.unquote(self.path)
 
         if HAS_MARKDOWN and os.path.isfile(path) and path.endswith('.md'):
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     source = f.read()
-                title = html_module.escape(os.path.basename(path))
+                title = os.path.basename(path)
                 body = markdown.markdown(source, extensions=['fenced_code', 'tables', 'toc'], tab_length=2)
-                css = CSS.replace('CONTENT_WIDTH', width)
-                page = (
-                    f'<!DOCTYPE html><html><head>'
-                    f'<meta charset="utf-8"><title>{title}</title>'
-                    f'{css}</head><body>{body}</body></html>'
-                ).encode('utf-8')
+                page = _page_shell(title, body, width, self.directory, active)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Content-Length', str(len(page)))
@@ -254,12 +363,14 @@ class PreviewHandler(http.server.SimpleHTTPRequestHandler):
                 with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 pretty = json.dumps(data, indent=2, ensure_ascii=False)
-                encoded = _code_page(os.path.basename(path), pretty, width)
+                title = os.path.basename(path)
+                body = f'<pre><code>{html_module.escape(pretty)}</code></pre>'
+                page = _page_shell(title, body, width, self.directory, active)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(encoded)))
+                self.send_header('Content-Length', str(len(page)))
                 self.end_headers()
-                return io.BytesIO(encoded)
+                return io.BytesIO(page)
             except Exception:
                 pass
 
@@ -267,12 +378,14 @@ class PreviewHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     source = f.read()
-                encoded = _code_page(os.path.basename(path), source, width)
+                title = os.path.basename(path)
+                body = f'<pre><code>{html_module.escape(source)}</code></pre>'
+                page = _page_shell(title, body, width, self.directory, active)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(encoded)))
+                self.send_header('Content-Length', str(len(page)))
                 self.end_headers()
-                return io.BytesIO(encoded)
+                return io.BytesIO(page)
             except Exception:
                 pass
 
