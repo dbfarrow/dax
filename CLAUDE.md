@@ -21,6 +21,9 @@ functions in `dax.py`.
   Byte-level comparison — only writes on change. Skips missing paths.
 - **`pyyaml` added to Dockerfile.tmpl** pip install (needed by `dax backup`).
 
+- **`dax-preview` GitHub-style UI**: directory listings now use a rounded file table with hover; README.md renders below the listing in a boxed panel with a book icon; a sticky left-side file tree with SVG icons, collapsible folders, and sessionStorage persistence appears on all pages (directory, .md, .json, .yaml). Folder names in the tree navigate; chevron toggles expand/collapse. Heavy dirs (.git, node_modules, etc.) are skipped. Page width auto-expands by 256px to keep content area at the configured width.
+- **GitHub host keys baked in**: all three key types (RSA, ECDSA, ed25519) written to `/etc/ssh/ssh_known_hosts` at image build time — no more `ssh-keyscan` on first use.
+
 ## Notes
 
 - `safe.directory` is already set in `~/.gitconfig` — no need for `-c safe.directory=` flag in git commands.
