@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ]; then
+    _token=$(dax-creds get "$DAX_CREDS_CLAUDE" 2>/dev/null)
+    [ -n "$_token" ] && export ANTHROPIC_API_KEY="$_token"
+fi
+exec /usr/bin/claude-real "$@"

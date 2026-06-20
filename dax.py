@@ -146,7 +146,9 @@ def feature_ovpn(config):
 _DOCKER_DESKTOP_SSH_SOCK = '/run/host-services/ssh-auth.sock'
 
 def feature_ssh(config):
-    sock = os.environ.get('SSH_AUTH_SOCK', '')
+    sock = config.get('_ephemeral_ssh_sock', '')
+    if not sock or not os.path.exists(sock):
+        sock = os.environ.get('SSH_AUTH_SOCK', '')
     if not sock or not os.path.exists(sock):
         sock = _DOCKER_DESKTOP_SSH_SOCK
     if not sock or not os.path.exists(sock):
@@ -284,6 +286,10 @@ def _runcmd(cmd, test_only=False):
 
 
 def cmd_build(args):
+    if not _template_path().exists():
+        dax_print("[!] Dockerfile.tmpl not found in current directory.")
+        dax_print("[!] Run `dax build` from the dax source directory.")
+        sys.exit(1)
     dax_print("[+] building Dockerfile from template")
     user = _get_username()
     shell = os.environ.get('SHELL', '/bin/zsh')
@@ -323,6 +329,28 @@ def cmd_build(args):
     dax_print("[+] Commence to take over the world...")
 
 
+def _start_creds_daemon(credentials, socket_path, tokens_path):
+    import json
+    cmd = [
+        sys.executable, '-m', 'dax_creds.daemon',
+        '--socket', str(socket_path),
+        '--tokens', str(tokens_path),
+        '--credentials', json.dumps(credentials),
+    ]
+    dax_print("[+] starting credential daemon")
+    return subprocess.Popen(cmd, cwd=str(Path(__file__).parent))
+
+
+def _wait_for_socket(path, timeout=5.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def cmd_run(args):
     config = load_config()
     username = _get_username()
@@ -336,6 +364,37 @@ def cmd_run(args):
         '-h', '{}.fatsec.docker'.format(name),
     ]
 
+    daemon_proc = None
+    project_creds = {}
+    try:
+        from dax_creds.config import load_dax_config, find_project_by_dir, get_project_credentials, daemon_socket_path
+        from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
+        dax_config = load_dax_config()
+        try:
+            project = find_project_by_dir(dax_config, Path.cwd())
+        except KeyError:
+            dax_print("[+] project not registered — starting dax init")
+            from dax_creds.init import run_init
+            dax_config = run_init(dax_config, Path.cwd())
+            project = find_project_by_dir(dax_config, Path.cwd())
+        project_creds = get_project_credentials(dax_config, project)
+
+        ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
+        if ssh_creds:
+            dax_print("[+] starting ephemeral SSH agent")
+            agent_sock, agent_pid = start_ephemeral_agent()
+            config['_ephemeral_ssh_sock'] = agent_sock
+            config['_ephemeral_ssh_pid'] = agent_pid
+            ssh_provider = SshProvider()
+            for cred_name, cred_def in ssh_creds.items():
+                dax_print(f"[-]   loading {cred_name} from Keychain")
+                try:
+                    ssh_provider.setup(cred_def, agent_sock=agent_sock)
+                except RuntimeError as e:
+                    dax_print(f"[!] failed to load {cred_name}: {e}")
+    except (FileNotFoundError, KeyError):
+        pass
+
     features = list(config['features'])
     if args.features:
         features.extend(args.features.split(','))
@@ -348,14 +407,59 @@ def cmd_run(args):
     for feature in features:
         cmd.extend(_add_feature(feature, config))
 
+    try:
+        if project_creds:
+            from dax_creds.config import daemon_socket_path
+            tokens_path = Path.home() / '.dax' / 'tokens.json'
+            if not tokens_path.exists():
+                dax_print("[!] ~/.dax/tokens.json not found — skipping credential daemon")
+            else:
+                sock_path = daemon_socket_path(Path.cwd())
+                daemon_proc = _start_creds_daemon(project_creds, sock_path, tokens_path)
+                if _wait_for_socket(sock_path):
+                    container_sock = '/run/dax-creds.sock'
+                    cmd += ['-v', '{}:{}'.format(sock_path, container_sock)]
+                    cmd += ['-e', 'DAX_CREDS_SOCK={}'.format(container_sock)]
+                    for cred_name, cred_def in project_creds.items():
+                        provider = cred_def.get('provider', '').upper()
+                        if provider:
+                            cmd += ['-e', 'DAX_CREDS_{}={}'.format(provider, cred_name)]
+                    dax_print("[-]   credentials: {}".format(list(project_creds.keys())))
+                else:
+                    dax_print("[!] credential daemon socket did not appear — skipping")
+                    daemon_proc.terminate()
+                    daemon_proc = None
+    except Exception as e:
+        dax_print(f"[!] credential daemon error: {e}")
+
     cmd.append(config['image'])
 
     if '_shell_cmd' in config:
         cmd += ['/bin/sh', '-c', config['_shell_cmd']]
 
     dax_print("[+] running: " + ' '.join(cmd))
-    if not args.test_only:
-        subprocess.run(cmd)
+    try:
+        if not args.test_only:
+            subprocess.run(cmd)
+    finally:
+        if daemon_proc:
+            dax_print("[+] stopping credential daemon")
+            daemon_proc.terminate()
+            daemon_proc.wait()
+        if config.get('_ephemeral_ssh_pid'):
+            dax_print("[+] stopping ephemeral SSH agent")
+            from dax_creds.providers.ssh import stop_ephemeral_agent
+            stop_ephemeral_agent(config['_ephemeral_ssh_pid'])
+
+
+def cmd_init(args):
+    from dax_creds.config import load_dax_config
+    from dax_creds.init import run_init
+    try:
+        config = load_dax_config()
+    except FileNotFoundError:
+        config = {'defaults': {'image': 'dax-base'}, 'credentials': {}, 'projects': {}}
+    run_init(config, Path.cwd())
 
 
 def cmd_features(args):
@@ -449,6 +553,7 @@ def main():
     run_p.add_argument('-p', dest='ports', action='append',
                        help='port mapping host:container (repeatable)')
 
+    subparsers.add_parser('init', help='Register current directory as a dax project')
     subparsers.add_parser('features', help='List available features')
     subparsers.add_parser('backup', help='Back up dotfiles and config to backup/')
 
@@ -458,6 +563,8 @@ def main():
         cmd_build(args)
     elif args.command == 'run':
         cmd_run(args)
+    elif args.command == 'init':
+        cmd_init(args)
     elif args.command == 'features':
         cmd_features(args)
     elif args.command == 'backup':

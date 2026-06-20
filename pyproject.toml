@@ -13,6 +13,8 @@ version = {file = "VERSION"}
 
 [project.scripts]
 dax = "dax:main"
+dax-creds = "dax_creds.cli:main"
 
 [tool.setuptools]
 py-modules = ["dax"]
+packages = ["dax_creds", "dax_creds.providers"]
