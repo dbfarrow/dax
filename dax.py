@@ -59,7 +59,7 @@ def load_config():
         with open(os.path.join(home, '.dax.yaml'), 'r') as f:
             defaults = yaml.safe_load(f)
     except FileNotFoundError:
-        dax_print("[!] no ~/.dax.yaml found. Copy dax-defaults.yaml to ~/.dax.yaml and configure it.")
+        dax_print("[!] no ~/.dax.yaml found. Copy .dax.yaml.example to ~/.dax.yaml and configure it.")
         sys.exit(-1)
 
     defaults['cwd'] = cwd

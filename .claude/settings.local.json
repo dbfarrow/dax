@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh-keyscan -H github.com)",
+      "Bash(git push *)",
+      "Bash(mkdir -p ~/.ssh)",
+      "Read(//home/dfarrow/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(python3 *)",
+      "Bash(xargs ls -la)",
+      "Bash(sed -n *)"
+    ]
+  }
+}
