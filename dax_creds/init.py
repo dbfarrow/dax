@@ -29,48 +29,74 @@ def save_config(config):
         yaml.dump(config, f, default_flow_style=False)
 
 
+def _q_text(prompt, default=None):
+    import questionary
+    result = questionary.text(prompt, default=default or '').ask()
+    if result is None:
+        raise KeyboardInterrupt
+    return result.strip() or default
+
+
+def _q_select(prompt, choices):
+    import questionary
+    result = questionary.select(prompt, choices=choices).ask()
+    if result is None:
+        raise KeyboardInterrupt
+    return result
+
+
+def _q_confirm(prompt, default=False):
+    import questionary
+    result = questionary.confirm(prompt, default=default).ask()
+    if result is None:
+        raise KeyboardInterrupt
+    return result
+
+
+def _q_checkbox(prompt, choices):
+    import questionary
+    result = questionary.checkbox(prompt, choices=choices).ask()
+    if result is None:
+        raise KeyboardInterrupt
+    return result
+
+
 def _prompt(prompt, default=None):
-    suffix = f' [{default}]' if default else ''
-    value = input(f'{prompt}{suffix}: ').strip()
-    return value or default
+    return _q_text(prompt, default=default)
 
 
 def _pick_from_list(prompt, options, allow_none=False):
-    print(prompt)
-    for i, opt in enumerate(options, 1):
-        print(f'  {i}) {opt}')
+    choices = list(options)
     if allow_none:
-        print('  0) none / done')
-    while True:
-        raw = input('> ').strip()
-        if allow_none and raw == '0':
-            return None
-        try:
-            idx = int(raw) - 1
-            if 0 <= idx < len(options):
-                return options[idx]
-        except ValueError:
-            pass
-        print('Invalid selection.')
+        choices = choices + ['(done)']
+    picked = _q_select(prompt, choices)
+    if allow_none and picked == '(done)':
+        return None
+    return picked
 
 
-def _define_credential(cred_name, provider_name):
+def _pick_browser(browser_enumerator=None):
+    from dax_creds.chrome import enumerate_browsers
+    import questionary
+    browsers = browser_enumerator() if browser_enumerator else enumerate_browsers()
+    choices = [questionary.Choice(b['label'], value=b) for b in browsers]
+    picked = _q_select('Browser for OAuth flow:', choices)
+    return picked
+
+
+def _define_credential(cred_name, provider_name, browser_enumerator=None):
     cred_def = {'provider': provider_name}
     if provider_name == 'ssh':
         key_path = _prompt('Key file path', default='~/.ssh/id_ed25519')
         cred_def['key'] = key_path
     elif provider_name in ('github', 'claude', 'gmail'):
-        from dax_creds.chrome import enumerate_browsers
         if provider_name == 'gmail':
             scope = _prompt('Gmail scope', default='readonly')
             cred_def['scope'] = scope
-        browsers = enumerate_browsers()
-        labels = [b['label'] for b in browsers]
-        picked = _pick_from_list('Browser for OAuth flow:', labels)
-        choice = browsers[labels.index(picked)]
-        cred_def['browser'] = choice['browser']
-        if choice['chrome_profile']:
-            cred_def['chrome_profile'] = choice['chrome_profile']
+        picked = _pick_browser(browser_enumerator)
+        cred_def['browser'] = picked['browser']
+        if picked['chrome_profile']:
+            cred_def['chrome_profile'] = picked['chrome_profile']
     return cred_def
 
 
@@ -156,6 +182,8 @@ def run_init(config, cwd):
 
 
 def _run_init(config, cwd):
+    import questionary
+
     existing_project_name = next(
         (name for name, p in config.get('projects', {}).items()
          if Path(p['dir']) == cwd),
@@ -165,8 +193,7 @@ def _run_init(config, cwd):
 
     if existing_project_name:
         print(f'  {cwd.name} is already registered as "{existing_project_name}".')
-        answer = _prompt('Update it? [y/N]', default='N')
-        if answer.lower() != 'y':
+        if not _q_confirm('Update it?', default=False):
             print('Nothing changed.')
             return config
 
@@ -174,40 +201,28 @@ def _run_init(config, cwd):
     image = _prompt('Image', default=default_image)
 
     existing_creds = list(config.get('credentials', {}).keys())
-    # pre-populate with already-attached creds for this project
-    selected_creds = list(existing_project.get('creds', []))
+    already_selected = set(existing_project.get('creds', []))
     new_creds = {}
 
-    print('\nCredentials (select existing or define new; 0 when done):')
-    while True:
-        options = existing_creds + ['[ new credential ]']
-        choice = _pick_from_list('Add a credential:', options, allow_none=True)
-        if choice is None:
-            break
-        if choice == '[ new credential ]':
-            cred_name = _prompt('Credential name (e.g. ssh-github, github-dfarrow)')
-            if not cred_name:
-                continue
-            provider_name = _pick_from_list('Provider:', ['ssh', 'github', 'claude', 'gmail'])
-            cred_def = _define_credential(cred_name, provider_name)
-            new_creds[cred_name] = cred_def
-            existing_creds.append(cred_name)
-            if cred_name not in selected_creds:
-                selected_creds.append(cred_name)
-        else:
-            if choice not in selected_creds:
-                selected_creds.append(choice)
+    # Single checkbox — existing creds pre-checked if already attached
+    if existing_creds:
+        choices = [
+            questionary.Choice(name, checked=(name in already_selected))
+            for name in existing_creds
+        ]
+        selected_creds = _q_checkbox('Select credentials for this project:', choices)
+    else:
+        selected_creds = []
 
-    if selected_creds:
-        print('\nRemove credentials from this project (0 when done):')
-        while True:
-            choice = _pick_from_list('Remove a credential:', selected_creds, allow_none=True)
-            if choice is None:
-                break
-            selected_creds.remove(choice)
-            print(f'  Removed {choice}.')
-            if not selected_creds:
-                break
+    # Define new credentials
+    while _q_confirm('Define a new credential?', default=False):
+        cred_name = _prompt('Credential name (e.g. ssh-github, github-dfarrow)')
+        if not cred_name:
+            continue
+        provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'gmail'])
+        cred_def = _define_credential(cred_name, provider_name)
+        new_creds[cred_name] = cred_def
+        selected_creds.append(cred_name)
 
     config.setdefault('credentials', {}).update(new_creds)
 
@@ -249,12 +264,11 @@ def _run_creds_add(config):
     existing = config.get('credentials', {}).get(cred_name)
     if existing:
         print(f'  "{cred_name}" already exists (provider: {existing.get("provider")}).')
-        answer = _prompt('Overwrite it? [y/N]', default='N')
-        if answer.lower() != 'y':
+        if not _q_confirm('Overwrite it?', default=False):
             print('Nothing changed.')
             return config
 
-    provider_name = _pick_from_list('Provider:', ['ssh', 'github', 'claude', 'gmail'])
+    provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'gmail'])
     cred_def = _define_credential(cred_name, provider_name)
     config.setdefault('credentials', {})[cred_name] = cred_def
 
@@ -445,7 +459,9 @@ _PROVIDER_FIELDS = {
 }
 
 
-def run_creds_update(config, name=None, _prompter=None, _browser_enumerator=None):
+def run_creds_update(config, name=None, _prompter=None, _browser_enumerator=None, _picker=None):
+    import questionary
+
     credentials = config.get('credentials', {})
 
     if name is None:
@@ -453,9 +469,30 @@ def run_creds_update(config, name=None, _prompter=None, _browser_enumerator=None
         if not names:
             print('No credentials registered.')
             return
-        labels = [f'{n}  ({credentials[n].get("provider", "?")})' for n in names]
-        picked = _pick_from_list('Select credential to update:', labels)
-        name = names[labels.index(picked)]
+        if _picker:
+            labels = [f'{n}  ({credentials[n].get("provider", "?")})' for n in names]
+            picked_label = _picker('Select credential to update:', labels)
+            name = names[labels.index(picked_label)]
+        else:
+            stored_bool_map = {
+                n: bool(_keyring_module and _keyring_module.get_password(_KEYCHAIN_SERVICE, n))
+                for n in names
+            }
+            envs_map = {n: [] for n in names}
+            for proj_name, proj in config.get('projects', {}).items():
+                for c in proj.get('creds', []):
+                    if c in envs_map:
+                        envs_map[c].append(proj_name)
+            choices = [
+                questionary.Choice(
+                    f'{n}  {credentials[n].get("provider", "?")}'
+                    f'  {"●" if stored_bool_map[n] else "○"}'
+                    f'  {", ".join(envs_map[n]) or "—"}',
+                    value=n,
+                )
+                for n in names
+            ]
+            name = _q_select('Select credential to update:', choices)
 
     if name not in credentials:
         raise KeyError(name)
@@ -486,27 +523,35 @@ def run_creds_update(config, name=None, _prompter=None, _browser_enumerator=None
         if field == 'browser':
             from dax_creds.chrome import enumerate_browsers, browser_label
             browsers = _browser_enumerator() if _browser_enumerator else enumerate_browsers()
-            current_browser = cred_def.get('browser', 'default')
-            current_profile = cred_def.get('chrome_profile')
-            current_display = browser_label(current_browser, current_profile)
-            print(f'  browser: {current_display}')
-            for i, b in enumerate(browsers, 1):
-                print(f'    {i}) {b["label"]}')
-            choice = prompter('  Select number (blank to keep)', default='')
-            if choice:
-                try:
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(browsers):
-                        picked = browsers[idx]
+            if _prompter:
+                # Legacy path for tests: numbered list via prompter
+                current_browser = cred_def.get('browser', 'default')
+                current_profile = cred_def.get('chrome_profile')
+                current_display = browser_label(current_browser, current_profile)
+                print(f'  browser: {current_display}')
+                for i, b in enumerate(browsers, 1):
+                    print(f'    {i}) {b["label"]}')
+                choice = prompter('  Select number (blank to keep)', default='')
+                if choice:
+                    try:
+                        idx = int(choice) - 1
+                        picked = browsers[idx] if 0 <= idx < len(browsers) else None
+                    except ValueError:
+                        picked = None
+                    if picked:
                         cred_def['browser'] = picked['browser']
                         if picked['chrome_profile']:
                             cred_def['chrome_profile'] = picked['chrome_profile']
                         else:
                             cred_def.pop('chrome_profile', None)
-                    else:
-                        print('  Invalid selection, keeping current.')
-                except ValueError:
-                    print('  Invalid selection, keeping current.')
+            else:
+                choices = [questionary.Choice(b['label'], value=b) for b in browsers]
+                picked = _q_select('Browser:', choices)
+                cred_def['browser'] = picked['browser']
+                if picked['chrome_profile']:
+                    cred_def['chrome_profile'] = picked['chrome_profile']
+                else:
+                    cred_def.pop('chrome_profile', None)
         else:
             current = cred_def.get(field, '')
             new_val = prompter(f'  {field}', default=current)

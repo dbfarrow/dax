@@ -138,13 +138,12 @@ def test_creds_update_picks_credential_when_name_omitted(tmp_path, monkeypatch):
         {'label': 'Default browser', 'browser': 'default', 'chrome_profile': None},
         {'label': 'Firefox',         'browser': 'firefox', 'chrome_profile': None},
     ]
-    # _pick_from_list uses input(); patch it to select 'github-work  (github)'
-    monkeypatch.setattr('builtins.input', lambda _: '2')
 
     run_creds_update(
         config, name=None,
         _prompter=lambda prompt, default=None: '',  # blank = keep current
         _browser_enumerator=lambda: fake_browsers,
+        _picker=lambda prompt, choices: choices[1],  # pick second item = 'github-work...'
     )
 
     # github-work should have been updated (browser kept as 'default')
