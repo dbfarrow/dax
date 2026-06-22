@@ -20,6 +20,14 @@ class SshProvider:
         result = self._run(['ssh-add', '-l'], env=env)
         return str(key_path) in result.stdout
 
+    def has_passphrase(self, credential_def):
+        key_path = Path(credential_def['key']).expanduser()
+        if not key_path.exists():
+            return None  # can't tell
+        result = self._run(['ssh-keygen', '-y', '-P', '', '-f', str(key_path)])
+        # exit 0 with public key output = no passphrase; non-zero = passphrase set
+        return result.returncode != 0
+
     def setup(self, credential_def, agent_sock=None):
         key_path = Path(credential_def['key']).expanduser()
         env = dict(os.environ)
