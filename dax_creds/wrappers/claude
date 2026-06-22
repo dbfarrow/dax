@@ -1,6 +1,9 @@
 #!/bin/bash
 if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ]; then
-    _token=$(dax-creds get "$DAX_CREDS_CLAUDE" 2>/dev/null)
-    [ -n "$_token" ] && export ANTHROPIC_API_KEY="$_token"
+    _creds=$(dax-creds get "$DAX_CREDS_CLAUDE" 2>/dev/null)
+    if [ -n "$_creds" ]; then
+        mkdir -p ~/.claude
+        printf '%s' "$_creds" > ~/.claude/credentials.json
+    fi
 fi
 exec /usr/bin/claude-real "$@"

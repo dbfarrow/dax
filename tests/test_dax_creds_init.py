@@ -1,7 +1,7 @@
 import pytest
 import yaml
 from pathlib import Path
-from dax_creds.init import register_project, save_config, run_creds_remove, ensure_project_credentials, run_creds_update
+from dax_creds.init import register_project, save_config, run_creds_remove, ensure_project_credentials, run_creds_update, _setup_claude_credential
 
 
 class FakeKeyring:
@@ -173,6 +173,50 @@ def test_ensure_project_credentials_returns_empty_when_cred_in_keychain(tmp_path
     missing = ensure_project_credentials(config, project_creds, keyring=kr)
 
     assert missing == []
+
+
+def test_setup_claude_imports_credentials_json_as_blob(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv('HOME', str(tmp_path))
+    creds_dir = tmp_path / '.claude'
+    creds_dir.mkdir()
+    payload = {'claudeAiOauth': {'accessToken': 'sk-ant-oat01-abc', 'refreshToken': 'sk-ant-ort01-xyz'}}
+    (creds_dir / 'credentials.json').write_text(json.dumps(payload))
+
+    class FakeKeyring:
+        def __init__(self):
+            self._stored = {}
+        def get_password(self, s, n):
+            return self._stored.get((s, n))
+        def set_password(self, s, n, v):
+            self._stored[(s, n)] = v
+
+    kr = FakeKeyring()
+    import dax_creds.providers.claude as _cm
+    monkeypatch.setattr(_cm, '_keyring', kr)
+
+    _setup_claude_credential('claude-work', {'provider': 'claude'})
+
+    stored = json.loads(kr.get_password('dax-creds', 'claude-work'))
+    assert stored == payload
+
+
+def test_setup_claude_skips_when_already_in_keychain(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv('HOME', str(tmp_path))
+
+    class FakeKeyring:
+        def get_password(self, s, n):
+            return 'existing-token'
+        def set_password(self, s, n, v):
+            raise AssertionError('should not be called')
+
+    import dax_creds.providers.claude as _cm
+    monkeypatch.setattr(_cm, '_keyring', FakeKeyring())
+
+    _setup_claude_credential('claude-work', {'provider': 'claude'})
+
+    out = capsys.readouterr().out
+    assert 'already in Keychain' in out
 
 
 def test_save_config_writes_yaml(tmp_path, monkeypatch):

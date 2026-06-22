@@ -128,6 +128,24 @@ def _setup_github_credential(cred_name, cred_def, config):
         print(f'  [{cred_name}] failed: {e}', file=sys.stderr)
 
 
+def _setup_claude_credential(cred_name, cred_def):
+    from dax_creds.providers.claude import ClaudeProvider
+    provider = ClaudeProvider()
+
+    if provider.check(cred_def, cred_name):
+        print(f'  [{cred_name}] token already in Keychain.')
+        return
+
+    token = provider.import_from_disk(cred_def)
+    if token:
+        print(f'  [{cred_name}] importing existing token from ~/.claude/credentials.json')
+        provider.store(cred_name, token)
+        print(f'  [{cred_name}] done.')
+        return
+
+    print(f'  [{cred_name}] no token found — run `dax creds login {cred_name}` to authenticate.')
+
+
 def run_init(config, cwd):
     print('\ndax init\n')
     try:
@@ -180,6 +198,17 @@ def _run_init(config, cwd):
             if choice not in selected_creds:
                 selected_creds.append(choice)
 
+    if selected_creds:
+        print('\nRemove credentials from this project (0 when done):')
+        while True:
+            choice = _pick_from_list('Remove a credential:', selected_creds, allow_none=True)
+            if choice is None:
+                break
+            selected_creds.remove(choice)
+            print(f'  Removed {choice}.')
+            if not selected_creds:
+                break
+
     config.setdefault('credentials', {}).update(new_creds)
 
     for cred_name in selected_creds:
@@ -191,6 +220,8 @@ def _run_init(config, cwd):
             _setup_ssh_credential(cred_name, cred_def)
         elif provider_name == 'github':
             _setup_github_credential(cred_name, cred_def, config)
+        elif provider_name == 'claude':
+            _setup_claude_credential(cred_name, cred_def)
 
     project_name = existing_project_name or cwd.name
     register_project(config, name=project_name, project_dir=cwd,
@@ -231,6 +262,8 @@ def _run_creds_add(config):
         _setup_ssh_credential(cred_name, cred_def)
     elif provider_name == 'github':
         _setup_github_credential(cred_name, cred_def, config)
+    elif provider_name == 'claude':
+        _setup_claude_credential(cred_name, cred_def)
 
     save_config(config)
     print(f'\nCredential "{cred_name}" saved.')
@@ -258,6 +291,13 @@ def _cred_status(config, name, cred_def):
             from dax_creds.providers.github import GitHubProvider
             if GitHubProvider().has_disk_copy(cred_def, credential_name=name):
                 warnings.append('[!] token on disk')
+        except ImportError:
+            pass
+    elif provider == 'claude':
+        try:
+            from dax_creds.providers.claude import ClaudeProvider
+            if ClaudeProvider().has_disk_copy(cred_def):
+                warnings.append('[!] key on disk')
         except ImportError:
             pass
 
