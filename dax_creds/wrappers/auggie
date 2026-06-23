@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_AUGGIE" ]; then
+    _creds=$(dax-creds get "$DAX_CREDS_AUGGIE" 2>/dev/null)
+    [ -n "$_creds" ] && export AUGMENT_SESSION_AUTH="$_creds"
+fi
+exec /usr/bin/auggie-real "$@"

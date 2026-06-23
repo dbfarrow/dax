@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_GITHUB" ]; then
+    _token=$(dax-creds get "$DAX_CREDS_GITHUB" 2>/dev/null)
+    [ -n "$_token" ] && export GH_TOKEN="$_token"
+fi
+exec /usr/bin/gh-real "$@"

@@ -1,355 +1,356 @@
-# DAX - treating my laptop like cattle since 2018
+# dax
 
-Dockerizes my security tools*.
+Dax wraps Docker to give you reproducible, isolated development environments that feel like a local shell. The current directory is always mounted as your work directory, dotfiles follow you in, and credentials are brokered securely from the host — no secrets ever baked into images.
 
-1. [Prerequisites](#prerequisites)
-1. [Building](#building)
-  1. [Dotfiles](#dotfiles) 
-1. [Running](#running)
-  1. [Usage](#usage)
-  1. [Configuration](#configuration)
-  1. [Features](#features)
-  1. [Adding Features](#adding-features)
-1. [Origins](#origins)
+The core idea: your environment should be cattle, not pets. Spin one up, do the work, tear it down. Everything that matters lives on the host.
 
+---
 
-Dax is motivated by the ideal of infrastructure as code: It should be a simple and repeatable process to create a consistent working environment on a brand new machine. Such a process makes recovery from system failure a quick and simple thing.
+## Contents
 
-We take this idea one step further and maintain that it should be simple and repeatable to create multiple simultaneous such evironments on the same system. It is often desirable whileing work on a project to install packages that one would not normally want on a primary system. Dax allows a user to create a new environment, experiment with new packages, persist the work produced, and tear down the envrinment without changing the primary system state. And all work product from the experimental environment is retained on the primary system for future use.
+1. [Install & Build](#install--build)
+2. [Quick Start](#quick-start)
+3. [Configuration](#configuration)
+4. [Credential Management](#credential-management)
+5. [Environment Management](#environment-management)
+6. [Features Reference](#features-reference)
+7. [Adding Features](#adding-features)
 
-\* This pattern can be applied to any tools.. not just security tools. I just happen to have mostly security tools in my environment.
+---
 
->This project was inspired by a good friend's implementation of the same idea. While this code is free to use, I highly recommend you build this for yourself. The exercise of thinking through what parts of your working envrioment can be replaced at will and which must persist has been a fruitful experience for me and I expect it would be for you as well.
+## Install & Build
 
-## <a id='prerequisites'></a>Prerequisites
+**Prerequisites:** Python 3.7+, Docker Desktop
 
-To build DAX you will need the following:
-
-* Python 3.7+
-* virtualenv
-* git
-* docker
- 
-**NOTE:** DAX has been built and tested using MacOS 10.14, python2.7, and Docker Desktop Community 2.0.0.3. Some minimal testing has been done to ensure that the scripts run under python3 but your mileage may vary.
-
-## <a id='building'></a>Building
-
-Clone the repository and install:
-
-```
+```bash
 git clone https://github.com/dbfarrow/dax.git
 cd dax
 pip install -e .
 ```
 
-This installs the `dax` command globally so you can run it from any directory.
-
 Build the image:
 
-```
+```bash
 dax build
 ```
 
-Use `-c` for a clean build (no cache):
+Use `-c` to force a clean build (no layer cache):
 
-```
+```bash
 dax build -c
 ```
 
-The build script will prompt for a container password unless a `.daxpw` file exists with `0600` permissions.
+The build prompts for a container password unless a `.daxpw` file exists with `0600` permissions.
 
-### <a id='dotfiles'></a>Dotfiles
+---
 
-Dotfiles are mounted from the host at runtime rather than baked into the image. Configure them in `~/.dax.yaml` under the `dotfiles` key:
+## Quick Start
+
+Register the current directory as a dax project:
+
+```bash
+cd ~/work/my-project
+dax init
+```
+
+`dax init` asks for an image, lets you select or define credentials, and writes the project to `~/.dax.yaml`. After that:
+
+```bash
+dax run
+```
+
+That's it. You're in a container with your project mounted, dotfiles present, and credentials available.
+
+---
+
+## Configuration
+
+All configuration lives in `~/.dax.yaml`. A local `.dax.yaml` in the current directory can override or extend it.
+
+### Minimal example
 
 ```yaml
+image: dax:latest
+
+features:
+  - workdir
+  - dotfiles
+  - ssh
+
+workdir:
+  container: work
+
 dotfiles:
   ro:
     - ~/.zshrc
     - ~/.vimrc
-    - ~/.gitconfig
     - ~/.tmux.conf
   rw:
-    - ~/.zsh_history
+    - ~/.gitconfig
 ```
 
-Files in `ro` are mounted read-only. Files in `rw` are mounted read-write. The `dotfiles/` directory in the repo is no longer used.
-
-## <a id='running'></a>Running
-
-### <a id='usage'></a>Usage
-```
-usage: dax.py [-h] [-t] {build,run,features} ...
-
-optional arguments:
-  -h, --help   show this help message and exit
-  -t           test only - print the docker command and exit
-
-subcommands:
-  build        Build the dax Docker image
-  run          Launch a dax container
-  features     List available features
-
-dax.py run [-f FEATURES] [-p PORTS]
-  -f FEATURES  comma-separated features to include
-  -p PORTS     port mapping host:container (repeatable)
-```
-
-
-
-### <a id='configuration'></a>Configuration
-
-Dax has a global configuration file that defines the base image for the environment, the default features to include in an instance, and default properties for the features supported.
-
-#### ~/.dax.yaml
+### Full example
 
 ```yaml
-# DAX config file for a bare tools enviroment. The current working dir
-# will be mounted as the work directory. 
-#
-# If there are features that you want to define to be available to any 
-# instance then define their configuration here and reference them
-# in the local .dax.yaml file feature key or on the command line 
-# with -f
-#
+image: dax:latest
 
-image: dfarrow/dax:latest
-
-features: 
-  - workdir
-  - optdir
-
-workdir:
-  container: /home/dfarrow/work
-
-optdir:
-  host: /Users/dfarrow/fatsec/opt
-  container: /home/dfarrow/opt
-
-msf:
-  host: /Users/dfarrow/.msf4
-  container: /home/dfarrow/.msf4
-
-awsdir:
-  host: /Users/dfarrow/opt/dax/dotfiles/.aws
-  container: /home/dfarrow/.aws
-
-
-```
-
-#### Contents of ~/fatsec/code/aws/.dax.yaml:
-```yaml
 features:
-  - aws
-```
+  - workdir
+  - dotfiles
+  - ssh
+  - claude
+  - auggie
+  - webpreview
 
-
-
-## <a id='features'></a>Features
-
-The following features are currently supported:
-
-| name | description |  
-| -----| ----------- |
-| workdir | Specifies the path in the dax instance where the current host directory will be mapped |
-| optdir | Maps a directory of additional tools into the running container. Useful for things like wordlists and tools that aren't installed but, rather, run from a local directory. |
-| ports | Specifies the ports to expose to the host |
-| aws | Maps your AWS access tokens into the instance |
-| msf | Maps your metasploit database into the instance and exposes a default port |
-| X11 | Establishes the conditions necessary to forward X11 applications back to the host. 
-
----
-#### workdir
-
-This feature is the key to dax. It allows you to spin up a pristine working environment, do some work, and the results will persist on the host as long as they are written, in the instance, to the directory configured in this feature. 
-
-By default, when starting dax, the current directory will be mapped to `~/work` in the instance.
-
-Example config:
-
-```yaml
 workdir:
-  container: /home/dfarrow/work
-```
-where:
+  container: work
 
-  * **container** is the path where the host current directory will be mounted in the running instance.
-  
----
-#### optdir
+dotfiles:
+  ro:
+    - ~/.zshrc
+    - ~/.vimrc
+    - ~/.vim/
+    - ~/.tmux.conf
+  rw:
+    - ~/.dax.yaml
+    - ~/.gitconfig
+    - ~/.claude.json
 
-Use this feature to map into the dax instances tools that don't require installation. For example, if you run a development instance of metasploit, you can map your msf project directory into each dax instance by putting the project in to the opt directory that gets mapped in. This is also useful for supplying large data sets like the wordlists from SecLists to each of your instances without making copies everywhere.
+claudedir:
+  mount: ~/.claude
 
-Example config:
+auggiedir:
+  mount: ~/.augment
 
-```yaml
-optdir:
-  host: /Users/dfarrow/fatsec/opt
-  container: /home/dfarrow/opt
-```
-  
-where: 
-
-  * ***host*** is the source path on the host for additional tools to map into the running instance and 
-  * **container** is the path to those tools in the instance. 
-
----
-
-#### ports
-
-By default, no ports are exposed from the container when it starts. To expose a service, you must specify the ports to expose at run time. They cannot be exposed while the container is running.
-
-Example config:
-
-```yaml
-ports:
-  - 8000:80
-  - 8443:443
-```
-
-The configured values are passed directly to the `-p` paramter of `docker run`. In this example, port 80 of the running instance will be bound to port 8000 of the host machine. And port 443 will be bound to 8443. When exposing services from the container it may be necessary to bind the service to `0.0.0.0` for the host to be able to see it.
-
-Alternately, you can pass ports on the command line using the `-p` option if you don't want to set up a local config file.
-
----
-#### aws
-
-This feature makes your AWS client access tokens available to the running container. 
-
-Example config:
-
-```yaml
 awsdir:
-  host: /Users/dfarrow/opt/dax/dotfiles/.aws
-  container: /home/dfarrow/.aws
+  mount: ~/.aws
+
+backup:
+  - ~/.claude/CLAUDE.md
+  - ~/.claude/settings.json
+
+credentials:
+  ssh-id-rsa:
+    provider: ssh
+    key: ~/.ssh/id_rsa
+  github-dfarrow:
+    provider: github
+    browser: firefox
+  claude-work:
+    provider: claude
+    browser: default
+
+projects:
+  my-project:
+    dir: /Users/dfarrow/work/my-project
+    image: dax:latest
+    creds:
+      - ssh-id-rsa
+      - github-dfarrow
+      - claude-work
 ```
 
-where
-  * **host** is the path to your AWS config and credentials on the host
-  * **container** is the path where the config and credentials will be mounted in the container
+### Top-level keys
 
-A future release of dax will generate Amazon STS tokens and map them into the running container rather than exposing the user's client access tokens directly.
- 
----
-#### msf
-
-This feature exists to persist your MSF database between runs of dax. The MSF database files are stored on the host filesystem and mounted at runtime.
-
-The feature also exposes a single port, `4444`, by default. Use the `-p` option or create a local `.dax.yaml` file to specify other ports you want exposed.
-
-Example config:
-
-```yaml
-msfdir:
-  host: /Users/dfarrow/.msf4
-  container: /home/dfarrow/.msf4
-```
-
-where:
-  * **host** is the path to the MSF database files you want to have persist across dax runs
-  * **container** is the path in the container to the MSF database. Metasploit expects it to be in ~/.msf4 so it's probably best to not move it
-
-Note that containers can share the MSF database but they should not try to share it simultaneously. Each container will start its own instance of postgres to manage the database and those postgres processes will interfere with each other.
-
-I recommend using a workspace for each environment you use this feature in so that you can keep your work separated.  
-
-#### X11
-
-This feature configure the container to forward X11 application user interfaces back to the host display. It requires no configuration.
-
-Before running dax with this feature, start the X11 service in your host if it's not already started.
-
-On MacOS, the following command does the trick: `xhost + <hostip>`
+| Key | Description |
+| --- | --- |
+| `image` | Default Docker image to use |
+| `features` | Default feature list for `dax run` |
+| `dotfiles` | Files to mount into the container (`ro` / `rw`) |
+| `workdir` | Container path for the mounted working directory |
+| `credentials` | Named credential definitions (managed by `dax creds`) |
+| `projects` | Registered environments (managed by `dax init`) |
+| `backup` | Host paths to copy into `backup/` when running `dax backup` |
 
 ---
+
+## Credential Management
+
+Dax includes a credential brokering system so tools inside the container can authenticate without secrets ever being written into the image or passed on the command line.
+
+**How it works:** When `dax run` starts, a credential daemon launches on the host. The container connects to it over a Unix socket and requests tokens by name. Each credential type has its own provider that handles storage and acquisition.
+
+### Providers
 
 #### ssh
 
-SSH access inside the container uses agent forwarding via Docker Desktop's host agent socket. No private keys are ever copied into the container.
+Loads an SSH private key from macOS Keychain into an ephemeral SSH agent. The agent socket is forwarded into the container. Private keys never touch the container filesystem.
 
-Make sure your keys are loaded before launching:
-
-```
-ssh-add ~/.ssh/id_rsa
-```
-
-Then use the `ssh` feature:
-
-```
-python dax.py run -f ssh
+```yaml
+credentials:
+  ssh-id-rsa:
+    provider: ssh
+    key: ~/.ssh/id_rsa
 ```
 
-From inside the container, `ssh -A user@host` will forward the agent onward to remote hosts.
+#### github
 
-### <a id='adding-features'></a>Adding features
+Authenticates via GitHub's OAuth device flow (the same flow as `gh auth login`). The resulting token is stored in macOS Keychain. Inside the container, the `gh` CLI wrapper fetches the token from the daemon and sets `GH_TOKEN` automatically — so `gh` commands use the right account for the project, regardless of what's in `~/.config/gh/hosts.yml`.
 
-To add a new feature to dax, implement a function in `dax.py` following the naming and calling convention shown below:
+```yaml
+credentials:
+  github-dfarrow:
+    provider: github
+    browser: firefox        # browser used for the OAuth flow
+  github-work:
+    provider: github
+    browser: chrome
+    chrome_profile: Profile 3
+```
+
+#### claude
+
+Authenticates using Claude's OAuth flow — the same credentials that Claude Code uses, stored in `~/.claude/credentials.json`. Dax does **not** use Anthropic API keys. API keys are static long-lived secrets; the OAuth flow issues short-lived access tokens backed by a refresh token, which is more secure and consistent with how Claude Code itself authenticates.
+
+The `claude` wrapper inside the container fetches the credentials blob from the daemon and writes it to `~/.claude/credentials.json`. Claude Code then authenticates natively and handles token refresh on its own.
+
+```yaml
+credentials:
+  claude-work:
+    provider: claude
+    browser: default
+```
+
+#### auggie
+
+Authenticates using Augment Code's OAuth flow. The session JSON (including the access token) is stored in macOS Keychain. Inside the container, the `auggie` wrapper fetches the session blob from the daemon and sets `AUGMENT_SESSION_AUTH` — Augment prefers this environment variable over `~/.augment/session.json`.
+
+```yaml
+credentials:
+  auggie-work:
+    provider: auggie
+    login_url: https://auth-staging.augmentcode.com  # omit for production
+```
+
+`login_url` controls which OAuth server auggie authenticates against (maps to `auggie --login-url`). Omit it to use the production default (`https://auth.augmentcode.com`).
+
+**Note on re-authentication:** Auggie's OAuth flow uses a localhost callback that cannot be automatically brokered across the container/host boundary. `dax creds login` prints step-by-step instructions for completing the flow manually using `socat`. The easiest path for initial setup is to authenticate natively with auggie on any machine, then copy `~/.augment/session.json` to the host and run `dax creds add` to import it into Keychain.
+
+### Commands
+
+#### `dax creds add`
+
+Interactively define a new credential: name, provider, and provider-specific options. Imports an existing token from disk into Keychain if one is found (e.g. from `~/.config/gh/hosts.yml` for GitHub, `~/.claude/credentials.json` for Claude, or `~/.augment/session.json` for Auggie).
+
+#### `dax creds list`
+
+Show all credentials with status:
+
+```
+  name            provider  stored  detail        used by     warnings
+  --------------  --------  ------  ------------  ----------  ----------------
+  ssh-id-rsa      ssh       yes     ~/.ssh/id_rsa my-project
+  github-dfarrow  github    yes     firefox       my-project
+  claude-work     claude    yes     default       my-project  [!] key on disk
+```
+
+| Column | Meaning |
+| --- | --- |
+| stored | Whether the token is in macOS Keychain |
+| detail | Key path (ssh) or browser config (github/claude) |
+| used by | Projects that reference this credential |
+| warnings | Plaintext copy of the token exists on disk (see below) |
+
+#### `dax creds update [name]`
+
+Update credential metadata (browser, Chrome profile, key path). Omit `name` to pick interactively. Shows current configuration before prompting.
+
+#### `dax creds login <name>`
+
+Run the first-party auth flow for a credential and store the result in Keychain:
+
+- **ssh** — loads the key via `ssh-add --apple-use-keychain`
+- **github** — opens the OAuth device flow in the configured browser; polls until authorized
+- **claude** — opens the Claude OAuth flow in the configured browser
+- **auggie** — prints manual re-authentication instructions (see auggie provider note above)
+
+#### `dax creds remove <name>`
+
+Remove a credential's token from Keychain. Does not delete the credential definition from `~/.dax.yaml`.
+
+### Warnings
+
+`dax creds list` flags credentials where a plaintext copy of the token exists on disk:
+
+- **`[!] token on disk`** (github) — `~/.config/gh/hosts.yml` contains an `oauth_token`. Written by `gh auth login` and persists until explicitly removed. The token in Keychain is what dax uses; the one in `hosts.yml` is redundant and a minor security risk.
+- **`[!] key on disk`** (claude) — `~/.anthropic/api_key` or `~/.claude/credentials.json` exists. The `credentials.json` file is written by Claude Code's own auth flow and is expected to be present on the host; the warning is a reminder that it contains live credentials.
+- **`[!] session on disk`** (auggie) — `~/.augment/session.json` contains an `accessToken`. After `dax creds login` imports the session to Keychain it deletes this file; if it reappears (e.g. after a native auggie login) the Keychain copy may be stale.
+
+---
+
+## Environment Management
+
+A dax **environment** (or project) is a directory registered in `~/.dax.yaml` with an image and a set of credentials.
+
+#### `dax init`
+
+Run from any directory to register it as a dax project. Prompts for image and credentials (checkbox — space to toggle, enter to confirm). Re-running `dax init` in an already-registered directory lets you update the image or change which credentials are attached.
+
+#### `dax envs list`
+
+List all registered environments:
+
+```
+  [ ]  my-project   dax:latest  /Users/dfarrow/work/my-project   ssh-id-rsa, github-dfarrow
+  [*]  client-work  dax:latest  /Users/dfarrow/work/client-work  ssh-id-rsa, github-work
+  [!]  old-thing    dax:latest  /Users/dfarrow/work/old-thing    (none)
+```
+
+| Status | Meaning |
+| --- | --- |
+| `[ ]` | Directory exists, container not running |
+| `[*]` | Container currently running |
+| `[!]` | Directory does not exist |
+
+#### `dax run`
+
+Launch a container for the current directory. Dax looks up the project in `~/.dax.yaml`, starts the credential daemon, and assembles the `docker run` command from the configured features and credentials.
+
+```bash
+dax run                    # use project config
+dax run -f ssh,webpreview  # add features on the fly
+dax run -p 8080:80         # expose an extra port
+```
+
+---
+
+## Features Reference
+
+| Feature | Description |
+| --- | --- |
+| `workdir` | Mounts the current host directory as the working directory inside the container |
+| `dotfiles` | Mounts dotfiles from `~/.dax.yaml` into the container (`ro` or `rw`) |
+| `ssh` | Forwards the SSH agent into the container; keys stay on the host |
+| `claude` | Mounts `~/.claude` into the container for Claude Code config |
+| `auggie` | Mounts `~/.augment` into the container for Augment Code |
+| `github` | Mounts `~/.config/gh` into the container for gh CLI config |
+| `aws` | Mounts `~/.aws` into the container (warns that credentials are exposed) |
+| `webpreview` | Starts `dax-preview` — a rendered file browser served on a stable port (8000–8999, derived from the project directory) |
+| `ports` | Exposes additional ports; configure in `~/.dax.yaml` or pass `-p host:container` |
+| `optdir` | Mounts a directory of additional tools into the container |
+
+### webpreview
+
+`dax-preview` serves the working directory over HTTP with GitHub-style directory listings, rendered Markdown, and a collapsible file tree sidebar. The port is deterministic per project directory (same port every run) and can be overridden:
+
+```yaml
+webpreview:
+  port: 8731
+```
+
+---
+
+## Adding Features
+
+Implement a function in `dax.py` named `feature_<name>` that takes the config dict and returns a list of `docker run` arguments:
 
 ```python
 def feature_hosttmp(config):
-	opts = []
-	opts.append("-v")
-	opts.append("/tmp:/tmp/host")
-	return opts
+    return ['--volume', '/tmp:/tmp/host']
 ```
 
-The feature above maps the hosts `/tmp` directory into the `/tmp/host` dir in the running container.
+The feature is then available by name in config files and on the command line:
 
-The feature can now be referenced in config files or on the command line by the name `hosttmp`.
-
-
-## Origins
-
-The following material came from discussions with my muse who will rename nameless until he approves of the messages attributed to him herein.
-
-#### Image tasks
-
-* copy ~/opt tools: gobuster, peda
-* install: python, pip, virtualenv, msf, john, nmap, cmsmap, sqlmap, gdb, radare2, build-essentials, 32bit arch support?, socat, postgresql, ruby, rbenv
-* run browser in container
-* strace/ptrace
-
-#### Collection of thoughts from my muse
-
->ahhh. a word of warning: I'm told doing the same X trickery on MacOS is going to be a headache if not impossible 😕
-
-Getting started with docker
-> https://docs.docker.com/get-started/#test-docker-installation
-
-> https://docs.docker.com/engine/reference/builder/ - read up on FROM, RUN, COPY (briefly research COPY vs. ADD and why you should prefer COPY), WORKDIR, CMD. skim everything else very quickly
-
-> https://docs.docker.com/engine/reference/run/ - read up on --rm, -t, -i (you'll almost always do '-ti'), --volume (-v) - pay attention to the "ro" decorator, --cap-add, --env. read --security-opt but don't get too bogged down (I treat it as a bit of a black box - it's important for making Chrome behave). skim everything else very quickly
-
-> https://github.com/jessfraz/dockerfiles/blob/master/chrome/stable/Dockerfile - read it in conjunction with the Dockerfile reference, read the commented-out 'docker run' monster at the top in conjunction with the docker-run reference
-
->other handy references:
-> man Dockerfile
-> man docker-run
-> other handy things: 'docker ps', 'docker exec', 'docker cp'
-
-Some video tutorials that may help
-
-> twitch.tv/theJustinSteven - Docker for Hackers #programmingtwitch.tv/theJustinSteven - Docker for Hackers #programming
-
-> https://www.youtube.com/watch?v=9j15H-YIYb0
-
-Security considerations of running docker on your machine:
-
-> https://docs.docker.com/engine/security/security/#docker-daemon-attack-surface (takeaway: putting people in the 'docker' group essentially is the same as making them a passwordless sudoer)
-(I have the habit of doing 'sudo -g docker docker run ...' to passwordfully switch into the docker group to give me permission to use the 'docker' client binary to talk to the 'docker socket')
-
-> ```
-13:27:01[~]% ls -la /run/docker.sock
-srw-rw---- 1 root docker 0 Aug 30 19:55 /run/docker.sock
-that bad boy there, writable by group 'docker', is a socket that can be used to root your host
+```bash
+dax run -f hosttmp
 ```
-
-My muse expresses his opinion of using the kali docker image for this exercise. 
-> I wouldn't spend tooo much time playing with the kali Docker image personally
-> 
-> I think understanding jessfraz's Chrome Image, and playing with 'sudo -g docker docker run -ti --rm debian bash' to drop yourself into a naked Debian container (and seeing just how bare it is) is a much more efficient use of time
-
-After pressing him, he reiterates  The recommendation is not a reflection on Kali but rather an reiteration of his belief that the practice of accumulating your own security tools is a valuable exercise.
-
-
-
