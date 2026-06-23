@@ -419,6 +419,10 @@ RUN mv /usr/bin/claude /usr/bin/claude-real
 COPY dax_creds/wrappers/claude /usr/bin/claude
 RUN chmod +x /usr/bin/claude
 
+RUN mv /usr/bin/auggie /usr/bin/auggie-real
+COPY dax_creds/wrappers/auggie /usr/bin/auggie
+RUN chmod +x /usr/bin/auggie
+
 COPY dax_creds/wrappers/dax-creds-open-url /usr/bin/dax-creds-open-url
 RUN chmod +x /usr/bin/dax-creds-open-url
 

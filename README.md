@@ -211,11 +211,26 @@ credentials:
     browser: default
 ```
 
+#### auggie
+
+Authenticates using Augment Code's OAuth flow. The session JSON (including the access token) is stored in macOS Keychain. Inside the container, the `auggie` wrapper fetches the session blob from the daemon and sets `AUGMENT_SESSION_AUTH` — Augment prefers this environment variable over `~/.augment/session.json`.
+
+```yaml
+credentials:
+  auggie-work:
+    provider: auggie
+    login_url: https://auth-staging.augmentcode.com  # omit for production
+```
+
+`login_url` controls which OAuth server auggie authenticates against (maps to `auggie --login-url`). Omit it to use the production default (`https://auth.augmentcode.com`).
+
+**Note on re-authentication:** Auggie's OAuth flow uses a localhost callback that cannot be automatically brokered across the container/host boundary. `dax creds login` prints step-by-step instructions for completing the flow manually using `socat`. The easiest path for initial setup is to authenticate natively with auggie on any machine, then copy `~/.augment/session.json` to the host and run `dax creds add` to import it into Keychain.
+
 ### Commands
 
 #### `dax creds add`
 
-Interactively define a new credential: name, provider, browser. Imports an existing token from disk into Keychain if one is found (e.g. from `~/.config/gh/hosts.yml` for GitHub, or `~/.claude/credentials.json` for Claude).
+Interactively define a new credential: name, provider, and provider-specific options. Imports an existing token from disk into Keychain if one is found (e.g. from `~/.config/gh/hosts.yml` for GitHub, `~/.claude/credentials.json` for Claude, or `~/.augment/session.json` for Auggie).
 
 #### `dax creds list`
 
@@ -247,6 +262,7 @@ Run the first-party auth flow for a credential and store the result in Keychain:
 - **ssh** — loads the key via `ssh-add --apple-use-keychain`
 - **github** — opens the OAuth device flow in the configured browser; polls until authorized
 - **claude** — opens the Claude OAuth flow in the configured browser
+- **auggie** — prints manual re-authentication instructions (see auggie provider note above)
 
 #### `dax creds remove <name>`
 
@@ -258,6 +274,7 @@ Remove a credential's token from Keychain. Does not delete the credential defini
 
 - **`[!] token on disk`** (github) — `~/.config/gh/hosts.yml` contains an `oauth_token`. Written by `gh auth login` and persists until explicitly removed. The token in Keychain is what dax uses; the one in `hosts.yml` is redundant and a minor security risk.
 - **`[!] key on disk`** (claude) — `~/.anthropic/api_key` or `~/.claude/credentials.json` exists. The `credentials.json` file is written by Claude Code's own auth flow and is expected to be present on the host; the warning is a reminder that it contains live credentials.
+- **`[!] session on disk`** (auggie) — `~/.augment/session.json` contains an `accessToken`. After `dax creds login` imports the session to Keychain it deletes this file; if it reappears (e.g. after a native auggie login) the Keychain copy may be stale.
 
 ---
 

@@ -10,19 +10,11 @@ except ImportError:
 _KEYCHAIN_SERVICE = 'dax-creds'
 
 
-def _default_disk_locations():
-    home = Path.home()
-    return [
-        home / '.anthropic' / 'api_key',
-        home / '.claude' / 'credentials.json',
-    ]
+def _default_session_json():
+    return Path.home() / '.augment' / 'session.json'
 
 
-def _default_credentials_json():
-    return Path.home() / '.claude' / 'credentials.json'
-
-
-class ClaudeProvider:
+class AuggieProvider:
     def __init__(self, keyring=None):
         self._keyring = keyring or _keyring
 
@@ -34,23 +26,31 @@ class ClaudeProvider:
         self._require_keyring()
         return self._keyring.get_password(_KEYCHAIN_SERVICE, credential_name) is not None
 
-    def import_from_disk(self, credential_def, credentials_file=None):
-        path = Path(credentials_file) if credentials_file else _default_credentials_json()
+    def import_from_disk(self, credential_def, session_file=None):
+        path = Path(session_file) if session_file else _default_session_json()
         if not path.exists():
             return None
         try:
             import json
             with open(path) as f:
                 data = json.load(f)
-            if 'claudeAiOauth' not in data:
+            if 'accessToken' not in data:
                 return None
             return json.dumps(data)
         except Exception:
             return None
 
-    def has_disk_copy(self, credential_def, disk_locations=None):
-        locations = disk_locations if disk_locations is not None else _default_disk_locations()
-        return any(p.exists() and p.stat().st_size > 0 for p in locations)
+    def has_disk_copy(self, credential_def, session_file=None):
+        path = Path(session_file) if session_file else _default_session_json()
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        try:
+            import json
+            with open(path) as f:
+                data = json.load(f)
+            return 'accessToken' in data
+        except Exception:
+            return False
 
     def store(self, credential_name, token):
         self._require_keyring()

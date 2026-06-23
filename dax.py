@@ -510,12 +510,40 @@ _LOGIN_PROVIDERS = {
 }
 
 
+def _cmd_creds_login_auggie(cred_name, cred_def, config):
+    login_url = cred_def.get('login_url', 'https://auth.augmentcode.com')
+    dax_print(f'[+] dax creds login: auggie OAuth login URL: {login_url}')
+    dax_print('')
+    dax_print('    Auggie uses a localhost OAuth callback that cannot be automatically')
+    dax_print('    brokered across the container/host boundary. To authenticate manually:')
+    dax_print('')
+    dax_print('    1. Pick a free port, e.g. 9876.')
+    dax_print('    2. In one terminal, start auggie in a container and note the callback port:')
+    dax_print(f'         docker run -it --rm --platform=linux/amd64 \\')
+    dax_print(f'           -p 9876:9876 \\')
+    dax_print(f'           -v ~/.augment:/home/{_get_username()}/.augment \\')
+    dax_print(f'           dax:latest auggie --login-url {login_url} login --headless')
+    dax_print('    3. When auggie prints its callback URL (e.g. http://127.0.0.1:35917/callback),')
+    dax_print('       in another terminal start socat to forward your chosen port to it:')
+    dax_print('         docker exec <container> socat TCP-LISTEN:9876,fork TCP:127.0.0.1:35917')
+    dax_print('    4. In your browser, open the auth URL but replace the redirect_uri port')
+    dax_print('       with your chosen port (9876).  Complete login.')
+    dax_print('    5. Once ~/.augment/session.json is written, run:')
+    dax_print(f'         dax creds add {cred_name}')
+    dax_print('')
+    _post_login_import(cred_name, cred_def, config, 'auggie')
+
+
 def cmd_creds_login(cred_name, config):
     cred_def = config.get('credentials', {}).get(cred_name)
     if cred_def is None:
         raise KeyError(cred_name)
 
     provider = cred_def.get('provider')
+    if provider == 'auggie':
+        _cmd_creds_login_auggie(cred_name, cred_def, config)
+        return
+
     provider_cfg = _LOGIN_PROVIDERS.get(provider)
     if not provider_cfg:
         print(f"dax creds login: no login flow defined for provider '{provider}'")
@@ -578,6 +606,16 @@ def _post_login_import(cred_name, cred_def, config, provider):
             dax_print(f'[!] {cred_name}: no token found after auth flow.')
     elif provider == 'claude':
         dax_print(f'[+] {cred_name}: auth complete. Run `dax creds add` to store the token if needed.')
+    elif provider == 'auggie':
+        from dax_creds.providers.auggie import AuggieProvider
+        provider_obj = AuggieProvider()
+        token = provider_obj.import_from_disk(cred_def)
+        if token:
+            provider_obj.store(cred_name, token)
+            dax_print(f'[+] {cred_name}: session imported to Keychain.')
+            _clear_auggie_session()
+        else:
+            dax_print(f'[!] {cred_name}: no session found after auth flow.')
 
 
 def _clear_gh_hosts_token():
@@ -603,6 +641,17 @@ def _clear_gh_hosts_token():
             dax_print('[-]   token removed from ~/.config/gh/hosts.yml')
     except Exception as e:
         dax_print(f'[!] could not clear hosts.yml: {e}')
+
+
+def _clear_auggie_session():
+    session_file = Path.home() / '.augment' / 'session.json'
+    if not session_file.exists():
+        return
+    try:
+        session_file.unlink()
+        dax_print('[-]   session removed from ~/.augment/session.json')
+    except Exception as e:
+        dax_print(f'[!] could not clear ~/.augment/session.json: {e}')
 
 
 def cmd_creds(args):
