@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -39,8 +39,61 @@ class FileTokenStore:
 
 
 class PassthroughExchanger:
-    def exchange(self, provider, refresh_token):
+    def exchange(self, provider, refresh_token, cred_def=None):
         return {'token': refresh_token, 'expires_at': '2099-01-01T00:00:00+00:00'}
+
+
+class GoogleTokenExchanger:
+    _TOKEN_URL = 'https://oauth2.googleapis.com/token'
+
+    def exchange(self, provider, refresh_token, cred_def=None):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        cred_def = cred_def or {}
+        client_id = cred_def.get('client_id')
+        client_secret = cred_def.get('client_secret')
+        if not client_id or not client_secret:
+            return {
+                'error': 'missing_client_credentials',
+                'message': f'client_id and client_secret required for {provider}',
+            }
+        body = urllib.parse.urlencode({
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'refresh_token': refresh_token,
+            'grant_type': 'refresh_token',
+        }).encode()
+        req = urllib.request.Request(
+            self._TOKEN_URL, data=body, method='POST',
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                result = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            error_body = json.loads(e.read())
+            return {
+                'error': 'token_refresh_failed',
+                'message': error_body.get('error_description', str(e)),
+            }
+        access_token = result.get('access_token')
+        expires_in = result.get('expires_in', 3600)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 60)
+        return {'token': access_token, 'expires_at': expires_at.isoformat()}
+
+
+class DispatchingExchanger:
+    _GOOGLE_PROVIDERS = frozenset({'gmail', 'drive'})
+
+    def __init__(self):
+        self._google = GoogleTokenExchanger()
+        self._passthrough = PassthroughExchanger()
+
+    def exchange(self, provider, refresh_token, cred_def=None):
+        if provider in self._GOOGLE_PROVIDERS:
+            return self._google.exchange(provider, refresh_token, cred_def)
+        return self._passthrough.exchange(provider, refresh_token)
 
 
 def handle_open_url(request, credentials, url_opener):
@@ -64,12 +117,13 @@ def handle_request(request, credentials, token_store, token_exchanger, cache):
         expires_at = datetime.fromisoformat(entry['expires_at'].replace('Z', '+00:00'))
         if expires_at > datetime.now(timezone.utc):
             return entry
-    provider = credentials[name]['provider']
+    cred_def = credentials[name]
+    provider = cred_def['provider']
     try:
         refresh_token = token_store.get_refresh_token(name)
     except KeyError:
         return {'error': 'not_in_keychain', 'message': f'{name!r} not in Keychain — run: dax creds login {name}'}
-    result = token_exchanger.exchange(provider, refresh_token)
+    result = token_exchanger.exchange(provider, refresh_token, cred_def)
     cache[name] = result
     return result
 
@@ -148,7 +202,7 @@ if __name__ == '__main__':
 
     credentials = json.loads(args.credentials)
     token_store = KeyringTokenStore()
-    exchanger = PassthroughExchanger()
+    exchanger = DispatchingExchanger()
 
     if args.tcp_port:
         asyncio.run(run_tcp_daemon('0.0.0.0', args.tcp_port, credentials, token_store, exchanger))

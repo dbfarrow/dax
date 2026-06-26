@@ -456,10 +456,13 @@ def cmd_run(args):
                 container_sock = '/run/dax-creds.sock'
                 cmd += ['-v', '{}:{}'.format(sock_path, container_sock)]
                 cmd += ['-e', 'DAX_CREDS_SOCK={}'.format(container_sock)]
+                cmd += ['-e', 'DAX_CREDS_NAMES={}'.format(','.join(project_creds.keys()))]
+                seen_providers = set()
                 for cred_name, cred_def in project_creds.items():
                     provider = cred_def.get('provider', '').upper()
-                    if provider:
+                    if provider and provider not in seen_providers:
                         cmd += ['-e', 'DAX_CREDS_{}={}'.format(provider, cred_name)]
+                        seen_providers.add(provider)
                 dax_print("[-]   credentials: {}".format(list(project_creds.keys())))
             else:
                 dax_print("[!] credential daemon socket did not appear — skipping")
@@ -534,6 +537,29 @@ def _cmd_creds_login_auggie(cred_name, cred_def, config):
     _post_login_import(cred_name, cred_def, config, 'auggie')
 
 
+def _cmd_creds_login_google(cred_name, cred_def, config):
+    from dax_creds.providers.google import GoogleProvider
+    provider = GoogleProvider(cred_def['provider'])
+
+    browser = cred_def.get('browser', 'default')
+    chrome_profile = cred_def.get('chrome_profile')
+    if browser == 'chrome' and chrome_profile:
+        from dax_creds.chrome import open_url_in_profile
+        opener = lambda url: open_url_in_profile(url, chrome_profile)
+    elif browser and browser != 'default':
+        _app = {'firefox': 'Firefox', 'safari': 'Safari', 'arc': 'Arc',
+                'brave': 'Brave Browser'}.get(browser, browser.title())
+        opener = lambda url: subprocess.Popen(['open', '-a', _app, url])
+    else:
+        opener = lambda url: subprocess.Popen(['open', url])
+
+    try:
+        provider.acquire(cred_def, cred_name, prompter=dax_print, opener=opener)
+    except (RuntimeError, ValueError) as e:
+        dax_print(f'[!] {cred_name}: {e}')
+        sys.exit(1)
+
+
 def cmd_creds_login(cred_name, config):
     cred_def = config.get('credentials', {}).get(cred_name)
     if cred_def is None:
@@ -542,6 +568,10 @@ def cmd_creds_login(cred_name, config):
     provider = cred_def.get('provider')
     if provider == 'auggie':
         _cmd_creds_login_auggie(cred_name, cred_def, config)
+        return
+
+    if provider in ('gmail', 'drive'):
+        _cmd_creds_login_google(cred_name, cred_def, config)
         return
 
     provider_cfg = _LOGIN_PROVIDERS.get(provider)

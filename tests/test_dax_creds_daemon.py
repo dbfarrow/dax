@@ -49,7 +49,7 @@ class FakeTokenExchanger:
         self._expires_at = expires_at
         self.call_count = 0
 
-    def exchange(self, provider, refresh_token):
+    def exchange(self, provider, refresh_token, cred_def=None):
         self.call_count += 1
         return {'token': self._access_token, 'expires_at': self._expires_at}
 

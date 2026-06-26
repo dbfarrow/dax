@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
 	net-tools \
 	nmap \
 	man \
+	pandoc \
 	procps \
 	python3-pip \
 	socat \
@@ -406,8 +407,9 @@ if __name__ == '__main__':
 PYEOF
 RUN chmod +x /usr/local/bin/dax-preview
 
-# install dax-creds and credential wrapper scripts
+# install dax-creds, dax-mcp, and credential wrapper scripts
 COPY dax_creds/ /tmp/dax_build/dax_creds/
+COPY dax_mcp/ /tmp/dax_build/dax_mcp/
 COPY pyproject.toml VERSION dax.py /tmp/dax_build/
 RUN pip3 install --break-system-packages /tmp/dax_build/ && rm -rf /tmp/dax_build
 
@@ -446,4 +448,16 @@ RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
 USER %%USER%%
 
 WORKDIR /home/%%USER%%
+
+RUN printf '%s\n' \
+    '{' \
+    '  "mcpServers": {' \
+    '    "dax-gmail": {' \
+    '      "command": "python3",' \
+    '      "args": ["-m", "dax_mcp.server"]' \
+    '    }' \
+    '  }' \
+    '}' \
+    > /home/%%USER%%/.mcp.json
+
 CMD ["%%SHELL%%"]

@@ -89,19 +89,31 @@ def _define_credential(cred_name, provider_name, browser_enumerator=None):
     if provider_name == 'ssh':
         key_path = _prompt('Key file path', default='~/.ssh/id_ed25519')
         cred_def['key'] = key_path
-    elif provider_name in ('github', 'claude', 'auggie', 'gmail'):
-        if provider_name == 'gmail':
-            scope = _prompt('Gmail scope', default='readonly')
-            cred_def['scope'] = scope
-        if provider_name == 'auggie':
-            login_url = _prompt('Login URL (blank for production default)', default='')
-            if login_url:
-                cred_def['login_url'] = login_url
-        else:
-            picked = _pick_browser(browser_enumerator)
-            cred_def['browser'] = picked['browser']
-            if picked['chrome_profile']:
-                cred_def['chrome_profile'] = picked['chrome_profile']
+    elif provider_name == 'auggie':
+        login_url = _prompt('Login URL (blank for production default)', default='')
+        if login_url:
+            cred_def['login_url'] = login_url
+        picked = _pick_browser(browser_enumerator)
+        cred_def['browser'] = picked['browser']
+        if picked['chrome_profile']:
+            cred_def['chrome_profile'] = picked['chrome_profile']
+    elif provider_name in ('gmail', 'drive'):
+        client_id = _prompt('OAuth client_id')
+        cred_def['client_id'] = client_id
+        client_secret = _prompt('OAuth client_secret')
+        cred_def['client_secret'] = client_secret
+        default_scopes = provider_name  # 'gmail' or 'drive'
+        scopes_raw = _prompt('Scopes (comma-separated)', default=default_scopes)
+        cred_def['scopes'] = [s.strip() for s in scopes_raw.split(',') if s.strip()]
+        picked = _pick_browser(browser_enumerator)
+        cred_def['browser'] = picked['browser']
+        if picked['chrome_profile']:
+            cred_def['chrome_profile'] = picked['chrome_profile']
+    elif provider_name in ('github', 'claude'):
+        picked = _pick_browser(browser_enumerator)
+        cred_def['browser'] = picked['browser']
+        if picked['chrome_profile']:
+            cred_def['chrome_profile'] = picked['chrome_profile']
     return cred_def
 
 
@@ -195,6 +207,17 @@ def _setup_auggie_credential(cred_name, cred_def):
     print(f'  [{cred_name}] no token found — run `dax creds login {cred_name}` to authenticate.')
 
 
+def _setup_google_credential(cred_name, cred_def):
+    from dax_creds.providers.google import GoogleProvider
+    provider = GoogleProvider(cred_def['provider'])
+
+    if provider.check(cred_def, cred_name):
+        print(f'  [{cred_name}] refresh token already in Keychain.')
+        return
+
+    print(f'  [{cred_name}] no token found — run `dax creds login {cred_name}` to authenticate.')
+
+
 def run_init(config, cwd):
     print('\ndax init\n')
     try:
@@ -242,7 +265,7 @@ def _run_init(config, cwd):
         cred_name = _prompt('Credential name (e.g. ssh-github, github-dfarrow)')
         if not cred_name:
             continue
-        provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'auggie', 'gmail'])
+        provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive'])
         cred_def = _define_credential(cred_name, provider_name)
         new_creds[cred_name] = cred_def
         selected_creds.append(cred_name)
@@ -262,6 +285,8 @@ def _run_init(config, cwd):
             _setup_claude_credential(cred_name, cred_def)
         elif provider_name == 'auggie':
             _setup_auggie_credential(cred_name, cred_def)
+        elif provider_name in ('gmail', 'drive'):
+            _setup_google_credential(cred_name, cred_def)
 
     project_name = existing_project_name or cwd.name
     register_project(config, name=project_name, project_dir=cwd,
@@ -293,7 +318,7 @@ def _run_creds_add(config):
             print('Nothing changed.')
             return config
 
-    provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'auggie', 'gmail'])
+    provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive'])
     cred_def = _define_credential(cred_name, provider_name)
     config.setdefault('credentials', {})[cred_name] = cred_def
 
@@ -305,6 +330,8 @@ def _run_creds_add(config):
         _setup_claude_credential(cred_name, cred_def)
     elif provider_name == 'auggie':
         _setup_auggie_credential(cred_name, cred_def)
+    elif provider_name in ('gmail', 'drive'):
+        _setup_google_credential(cred_name, cred_def)
 
     save_config(config)
     print(f'\nCredential "{cred_name}" saved.')
@@ -388,7 +415,7 @@ def run_creds_list(config):
         stored = 'yes' if stored_bool else 'no'
         if provider == 'ssh':
             detail = cred_def.get('key', '')
-        elif provider in ('github', 'claude', 'auggie', 'gmail'):
+        elif provider in ('github', 'claude', 'auggie', 'gmail', 'drive'):
             from dax_creds.chrome import browser_label
             detail = browser_label(cred_def.get('browser', 'default'), cred_def.get('chrome_profile'))
         else:
@@ -476,7 +503,7 @@ def ensure_project_credentials(config, project_creds, keyring=None):
 
     for cred_name, cred_def in project_creds.items():
         provider = cred_def.get('provider')
-        if provider in ('github', 'claude', 'auggie'):
+        if provider in ('github', 'claude', 'auggie', 'gmail', 'drive'):
             token = kr.get_password(_KEYCHAIN_SERVICE, cred_name) if kr else None
             if token is None:
                 missing.append(cred_name)
@@ -490,7 +517,8 @@ _PROVIDER_FIELDS = {
     'github': ['browser'],
     'claude': ['browser'],
     'auggie': ['login_url'],
-    'gmail':  ['scope', 'browser'],
+    'gmail':  ['client_id', 'client_secret', 'scopes', 'browser'],
+    'drive':  ['client_id', 'client_secret', 'scopes', 'browser'],
 }
 
 
