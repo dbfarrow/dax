@@ -12,9 +12,10 @@ The core idea: your environment should be cattle, not pets. Spin one up, do the 
 2. [Quick Start](#quick-start)
 3. [Configuration](#configuration)
 4. [Credential Management](#credential-management)
-5. [Environment Management](#environment-management)
-6. [Features Reference](#features-reference)
-7. [Adding Features](#adding-features)
+5. [MCP Servers](#mcp-servers)
+6. [Environment Management](#environment-management)
+7. [Features Reference](#features-reference)
+8. [Adding Features](#adding-features)
 
 ---
 
@@ -139,6 +140,13 @@ credentials:
   claude-work:
     provider: claude
     browser: default
+  gmail-personal:
+    provider: gmail
+    client_id: 1234567890-abc.apps.googleusercontent.com
+    client_secret: GOCSPX-...
+    scopes:
+      - gmail.readonly
+    browser: default
 
 projects:
   my-project:
@@ -211,6 +219,34 @@ credentials:
     browser: default
 ```
 
+#### gmail
+
+Authenticates with Google via OAuth 2.0 using a Desktop app client you create in Google Cloud Console. The refresh token is stored in macOS Keychain. Inside the container, the credential daemon exchanges it for a short-lived access token on demand.
+
+Dax does **not** use a Google service account or API key. The OAuth flow issues tokens scoped to exactly the permissions you specify — for read-only inbox access, use `gmail.readonly`.
+
+```yaml
+credentials:
+  gmail-personal:
+    provider: gmail
+    client_id: 1234567890-abc.apps.googleusercontent.com
+    client_secret: GOCSPX-...
+    scopes:
+      - gmail.readonly
+    browser: default
+```
+
+**Setup:** Create a GCP project, enable the Gmail API, and create an OAuth 2.0 client ID of type *Desktop app*. Under *OAuth consent screen*, add your Google account as a test user (required while the app is in testing status). Pass the client ID and secret to `dax creds add`.
+
+**Scope aliases:** `gmail.readonly`, `gmail`, `gmail.send`, `gmail.compose`, `gmail.insert`, `gmail.labels`, `gmail.metadata`, `gmail.modify` expand to their full `https://www.googleapis.com/auth/...` URLs automatically.
+
+**Environment variables set in the container:**
+
+| Variable | Value |
+| --- | --- |
+| `DAX_CREDS_NAMES` | Comma-separated list of all credential names available |
+| `DAX_CREDS_GMAIL` | Name of the first Gmail credential (e.g. `gmail-personal`) |
+
 #### auggie
 
 Authenticates using Augment Code's OAuth flow. The session JSON (including the access token) is stored in macOS Keychain. Inside the container, the `auggie` wrapper fetches the session blob from the daemon and sets `AUGMENT_SESSION_AUTH` — Augment prefers this environment variable over `~/.augment/session.json`.
@@ -262,6 +298,7 @@ Run the first-party auth flow for a credential and store the result in Keychain:
 - **ssh** — loads the key via `ssh-add --apple-use-keychain`
 - **github** — opens the OAuth device flow in the configured browser; polls until authorized
 - **claude** — opens the Claude OAuth flow in the configured browser
+- **gmail** — opens the Google OAuth consent screen in the configured browser; stores the refresh token in Keychain on completion
 - **auggie** — prints manual re-authentication instructions (see auggie provider note above)
 
 #### `dax creds remove <name>`
@@ -275,6 +312,56 @@ Remove a credential's token from Keychain. Does not delete the credential defini
 - **`[!] token on disk`** (github) — `~/.config/gh/hosts.yml` contains an `oauth_token`. Written by `gh auth login` and persists until explicitly removed. The token in Keychain is what dax uses; the one in `hosts.yml` is redundant and a minor security risk.
 - **`[!] key on disk`** (claude) — `~/.anthropic/api_key` or `~/.claude/credentials.json` exists. The `credentials.json` file is written by Claude Code's own auth flow and is expected to be present on the host; the warning is a reminder that it contains live credentials.
 - **`[!] session on disk`** (auggie) — `~/.augment/session.json` contains an `accessToken`. After `dax creds login` imports the session to Keychain it deletes this file; if it reappears (e.g. after a native auggie login) the Keychain copy may be stale.
+
+---
+
+## MCP Servers
+
+Dax containers include MCP (Model Context Protocol) servers that give Claude Code inside the container access to external services. Servers are configured in `~/.mcp.json` (baked into the image) and loaded automatically when Claude Code starts — no manual setup required.
+
+### dax-gmail
+
+Gives Claude Code read-only access to Gmail. Requires a `gmail` credential with `gmail.readonly` scope to be available in the container (`DAX_CREDS_GMAIL` must be set).
+
+#### Tools
+
+**`gmail_search`** — Search Gmail threads using the same query syntax as the Gmail search box.
+
+```
+query        Gmail search string, e.g. "subject:proposal from:alice after:2025/01/01"
+max_results  Max threads to return (default 10, max 50)
+account      dax-creds credential name (defaults to DAX_CREDS_GMAIL)
+```
+
+Returns a list of `{id, snippet}` objects. Pass an `id` to `gmail_get_thread` to read the full thread.
+
+**`gmail_get_thread`** — Fetch the full message chain for a thread, including all replies.
+
+```
+thread_id    Thread ID from gmail_search
+account      dax-creds credential name (defaults to DAX_CREDS_GMAIL)
+```
+
+Returns each message with `date`, `from`, `to`, `subject`, `body`, and an `attachments` list. Each attachment entry includes `filename`, `mimeType`, `size`, `attachmentId`, and `messageId` — pass the last two to `gmail_get_attachment`.
+
+**`gmail_get_attachment`** — Download an attachment from a Gmail message.
+
+```
+message_id     messageId from the attachment entry
+attachment_id  attachmentId from the attachment entry
+mime_type      mimeType from the attachment entry
+filename       filename from the attachment entry
+account        dax-creds credential name (defaults to DAX_CREDS_GMAIL)
+```
+
+Returns the attachment in a format Claude can read directly:
+
+| Type | Returned as |
+| --- | --- |
+| `image/*` | Image content (Claude can view) |
+| `text/*` | Plain text |
+| `application/pdf`, Office docs | Embedded blob (Claude can read) |
+| zip, binary | Metadata note only |
 
 ---
 
