@@ -10,5 +10,8 @@
       "Bash(xargs ls -la)",
       "Bash(sed -n *)"
     ]
-  }
+  },
+  "disabledMcpjsonServers": [
+    "dax-gmail"
+  ]
 }

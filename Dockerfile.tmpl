@@ -411,7 +411,7 @@ RUN chmod +x /usr/local/bin/dax-preview
 COPY dax_creds/ /tmp/dax_build/dax_creds/
 COPY dax_mcp/ /tmp/dax_build/dax_mcp/
 COPY pyproject.toml VERSION dax.py /tmp/dax_build/
-RUN pip3 install --break-system-packages /tmp/dax_build/ && rm -rf /tmp/dax_build
+RUN pip3 install --break-system-packages "/tmp/dax_build/[container]" && rm -rf /tmp/dax_build
 
 RUN mv /usr/bin/gh /usr/bin/gh-real
 COPY dax_creds/wrappers/gh /usr/bin/gh

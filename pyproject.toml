@@ -6,7 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "dax"
 dynamic = ["version"]
 requires-python = ">=3.7"
-dependencies = ["pyyaml", "questionary", "mcp", "python-docx", "lxml"]
+dependencies = ["pyyaml", "questionary"]
+
+[project.optional-dependencies]
+container = ["mcp", "python-docx", "lxml"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}

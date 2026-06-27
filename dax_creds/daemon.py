@@ -1,7 +1,24 @@
 import asyncio
 import json
+import logging
+import os
+import signal
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+_log = logging.getLogger('dax-creds')
+
+
+def _setup_logging():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)-5s %(message)s',
+        datefmt='%Y-%m-%dT%H:%M:%S',
+    ))
+    _log.addHandler(handler)
+    _log.setLevel(logging.DEBUG)
+    sys.stdout.reconfigure(line_buffering=True)
 
 try:
     import keyring as _keyring_module
@@ -111,19 +128,27 @@ def handle_open_url(request, credentials, url_opener):
 def handle_request(request, credentials, token_store, token_exchanger, cache):
     name = request.get('credential')
     if name not in credentials:
+        _log.warning('unknown credential: %r', name)
         return {'error': 'not_configured', 'message': f'No credential named {name}'}
     if name in cache:
         entry = cache[name]
         expires_at = datetime.fromisoformat(entry['expires_at'].replace('Z', '+00:00'))
         if expires_at > datetime.now(timezone.utc):
+            _log.debug('cache hit: %s (expires %s)', name, entry['expires_at'])
             return entry
     cred_def = credentials[name]
     provider = cred_def['provider']
     try:
         refresh_token = token_store.get_refresh_token(name)
     except KeyError:
+        _log.error('not in keychain: %s — run: dax creds login %s', name, name)
         return {'error': 'not_in_keychain', 'message': f'{name!r} not in Keychain — run: dax creds login {name}'}
+    _log.info('exchanging token: %s (provider=%s)', name, provider)
     result = token_exchanger.exchange(provider, refresh_token, cred_def)
+    if 'error' in result:
+        _log.error('token exchange failed: %s — %s', result['error'], result.get('message', ''))
+    else:
+        _log.info('token exchange ok: %s (expires %s)', name, result.get('expires_at', '?'))
     cache[name] = result
     return result
 
@@ -151,9 +176,12 @@ def _make_handle(credentials, token_store, token_exchanger, cache, url_opener):
         try:
             request = json.loads(data)
         except json.JSONDecodeError:
+            _log.error('invalid JSON from client: %r', data[:120])
             response = {'error': 'invalid_request', 'message': 'Invalid JSON'}
         else:
             action = request.get('action', 'get')
+            cred = request.get('credential', '-')
+            _log.info('request: action=%s credential=%s', action, cred)
             if action == 'open_url':
                 response = handle_open_url(request, credentials, url_opener)
             else:
@@ -177,8 +205,11 @@ async def run_daemon(socket_path, credentials, token_store, token_exchanger, url
 
     server = await asyncio.start_unix_server(handle, path=str(path))
     path.chmod(0o666)  # allow container user to connect across Docker uid mapping
+    _log.info('listening on unix socket %s', path)
+    _log.info('serving credentials: %s', list(credentials.keys()))
     async with server:
         await server.serve_forever()
+    _log.info('server exited serve_forever')
 
 
 async def run_tcp_daemon(host, port, credentials, token_store, token_exchanger, url_opener=None):
@@ -186,12 +217,17 @@ async def run_tcp_daemon(host, port, credentials, token_store, token_exchanger, 
     handle = _make_handle(credentials, token_store, token_exchanger, cache,
                           url_opener or _default_url_opener)
     server = await asyncio.start_server(handle, host, port)
+    _log.info('listening on tcp %s:%s', host, port)
+    _log.info('serving credentials: %s', list(credentials.keys()))
     async with server:
         await server.serve_forever()
+    _log.info('server exited serve_forever')
 
 
 if __name__ == '__main__':
     import argparse
+
+    _setup_logging()
 
     parser = argparse.ArgumentParser(description='dax-creds daemon')
     group = parser.add_mutually_exclusive_group(required=True)
@@ -200,11 +236,25 @@ if __name__ == '__main__':
     parser.add_argument('--credentials', required=True, help='JSON of credential definitions')
     args = parser.parse_args()
 
+    _log.info('daemon starting (pid=%d)', os.getpid())
+
+    def _handle_signal(signum, frame):
+        _log.info('received signal %d — exiting', signum)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
     credentials = json.loads(args.credentials)
     token_store = KeyringTokenStore()
     exchanger = DispatchingExchanger()
 
-    if args.tcp_port:
-        asyncio.run(run_tcp_daemon('0.0.0.0', args.tcp_port, credentials, token_store, exchanger))
-    else:
-        asyncio.run(run_daemon(args.socket, credentials, token_store, exchanger))
+    try:
+        if args.tcp_port:
+            asyncio.run(run_tcp_daemon('0.0.0.0', args.tcp_port, credentials, token_store, exchanger))
+        else:
+            asyncio.run(run_daemon(args.socket, credentials, token_store, exchanger))
+        _log.info('daemon exiting normally')
+    except Exception:
+        _log.exception('daemon crashed')
+        sys.exit(1)

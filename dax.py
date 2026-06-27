@@ -336,8 +336,11 @@ def _start_creds_daemon(credentials, socket_path):
         '--socket', str(socket_path),
         '--credentials', json.dumps(credentials),
     ]
-    dax_print("[+] starting credential daemon")
-    return subprocess.Popen(cmd, cwd=str(Path(__file__).parent))
+    log_path = socket_path.with_suffix('.log')
+    log_file = open(log_path, 'a')
+    dax_print("[+] starting credential daemon (log: {})".format(log_path))
+    return subprocess.Popen(cmd, cwd=str(Path(__file__).parent),
+                            stdout=log_file, stderr=log_file)
 
 
 def _start_login_daemon(credentials, port):
@@ -455,6 +458,7 @@ def cmd_run(args):
             if _wait_for_socket(sock_path):
                 container_sock = '/run/dax-creds.sock'
                 cmd += ['-v', '{}:{}'.format(sock_path, container_sock)]
+                cmd += ['-v', '{}:/run/dax-state:ro'.format(sock_path.parent)]
                 cmd += ['-e', 'DAX_CREDS_SOCK={}'.format(container_sock)]
                 cmd += ['-e', 'DAX_CREDS_NAMES={}'.format(','.join(project_creds.keys()))]
                 seen_providers = set()
