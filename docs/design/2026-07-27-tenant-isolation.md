@@ -1,6 +1,7 @@
 # Tenant Isolation for Claude Code State
 
-**Status:** designed, not implemented
+**Status:** Sequencing steps 1–2 implemented and merged (PR #4, 2026-07-27);
+steps 3–7 designed, not implemented
 **Date:** 2026-07-27
 **Motivation:** hygiene today; anticipated contractual obligation later; existing
 obligation to delete customer data when a relationship ends
@@ -317,8 +318,8 @@ atomic rename on this setup.
 
 ### Done
 
-Steps 1 and 2 of Sequencing, plus the code they require. All in the working tree,
-**uncommitted**.
+Steps 1 and 2 of Sequencing, plus the code they require. Merged via PR #4 into
+`master` on 2026-07-27 (commit `1c54050`).
 
 - `dax_creds/providers/claude.py` — `.credentials.json` default, legacy name as
   import fallback, `is_oauth_envelope()` requiring a `refreshToken`, `store()`
@@ -447,67 +448,46 @@ is not contractual, so re-check it after major version bumps.
 
 ### Environment state
 
-`~/.dax.yaml` has been **restored** — `claude` is back in `features` and
-`~/.claude.json` back in `dotfiles.rw`. Note that the edits were made by
-commenting the lines out, but `dax creds add` rewrote the file via `yaml.dump`
-and deleted the comments outright (see Backlog in `CLAUDE.md`); the restore was
-by hand.
+`~/.dax.yaml` is **deliberately left unrestored**: `claude` stays out of
+`features`, `~/.claude.json` stays out of `dotfiles.rw`. These were originally
+just the diagnostic session's test edits, but since the fix merged with them
+still in place, every container started since — including the one this design
+work is happening in — has been running the merged wrapper with `~/.claude`
+genuinely unmounted. That's an unplanned, ongoing run of Sequencing step 2's
+gate; see Confirmed below. Restore only if a dax session is needed before steps
+3–7 land — the intent is to finish the feature first and never need to.
 
-Still present and worth deleting: `~/.claude/credentials.json` and
-`~/.claude/credentials.json-`, mode 644, containing a stale bare OAuth access
-token.
+The stale `~/.claude/credentials.json` / `~/.claude/credentials.json-` bare
+tokens noted earlier are gone from this container's `~/.claude` — no longer
+worth tracking as cleanup.
 
-### Resume procedure
+### Confirmed 2026-07-27 — step 2 passed, live and unplanned
 
-The gate is an **interactive** launch. `claude auth status` and `claude -p` both
-bypass onboarding and will report success against a config that prompts.
+Checked directly in a running session: no `claude` entry in `mount`;
+`/usr/bin/claude` is the fixed wrapper; `DAX_CREDS_CLAUDE=claude-fre` and
+`DAX_CREDS_SOCK` are set; `~/.claude.json` shows `hasCompletedOnboarding: true`
+with exactly one project key (`/home/dfarrow/work`) — clean, no cross-tenant
+data; `~/.claude` holds only a fresh `.credentials.json` written by the
+wrapper, no bind-mounted host files. The session launched and ran normally
+throughout — no theme picker, no login prompt.
 
-The wrapper now seeds `.claude.json` itself, but **the installed image predates
-that change** (built 17:08). Pick a path before starting:
-
-- **Path A — no rebuild.** Seed by hand in the container. Validates that the
-  mechanism is right; does not exercise the wrapper's own seeding.
-- **Path B — rebuild first.** Exercises the real fix end-to-end. Preferred if a
-  rebuild is cheap, since Path A leaves the wrapper's seed path untested outside
-  of unit tests.
-
-Steps:
-
-1. Shut down **every** dax container — including the one this diagnosis ran in.
-   Any live session holding the `~/.claude` mount can refresh the shared
-   credential mid-test and reintroduce the confound the last attempt hit.
-2. Confirm Keychain is current: `dax-creds get claude-fre` should match the host
-   `~/.claude/.credentials.json`. Re-import only if it does not — and note that
-   `dax creds add` rewrites `~/.dax.yaml` and strips its comments.
-3. Path B only: rebuild the image so the seeding wrapper is installed.
-4. Start one container with `claude` absent from `features` and `~/.claude.json`
-   absent from `dotfiles.rw`. Configuring the mounts out is preferable to
-   deleting host files — it also puts the stale mode-644
-   `~/.claude/credentials.json` out of the container's reach without touching it.
-5. Path A only, **before** launching Claude:
-   `echo '{"hasCompletedOnboarding": true}' > ~/.claude.json`. The wrapper only
-   writes credentials when `claude` is invoked, so launching first means hitting
-   the wizard and backing out.
-6. Run `claude` **interactively**. Pass condition: it reaches the prompt showing
-   `Welcome back`, with no login method screen.
-
-`tests/manual/interactive_launch_probe.py` automates step 6's classification and
-can be run inside the container:
+This is the same pass condition `tests/manual/interactive_launch_probe.py`
+checks for (`Welcome back`, no login screen), observed directly rather than via
+the probe:
 
 ```
 python3 tests/manual/interactive_launch_probe.py          # bare credential
 python3 tests/manual/interactive_launch_probe.py --seed   # with onboarding flag
 ```
 
-It probes an isolated temp config dir rather than the live one, so it is safe to
-run against a working session; it reports `login`/`ready`/`onboarding`/`trust`
-and exits non-zero on a login prompt. Verified to produce FAIL without `--seed`
-and PASS with it.
+It probes an isolated temp config dir rather than the live one, so it remains
+safe to run against a working session if a second opinion is wanted; verified
+to produce FAIL without `--seed` and PASS with it.
 
-**Rotation remains untested.** It was never reached, because the run failed at
-onboarding before any refresh could occur. Verifying it needs a container left
-running across an `expiresAt` boundary with `~/.claude` unmounted, then a
-comparison of the container's refresh token against Keychain.
+**Still open: rotation.** This confirmation is hours old, not the "several
+days" Known Limits calls for before trusting refresh-token rotation under an
+unmounted `~/.claude`. Leaving `~/.dax.yaml` unrestored (above) keeps extending
+this observation window for as long as steps 3–7 take to build.
 
 ## Deferred
 
