@@ -259,8 +259,25 @@ Per tenant/project, the ordinary case has **no contention at all**. Two
 containers working two projects for the same customer get two config dirs, so
 nothing is shared: not `.claude.json`, not `history.jsonl`, not the caches.
 
-Contention returns only when two containers run against the *same* project for
-the same tenant — two terminals on one repo. There:
+The "two containers on the same project" case this section originally analyzed
+**cannot happen under current dax behavior**, verified 2026-07-27. Container
+names are derived deterministically from the launch directory (`dax.py:75`,
+`envname` = cwd relative to `$HOME` with `/` → `-`) and passed explicitly as
+`docker run --name` (`dax.py:393-398`), with `--rm` and no collision handling
+anywhere in the file. A second `dax run` from the same project directory
+computes the same name and fails outright with Docker's "name already in use"
+error — it does not attach, reuse, or race the first container. So per-project
+state never actually has two containers writing to it concurrently; not a
+Docker mount restriction (plain bind mounts don't have one), a dax one.
+
+Residual, not currently in play: dax has no `attach`/`exec` subcommand — the
+only `docker exec` reference in the codebase is a debug hint for port
+forwarding, not a workflow. Manually running `docker exec -it <container> bash`
+against an already-running container would sidestep the naming guard entirely
+(same container, two shells) and reproduce the contention below. Worth knowing
+if that pattern ever gets adopted; not a reason to design against it today.
+
+Recorded for that hypothetical, since the analysis is already done:
 
 | State | Keyed by | Risk |
 | --- | --- | --- |
@@ -271,19 +288,16 @@ the same tenant — two terminals on one repo. There:
 | `history.jsonl` | appended | interleaving; grpcfuse append atomicity unguaranteed, so torn lines possible |
 | `.claude.json` | single file, full rewrite | lost updates, last writer wins |
 
-That residual case is the one where sharing is *wanted* — same project, same
-work, so a shared history is a feature rather than a leak. The tradeoff lines up
-with the grain of the work instead of against it.
-
 `.claude.json` lost updates mean a permission granted in one session can be
 silently dropped when the other writes, and tip counters bounce. Annoying, not
 corrupting, recoverable by re-granting, with rolling backups as a floor.
 
-**Strictly better than the status quo**, which is every container across every
-tenant writing one `.claude.json` and one `history.jsonl`. This narrows the
-concurrent-writer set from "all containers" to "containers on the same project."
-The defect is pre-existing and upstream; its blast radius shrinks to near
-nothing.
+**Strictly better than the status quo regardless**, which is every container
+across every tenant writing one shared `.claude.json` and one `history.jsonl`.
+Even in the residual `docker exec` case, this narrows the concurrent-writer set
+from "all containers, all tenants" to "two shells in one container on one
+project." The defect is pre-existing and upstream; its blast radius shrinks to
+near nothing.
 
 Also improved: `.claude.json` stops being a single-file grpcfuse bind mount and
 becomes a file inside a directory mount, which is the configuration where
