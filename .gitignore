@@ -5,6 +5,7 @@ jchrome
 .daxpw
 *.pyc
 __pycache__/
+.DS_Store
 dax.egg-info/
 Dockerfile
 *.crt

@@ -10,6 +10,7 @@ dependencies = ["pyyaml", "questionary"]
 
 [project.optional-dependencies]
 container = ["mcp", "python-docx", "lxml"]
+test = ["pytest"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}

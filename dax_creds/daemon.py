@@ -125,6 +125,13 @@ def handle_open_url(request, credentials, url_opener):
     return {'ok': True}
 
 
+def handle_list(credentials):
+    return {'credentials': [
+        {'name': name, 'provider': cred_def.get('provider')}
+        for name, cred_def in credentials.items()
+    ]}
+
+
 def handle_request(request, credentials, token_store, token_exchanger, cache):
     name = request.get('credential')
     if name not in credentials:
@@ -184,6 +191,8 @@ def _make_handle(credentials, token_store, token_exchanger, cache, url_opener):
             _log.info('request: action=%s credential=%s', action, cred)
             if action == 'open_url':
                 response = handle_open_url(request, credentials, url_opener)
+            elif action == 'list':
+                response = handle_list(credentials)
             else:
                 response = handle_request(request, credentials, token_store, token_exchanger, cache)
         writer.write(json.dumps(response).encode())

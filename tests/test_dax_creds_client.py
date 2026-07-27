@@ -2,7 +2,7 @@ import json
 import socket
 import threading
 import pytest
-from dax_creds.client import get_token, open_url, CredentialNotAvailable
+from dax_creds.client import get_token, open_url, list_credentials, CredentialNotAvailable
 
 
 def _serve_once(sock_path, response):
@@ -98,6 +98,52 @@ def test_open_url_raises_when_sock_not_set(monkeypatch):
     monkeypatch.delenv('DAX_CREDS_SOCK', raising=False)
     with pytest.raises(CredentialNotAvailable):
         open_url('github-dfarrow', 'https://github.com/login/device')
+
+
+def test_list_credentials_returns_list_from_socket(tmp_path, monkeypatch):
+    sock_path = str(tmp_path / 'creds.sock')
+    monkeypatch.setenv('DAX_CREDS_SOCK', sock_path)
+    _serve_once(sock_path, {'credentials': [
+        {'name': 'gmail-work', 'provider': 'gmail'},
+        {'name': 'gh', 'provider': 'github'},
+    ]})
+
+    creds = list_credentials()
+
+    assert creds == [
+        {'name': 'gmail-work', 'provider': 'gmail'},
+        {'name': 'gh', 'provider': 'github'},
+    ]
+
+
+def test_list_credentials_sends_list_action(tmp_path, monkeypatch):
+    sock_path = str(tmp_path / 'creds.sock')
+    monkeypatch.setenv('DAX_CREDS_SOCK', sock_path)
+    requests_received = []
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(sock_path)
+    server.listen(1)
+
+    def serve():
+        conn, _ = server.accept()
+        requests_received.append(json.loads(conn.recv(4096)))
+        conn.sendall(json.dumps({'credentials': []}).encode())
+        conn.close()
+        server.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    list_credentials()
+    t.join(timeout=2)
+
+    assert requests_received[0] == {'action': 'list'}
+
+
+def test_list_credentials_raises_when_sock_not_set(monkeypatch):
+    monkeypatch.delenv('DAX_CREDS_SOCK', raising=False)
+    with pytest.raises(CredentialNotAvailable):
+        list_credentials()
 
 
 def test_get_token_returns_token_over_tcp(monkeypatch):

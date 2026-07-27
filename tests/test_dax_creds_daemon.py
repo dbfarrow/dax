@@ -1,6 +1,6 @@
 import json
 import pytest
-from dax_creds.daemon import handle_request, handle_open_url, FileTokenStore, KeyringTokenStore
+from dax_creds.daemon import handle_request, handle_open_url, handle_list, FileTokenStore, KeyringTokenStore
 
 
 class FakeKeyring:
@@ -191,6 +191,32 @@ def test_handle_open_url_returns_error_when_url_missing():
         lambda url, browser, profile: None,
     )
     assert response['error'] == 'missing_url'
+
+
+def test_handle_list_returns_all_credentials_with_providers():
+    credentials = {
+        'gmail-work': {'provider': 'gmail', 'client_id': 'x'},
+        'gmail-client-a': {'provider': 'gmail'},
+        'drive-work': {'provider': 'drive'},
+        'gh': {'provider': 'github'},
+    }
+    response = handle_list(credentials)
+    assert response['credentials'] == [
+        {'name': 'gmail-work', 'provider': 'gmail'},
+        {'name': 'gmail-client-a', 'provider': 'gmail'},
+        {'name': 'drive-work', 'provider': 'drive'},
+        {'name': 'gh', 'provider': 'github'},
+    ]
+
+
+def test_handle_list_returns_empty_for_no_credentials():
+    assert handle_list({}) == {'credentials': []}
+
+
+def test_handle_list_does_not_leak_secrets():
+    credentials = {'gmail-work': {'provider': 'gmail', 'client_secret': 'GOCSPX-secret'}}
+    response = handle_list(credentials)
+    assert 'GOCSPX-secret' not in json.dumps(response)
 
 
 def test_legacy_get_request_without_action_field_still_works():
