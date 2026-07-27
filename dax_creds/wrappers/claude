@@ -1,9 +1,57 @@
 #!/bin/bash
+# Fetch Claude OAuth credentials from the dax-creds daemon and write them where
+# Claude Code reads them: ~/.claude/.credentials.json (dot-prefixed).
+#
+# Failures are reported, never swallowed. A silent failure here went unnoticed
+# for a month because auth was quietly riding a host bind mount instead.
+
+# Claude Code reads its state from CLAUDE_CONFIG_DIR when that is set and from
+# ~/.claude otherwise. The two layouts disagree about .claude.json: it lives
+# *inside* CLAUDE_CONFIG_DIR, but at ~/.claude.json — not ~/.claude/.claude.json
+# — in the default layout. Getting this wrong is silent, which is how the
+# original credential-path bug survived a month.
+_dax_cfg_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+if [ -n "$CLAUDE_CONFIG_DIR" ]; then
+    _dax_state_file="$CLAUDE_CONFIG_DIR/.claude.json"
+else
+    _dax_state_file="$HOME/.claude.json"
+fi
+
 if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ]; then
-    _creds=$(dax-creds get "$DAX_CREDS_CLAUDE" 2>/dev/null)
-    if [ -n "$_creds" ]; then
-        mkdir -p ~/.claude
-        printf '%s' "$_creds" > ~/.claude/credentials.json
+    if _creds=$(dax-creds get "$DAX_CREDS_CLAUDE"); then
+        case "$_creds" in
+            *'"claudeAiOauth"'*)
+                mkdir -p "$_dax_cfg_dir"
+                ( umask 077; printf '%s' "$_creds" > "$_dax_cfg_dir/.credentials.json" )
+                ;;
+            *)
+                echo "dax: credential '$DAX_CREDS_CLAUDE' is not a Claude credentials blob" >&2
+                echo "dax: got ${#_creds} bytes, expected {\"claudeAiOauth\": {...}}" >&2
+                echo "dax: re-import on the host with:" >&2
+                echo "dax:   dax creds remove $DAX_CREDS_CLAUDE" >&2
+                echo "dax:   dax creds add    # then enter '$DAX_CREDS_CLAUDE' at the prompt" >&2
+                ;;
+        esac
+    else
+        echo "dax: could not fetch credential '$DAX_CREDS_CLAUDE' from dax-creds" >&2
     fi
 fi
-exec /usr/bin/claude-real "$@"
+
+# Without .claude.json, Claude Code runs its first-run wizard, and that wizard
+# prompts for a login method *before* anything reads .credentials.json — so a
+# perfectly good credential sits unused while the user is sent to a browser.
+# Seeding the onboarding flag is what makes the credential actually get used.
+#
+# Create-if-absent only. Claude Code owns this file and grows it to ~32KB on the
+# first run; rewriting it on every launch would destroy accumulated per-tenant
+# project state, permissions, and history.
+#
+# Only the onboarding flag is seeded. Folder trust is deliberately not set here:
+# accepting it silently activates .claude/settings.local.json permissions, which
+# is the user's call to make, not the wrapper's.
+if [ ! -e "$_dax_state_file" ]; then
+    mkdir -p "$(dirname "$_dax_state_file")"
+    ( umask 077; printf '%s' '{"hasCompletedOnboarding": true}' > "$_dax_state_file" )
+fi
+
+exec "${DAX_CLAUDE_REAL:-/usr/bin/claude-real}" "$@"
