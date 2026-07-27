@@ -6,13 +6,19 @@ build-backend = "setuptools.build_meta"
 name = "dax"
 dynamic = ["version"]
 requires-python = ">=3.7"
-dependencies = ["pyyaml"]
+dependencies = ["pyyaml", "questionary"]
+
+[project.optional-dependencies]
+container = ["mcp", "python-docx", "lxml"]
+test = ["pytest"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
 
 [project.scripts]
 dax = "dax:main"
+dax-creds = "dax_creds.cli:main"
 
 [tool.setuptools]
 py-modules = ["dax"]
+packages = ["dax_creds", "dax_creds.providers", "dax_mcp"]
