@@ -8,7 +8,9 @@
       "Read(//usr/local/bin/**)",
       "Bash(python3 *)",
       "Bash(xargs ls -la)",
-      "Bash(sed -n *)"
+      "Bash(sed -n *)",
+      "Bash(dax-creds get *)",
+      "Bash(echo \"--- exit: $? ---\")"
     ]
   },
   "disabledMcpjsonServers": [

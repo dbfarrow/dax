@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 try:
@@ -10,16 +11,42 @@ except ImportError:
 _KEYCHAIN_SERVICE = 'dax-creds'
 
 
-def _default_disk_locations():
-    home = Path.home()
-    return [
-        home / '.anthropic' / 'api_key',
-        home / '.claude' / 'credentials.json',
-    ]
+def _claude_dir():
+    return Path.home() / '.claude'
 
 
 def _default_credentials_json():
-    return Path.home() / '.claude' / 'credentials.json'
+    # Claude Code reads the dot-prefixed name. The non-dot name is ignored.
+    return _claude_dir() / '.credentials.json'
+
+
+def _legacy_credentials_json():
+    # dax wrote this name until 2026-07-27; Claude Code never read it.
+    return _claude_dir() / 'credentials.json'
+
+
+def _default_disk_locations():
+    return [
+        Path.home() / '.anthropic' / 'api_key',
+        _default_credentials_json(),
+        _legacy_credentials_json(),
+    ]
+
+
+def is_oauth_envelope(value):
+    """True if value is a Claude Code credentials blob Claude Code can refresh.
+
+    A bare access token is rejected: it authenticates until expiry and then
+    fails with no way to recover, which is worse than failing immediately.
+    """
+    try:
+        data = json.loads(value)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    oauth = data.get('claudeAiOauth')
+    return isinstance(oauth, dict) and bool(oauth.get('refreshToken'))
 
 
 class ClaudeProvider:
@@ -35,18 +62,20 @@ class ClaudeProvider:
         return self._keyring.get_password(_KEYCHAIN_SERVICE, credential_name) is not None
 
     def import_from_disk(self, credential_def, credentials_file=None):
-        path = Path(credentials_file) if credentials_file else _default_credentials_json()
-        if not path.exists():
-            return None
-        try:
-            import json
-            with open(path) as f:
-                data = json.load(f)
-            if 'claudeAiOauth' not in data:
-                return None
-            return json.dumps(data)
-        except Exception:
-            return None
+        if credentials_file is not None:
+            candidates = [Path(credentials_file)]
+        else:
+            candidates = [_default_credentials_json(), _legacy_credentials_json()]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                blob = path.read_text()
+            except OSError:
+                continue
+            if is_oauth_envelope(blob):
+                return json.dumps(json.loads(blob))
+        return None
 
     def has_disk_copy(self, credential_def, disk_locations=None):
         locations = disk_locations if disk_locations is not None else _default_disk_locations()
@@ -54,6 +83,12 @@ class ClaudeProvider:
 
     def store(self, credential_name, token):
         self._require_keyring()
+        if not is_oauth_envelope(token):
+            raise ValueError(
+                'refusing to store a Claude credential that is not a full '
+                'credentials blob with a refreshToken — Claude Code could not '
+                'refresh it. Expected {"claudeAiOauth": {..., "refreshToken": ...}}'
+            )
         self._keyring.set_password(_KEYCHAIN_SERVICE, credential_name, token)
 
     def get_token(self, credential_name):

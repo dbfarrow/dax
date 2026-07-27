@@ -24,6 +24,15 @@ functions in `dax.py`.
 - **`dax-preview` GitHub-style UI**: directory listings now use a rounded file table with hover; README.md renders below the listing in a boxed panel with a book icon; a sticky left-side file tree with SVG icons, collapsible folders, and sessionStorage persistence appears on all pages (directory, .md, .json, .yaml). Folder names in the tree navigate; chevron toggles expand/collapse. Heavy dirs (.git, node_modules, etc.) are skipped. Page width auto-expands by 256px to keep content area at the configured width.
 - **GitHub host keys baked in**: all three key types (RSA, ECDSA, ed25519) written to `/etc/ssh/ssh_known_hosts` at image build time — no more `ssh-keyscan` on first use.
 
+## Backlog
+
+- **`save_config` destroys `~/.dax.yaml` comments and key order** — `dax_creds/init.py:26`
+  loads via `yaml.safe_load` and rewrites with `yaml.dump`, so comments (which
+  aren't in the parsed dict) vanish and keys get alphabetized by the default
+  `sort_keys=True`. Triggered by `dax creds add`, `dax creds update`, and
+  `dax init`. Fix: switch to `ruamel.yaml` round-trip mode; stopgap is
+  `sort_keys=False` plus a `.dax.yaml.bak` before each write.
+
 ## Notes
 
 - `safe.directory` is already set in `~/.gitconfig` — no need for `-c safe.directory=` flag in git commands.

@@ -181,7 +181,7 @@ def _setup_claude_credential(cred_name, cred_def):
 
     token = provider.import_from_disk(cred_def)
     if token:
-        print(f'  [{cred_name}] importing existing token from ~/.claude/credentials.json')
+        print(f'  [{cred_name}] importing existing token from ~/.claude/.credentials.json')
         provider.store(cred_name, token)
         print(f'  [{cred_name}] done.')
         return
