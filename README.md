@@ -78,9 +78,6 @@ features:
   - dotfiles
   - ssh
 
-workdir:
-  container: work
-
 dotfiles:
   ro:
     - ~/.zshrc
@@ -102,9 +99,6 @@ features:
   - claude
   - auggie
   - webpreview
-
-workdir:
-  container: work
 
 dotfiles:
   ro:
@@ -165,7 +159,6 @@ projects:
 | `image` | Default Docker image to use |
 | `features` | Default feature list for `dax run` |
 | `dotfiles` | Files to mount into the container (`ro` / `rw`) |
-| `workdir` | Container path for the mounted working directory |
 | `credentials` | Named credential definitions (managed by `dax creds`) |
 | `projects` | Registered environments (managed by `dax init`) |
 | `backup` | Host paths to copy into `backup/` when running `dax backup` |
@@ -405,7 +398,7 @@ dax run -p 8080:80         # expose an extra port
 
 | Feature | Description |
 | --- | --- |
-| `workdir` | Mounts the current host directory as the working directory inside the container |
+| `workdir` | Mounts the current host directory into the container, at a path named after the host directory's own basename |
 | `dotfiles` | Mounts dotfiles from `~/.dax.yaml` into the container (`ro` or `rw`) |
 | `ssh` | Forwards the SSH agent into the container; keys stay on the host |
 | `claude` | Mounts `~/.claude` into the container for Claude Code config |

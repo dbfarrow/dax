@@ -5,6 +5,25 @@
 # Failures are reported, never swallowed. A silent failure here went unnoticed
 # for a month because auth was quietly riding a host bind mount instead.
 
+# Gate B of docs/design/2026-07-27-tenant-isolation.md: resolve cwd -> tenant
+# -> CLAUDE_CONFIG_DIR. DAX_TENANT_STATE is the master switch, set by `dax run`
+# (Gate A) only for projects that have opted into the claude_tenant_state
+# feature (not yet built - see design doc Sequencing step 6). Unset, none of
+# this runs and the wrapper behaves exactly as it does today - landing this
+# gate must not change behavior for any project that hasn't opted in, since
+# Gate A isn't mounting the per-tenant state trees this points at yet.
+if [ -n "$DAX_TENANT_STATE" ]; then
+    if ! _resolved=$(dax-creds resolve-tenant); then
+        # dax-creds already printed the refusal reason to stderr. Refusal
+        # means claude must not start at all - unlike a bad credential below,
+        # which still lets claude start degraded.
+        exit 1
+    fi
+    _tenant=$(printf '%s\n' "$_resolved" | sed -n 's/^TENANT=//p')
+    _project=$(printf '%s\n' "$_resolved" | sed -n 's/^PROJECT=//p')
+    export CLAUDE_CONFIG_DIR="$HOME/.local/state/dax/tenants/$_tenant/$_project"
+fi
+
 # Claude Code reads its state from CLAUDE_CONFIG_DIR when that is set and from
 # ~/.claude otherwise. The two layouts disagree about .claude.json: it lives
 # *inside* CLAUDE_CONFIG_DIR, but at ~/.claude.json — not ~/.claude/.claude.json
@@ -48,7 +67,12 @@ fi
 #
 # Only the onboarding flag is seeded. Folder trust is deliberately not set here:
 # accepting it silently activates .claude/settings.local.json permissions, which
-# is the user's call to make, not the wrapper's.
+# is the user's call to make, not the wrapper's. `theme` and `oauthAccount`/
+# `userID` (also listed in the design doc's seed-key table) were tried and
+# dropped: probing v2.1.220 showed the onboarding flag alone already reaches a
+# normal prompt with no theme picker, and oauthAccount/userID need real account
+# data nothing currently plumbs from the daemon/host into the wrapper — see
+# CLAUDE.md Backlog.
 if [ ! -e "$_dax_state_file" ]; then
     mkdir -p "$(dirname "$_dax_state_file")"
     ( umask 077; printf '%s' '{"hasCompletedOnboarding": true}' > "$_dax_state_file" )

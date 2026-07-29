@@ -113,12 +113,36 @@ class DispatchingExchanger:
         return self._passthrough.exchange(provider, refresh_token)
 
 
+_CLAUDE_DEVICE_FLOW_REDIRECT = 'https://platform.claude.com/oauth/code/callback'
+
+
+def _force_claude_device_flow_redirect(url):
+    # claude auth login binds a local listener inside the container and builds
+    # its primary authorize URL around that redirect_uri - but the browser
+    # opening it runs on the host (see handle_open_url below), so that port is
+    # unreachable and the redirect always fails. Claude Code separately prints
+    # a fallback URL with the same client_id/code_challenge/state but a
+    # redirect_uri that doesn't depend on a local listener - substituting it
+    # in here skips the guaranteed-to-fail hop instead of just working around
+    # it after the fact.
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    redirect = query.get('redirect_uri', [''])[0]
+    if not redirect.startswith('http://localhost') and not redirect.startswith('http://127.0.0.1'):
+        return url
+    query['redirect_uri'] = [_CLAUDE_DEVICE_FLOW_REDIRECT]
+    return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+
 def handle_open_url(request, credentials, url_opener):
     url = request.get('url')
     if not url:
         return {'error': 'missing_url', 'message': 'url is required'}
     cred_name = request.get('credential', '')
     cred_def = credentials.get(cred_name, {})
+    if cred_def.get('provider') == 'claude':
+        url = _force_claude_device_flow_redirect(url)
     browser = cred_def.get('browser', 'default')
     chrome_profile = cred_def.get('chrome_profile')
     url_opener(url, browser, chrome_profile)
@@ -180,6 +204,14 @@ def _default_url_opener(url, browser, chrome_profile):
 def _make_handle(credentials, token_store, token_exchanger, cache, url_opener):
     async def handle(reader, writer):
         data = await reader.read(4096)
+        if not data:
+            # A bare connect-then-disconnect (e.g. _wait_for_tcp's readiness
+            # probe in dax.py) looks identical to a real client at this
+            # layer but never sends anything - not a malformed request, and
+            # there's nobody left to write a response to.
+            writer.close()
+            await writer.wait_closed()
+            return
         try:
             request = json.loads(data)
         except json.JSONDecodeError:

@@ -1,7 +1,11 @@
 # Tenant Isolation for Claude Code State
 
 **Status:** Sequencing steps 1–2 implemented and merged (PR #4, 2026-07-27);
-steps 3–7 designed, not implemented
+steps 3–6 implemented, unit-tested (259 tests), and confirmed on the two real
+target repos (2026-07-28) — see Verification log; step 7 dropped (see
+Sequencing). Outstanding before this is trusted as the default: the shared
+`plugins`/`skills`/`commands`/`cache` migration and the multi-day
+refresh-token rotation soak.
 **Date:** 2026-07-27
 **Motivation:** hygiene today; anticipated contractual obligation later; existing
 obligation to delete customer data when a relationship ends
@@ -126,25 +130,64 @@ tenant-level `CLAUDE.md` — explicit and reviewable — not emergent recall.
 | | Gate A: `dax run` | Gate B: `claude` launch |
 | --- | --- | --- |
 | Where | host, container start | in container, `/usr/bin/claude` wrapper |
-| Sees | the repo | the **cwd** |
+| Sees | the repo | the **cwd**, plus `multi_tenant` and `project_name` handed down from Gate A |
 | Job | mount repo at `~/<reponame>` | resolve cwd → tenant → `CLAUDE_CONFIG_DIR` |
 | Refuses | never | when resolution yields no tenant |
 
-Gate A always succeeds. A multi-tenant repo's root is a legitimate work
+Gate A always succeeds — *once it has correctly identified which registered
+project it's mounting.* A multi-tenant repo's root is a legitimate work
 directory — git, builds, and moving files between processes all need it.
 
 Gate B refusal is not a bolted-on check. The wrapper must resolve cwd → tenant
 regardless, because that is how it learns which `CLAUDE_CONFIG_DIR` to export.
 Refusal is the empty-resolution branch of work it performs anyway.
 
+**Gate 0, added 2026-07-28: `cmd_run`'s project lookup, ahead of Gate A.**
+Found via a real usage mistake on `discernment`: its intended flow is
+`dax run` once from the repo root, then `cd` to a `processes/<name>/`
+subdirectory *inside* the running container for Gate B to resolve. Nothing
+stopped the same `cd` happening **on the host** instead, followed by
+`dax run` from there directly. `find_project_by_dir` (`dax_creds/config.py`)
+only matches by exact equality against a registered `dir:`, so a subdirectory
+cwd matches nothing, and `cmd_run`'s `except KeyError` branch fell through to
+`run_init`, silently auto-registering the *subdirectory* as a brand-new,
+unrelated project. `feature_workdir` then mounted only that subdirectory —
+the true repo root, and everything that exists only there (`.git`,
+`.claude/skills/`, repo-root config), was never mounted, with no error to
+signal why. Worse, because the subdirectory already had its own
+`.dax-tenant` (written earlier under the correct flow), the bogus new
+project resolved to the *same* tenant and state directory the correct flow
+would have used — credentials and history looked continuous, so the failure
+had no visible symptom beyond silently-missing repo-root content.
+
+Same principle as decisions 7/8 (no silent fallback — refuse rather than
+guess), applied one layer earlier: `find_enclosing_project`
+(`dax_creds/config.py`) checks whether cwd is nested *inside* — not equal
+to — any already-registered project's `dir` before falling through to
+`run_init`. If so, `cmd_run` refuses with the enclosing project's name and
+root, and the exact command to run instead, rather than auto-registering.
+`run_init` still fires exactly as before for a cwd that isn't nested under
+any known project at all — the genuinely-new-project case. This generalizes
+past `multi_tenant`/`tenant_subdir` repos: no single- or multi-tenant dax
+project has a legitimate reason for `cmd_run` to see a cwd that's a strict
+subdirectory of an already-registered project's `dir`. Unaffected: the actual
+in-container multi-tenant flow (`cd` to `processes/<name>/` inside an
+already-running container, Gate B resolves it) never goes through `cmd_run`
+at all.
+
 ### 7. Resolution table
+
+**Revised 2026-07-28 — the `unattributed` fallback is gone.** See decision 8
+below for why, and Sequencing step 6 for the classification mechanism that
+replaces it.
 
 | Situation | Result |
 | --- | --- |
-| single-tenant repo | starts anywhere in tree |
-| multi-tenant repo, mapped subdir | starts, state → that tenant |
-| multi-tenant repo, root or unmapped subdir | refuse |
-| undeclared repo | `unattributed/<reponame>/`, warn, proceed |
+| single-tenant repo, root declared | starts anywhere in tree, state → that tenant |
+| single-tenant repo, root undeclared | refuse — `dax tenant set`/`dax tenant classify` |
+| multi-tenant repo, root itself | its own project/tenant if declared; refuse if not (see decision 8) |
+| multi-tenant repo, mapped immediate child (or child of `tenant_subdir`) | starts, state → that tenant |
+| multi-tenant repo, unmapped child, or more than one level deep | refuse |
 | project creds span multiple tenant labels | refuse regardless |
 
 Guiding principle: **fail toward over-isolation.** Where tenancy is ambiguous,
@@ -152,17 +195,171 @@ pick the narrower tenant. Over-isolation costs convenience; under-isolation
 costs confidentiality. Those are not symmetric, and the 27-file pile is what
 under-isolation looks like after a few months.
 
-### 8. Undeclared repos go to `unattributed/<reponame>/`
+**"tree" means at most one level deep.** Claude may only ever be started at a
+project's mount root or exactly one directory below it — never deeper. That
+outer bound is enforced first, ahead of any `.dax-tenant` lookup and ahead of
+either mode's own rule below: a cwd more than one level below the root
+refuses outright regardless of what the repo declares. Implemented in
+`dax_creds/tenant.py` as a plain root-plus-immediate-children check — no
+arbitrary-depth directory walk, and so no walk-depth/symlink concerns to
+design around either.
 
-Not to a tenant derived from the repo name. Repo-name derivation partitions
-correctly — tested against `dax`, `fabric`, `iandidit`, and `ys-augmentcode`, it
-never merges two tenants, only over-isolates. But as an *identifier* it is a
-guess, and a tree labelled `ys-augmentcode` does not announce itself as
-unverified at deletion time. Confident-wrong is worse than visibly-unknown.
+**`multi_tenant` is an explicit flag, not inferred.** Whether a repo has more
+than one tenant is never determined by counting how many distinct
+`.dax-tenant` labels happen to exist in it. It is declared explicitly, once,
+as `multi_tenant: true` on the project's own entry in `~/.dax.yaml`
+(`projects.<name>.multi_tenant`) — the same file that already holds that
+project's `dir` and `creds`. This does not conflict with decision 9's
+rejection of a central `~/.dax.yaml` tenant *map*: a project-level boolean
+carries no customer name and is not tied to a specific subdirectory that
+could be renamed out from under it, so none of that decision's reasoning
+applies here.
 
-`unattributed/<reponame>/` gives per-repo separation (nothing pools), does not
-block work, is enumerable via `dax tenants`, and makes later attribution a
-directory move rather than archaeology.
+The flag draws a hard line on where claude may even be started, not just on
+where a tenant may be declared — a strict, non-overlapping split:
+
+- `multi_tenant: false` (default) — the repo root **is** the sandbox: claude
+  may only start there, full stop. A child directory refuses outright, even
+  one level down, even if it happens to carry its own `.dax-tenant` file —
+  that grants nothing in this mode. The tenant comes from the root's own
+  `.dax-tenant`; if the root has none, `dax run`'s classification step (see
+  decision 8 and Sequencing step 6) prompts for one before the container ever
+  launches, so a wrapper invocation never finds the root genuinely
+  undeclared in ordinary use. This is the point of how a project gets set up
+  in the first place: `cd` to the project root, `dax run`, configure the
+  environment — sandboxed claude, nothing more to decide.
+- `multi_tenant: true` — claude may start either at the repo root itself or
+  at an immediate child (or a child of `tenant_subdir`) that carries its own
+  `.dax-tenant` file. **Revised 2026-07-28:** the root is no longer a
+  permanent refusal — a multi-tenant repo's own top-level tooling is
+  sometimes worked on independent of any one engagement subdirectory, so the
+  root resolves as its own project/tenant when declared, exactly like any
+  other node in the tree. What doesn't change: there is still no silent
+  pooling anywhere. `dax run`'s classification step walks the root and every
+  undeclared immediate child (see decision 8), so an unmapped node is a
+  transient state to be resolved before launch, not a standing fallback
+  destination.
+
+Resolved: Gate B gets `multi_tenant` via an env var, not by reading
+`~/.dax.yaml` itself. `~/.dax.yaml` is bind-mounted into every container
+today (`dotfiles.rw`), so the wrapper technically *could* read it — but doing
+so would mean re-deriving which `projects.<name>` entry it's looking at,
+matching the container-side repo root's basename back against the (host-path)
+`dir` field, duplicating logic Gate A already ran to get there. Gate A already
+knows the answer with certainty at the moment it decides to mount the
+container at all (`find_project_by_dir` already found the exact entry, and
+already handles the unregistered-project case by falling into `dax init`), so
+it hands that one bit down directly: `-e DAX_MULTI_TENANT=1` (absent/unset
+for false), the same mechanism `cmd_run()` already uses for
+`DAX_CREDS_CLAUDE` and friends (`dax.py:453-476`) and for `DAX_PREVIEW_PORT`/
+`DAX_PREVIEW_DIR`. One value, handed down once, no second implementation of
+the lookup to drift from the first.
+
+**A second value is required alongside it: `DAX_PROJECT_NAME`.** Found while
+building Gate B (`resolve_for_cwd` in `dax_creds/tenant.py`): `$HOME`
+legitimately has other directory-level mounts sitting right alongside a
+project's own — `~/.claude`, `~/.augment`, `~/.aws` (see
+`.dax.yaml.example`'s `claudedir`/`auggiedir`/`awsdir`). Without knowing the
+*actual* project name, Gate B can only infer "the repo root" structurally, as
+whatever cwd's top-level directory under `$HOME` happens to be — so a user who
+`cd`s into `~/.claude` and runs `claude` there would have it treated as if
+`~/.claude` *were* the project root, found undeclared, and silently resolved
+to `unattributed/.claude` instead of refusing. `DAX_PROJECT_NAME=<workdir_name>`
+closes that: Gate A already computed this value in stage 3's `load_config()`
+work, so handing it down is free, and Gate B refuses immediately if cwd's
+top-level directory doesn't match it, before any `.dax-tenant` lookup happens
+at all.
+
+**A third value, `DAX_TENANT_SUBDIR`, exists for exactly one project.** Found
+while actually assigning discernment's real tenants: its tenant subdirectories
+don't sit directly under the repo root — they're one level further in, under
+`processes/`. Discovered too late to design around cleanly; the two structural
+alternatives (register `processes/` itself as a separate project; restructure
+discernment's actual layout to remove the `processes/` indirection) were both
+rejected — the agent needs everything in the repo visible from one project,
+and the layout isn't something to reshuffle for this. So `resolve_tenant`
+and `all_tenant_projects` (`dax_creds/tenant.py`) both take an optional
+`tenant_subdir` parameter: when set, labeled subdirectories are looked for
+under `repo_root/tenant_subdir` instead of `repo_root` directly, and
+everything else about the resolution table — root/subdir-base never
+resolves, unmapped children refuse, no `unattributed/` fallback — is
+unchanged. Configured via `projects.discernment.tenant_subdir: processes` in
+`~/.dax.yaml` (read into `config['tenant_subdir']` in `cmd_run()`, same place
+`multi_tenant` is read), handed down to Gate B as `DAX_TENANT_SUBDIR`, same
+mechanism as the two env vars above. Deliberately not generalized further than
+one fixed subdirectory name — there is exactly one project shaped like this
+today, and YAGNI argues against building for a second that may never exist.
+
+### 8. Undeclared locations are classified before launch, never pooled
+
+**Superseded 2026-07-28.** The original design routed anything undeclared to
+`unattributed/<reponame>/` — a real tenant slot, warn, proceed. Rejected once
+real usage made the cost concrete: *"i always want the tenant defined and
+cleaning up later is a pain. so if the tenant isn't defined, lead the user
+through defining it then continue."* Cleaning up an `unattributed/` tree
+later is exactly the kind of archaeology decision 8 originally tried to avoid
+turning into — it just moved the guesswork from "which tenant" to "did
+anyone ever go back and fix this," which in practice nobody does.
+
+**Replacement: classify at `dax run` time, refuse to launch until done.**
+Before the container starts, `dax run` walks exactly the same nodes the
+resolution table (decision 7) recognizes as legitimate start points — the
+repo root always, plus (for a multi-tenant project) every immediate child
+under `tenant_subdir` — and interactively prompts for a tenant name wherever
+`.dax-tenant` is missing, offering the known-tenant list plus a "new tenant"
+escape hatch. Anything already declared is left untouched. The container
+does not launch until every node classifies. Implemented as
+`_ensure_tenants_classified()` in `dax.py`, invoked from `cmd_run()` whenever
+`claude_tenant_state` is in the project's `features` list.
+
+`dax tenant classify` re-runs the same walk on demand, but with every node
+re-prompted (including already-declared ones, offered as the current value
+so accepting is one keystroke) — for correcting a mislabeled tenant without
+having to `rm` the `.dax-tenant` file by hand first.
+
+**Deliberately not extended to a directory discovered mid-session.** Docker
+cannot add a bind mount to an already-running container, so a brand-new
+subdirectory that appears after `dax run` has already launched cannot be
+folded into the running container's mounts regardless of how it's
+classified. That case still hard-refuses via the wrapper's existing
+`dax tenant set <subdir> <tenant>` message — no interactive prompting
+in-container, since satisfying the prompt wouldn't actually unblock the
+session anyway. Accepted as small, livable friction: `dax run` again after
+declaring picks it up on the next launch.
+
+**Prior implementation note, retained for history:** the original
+`unattributed` mechanism kept `tenant` and `project` as two separate fields
+(`'unattributed'` and `<reponame>`), not a combined string — a real bug
+(doubled reponame in the composed path) was caught this way during manual
+testing before the mechanism was removed outright. The two-separate-fields
+lesson still applies wherever `tenant`/`project` pairs are built today.
+
+**`dax tenants` enumerability was originally accidental, not designed —
+fixed 2026-07-28.** As first built, `dax tenants` only listed directories
+under `~/.local/state/dax/tenants/` that already existed — which meant only
+tenants that had already had a real `dax run` session, since nothing else
+ever created that path. A tenant declared with `dax tenant set` but never
+launched was invisible. First fix attempt was to have `dax tenant set` also
+`mkdir -p` the state directory at declaration time; reverted almost
+immediately in favor of the real fix — `dax tenants` re-derives the live
+(tenant, project) set directly from `~/.dax.yaml`'s `projects` plus whatever
+`.dax-tenant` files actually say right now (the same inputs `dax run` itself
+uses), rather than reading anything off the state tree for enumeration at
+all. That makes the pre-create workaround redundant — every declared tenant
+shows up immediately regardless of whether anything's ever mounted it — and
+is also more correct: a stale declaration change can never continue to show
+something that no longer resolves that way, which reading the state tree
+would risk.
+
+Output is a table (`TENANT`/`PROJECT`/`SESSION`/`PATH`, fixed-width columns,
+sorted so same-tenant rows are contiguous), including each project's real
+host path — for a single-tenant project that's the repo root; for a
+multi-tenant one it's `repo_root/[tenant_subdir/]<labeled subdir>`. `SESSION`
+is `yes`/`no` based on whether `~/.local/state/dax/tenants/<tenant>/<project>/`
+has a `.claude.json` or `.credentials.json` in it — the two things only a
+real launch ever writes — so declared-but-unused and actually-active tenants
+are distinguishable at a glance. Projects whose registered `dir` doesn't
+exist on the current machine are silently skipped.
 
 ### 9. Declaration: gitignored `.dax-tenant` per subdir
 
@@ -319,14 +516,62 @@ atomic rename on this setup.
    every new project would otherwise open with a round of onboarding and trust
    dialogs, which is the difference between the cutover being unnoticeable and
    being irritating enough to abandon.
-5. Replace the wholesale `~/.claude` mount and the `~/.claude.json` dotfile mount
-   with per-tenant/project trees under `~/.local/state/dax/tenants/`, plus shared
-   mounts for `plugins/`, `skills/`, `commands/`. For a multi-tenant repo, mount
-   only `tenants/*/<project>/` — the repo's own subtree from each tenant the
-   subdir map references, never a whole tenant tree.
-6. Tenant resolution and refusal in the `claude` wrapper; `dax tenant set`;
-   `dax tenants` enumeration.
-7. Credential-span escalation check.
+5. **Wrapper-side tenant resolution** (`claude` wrapper, `dax_creds/tenant.py`,
+   `dax-creds resolve-tenant`). Reordered ahead of the mount replacement below
+   and decoupled from it via a master switch, `DAX_TENANT_STATE`, which
+   `dax run` sets only for projects that have opted into step 6's feature.
+   Unset — every project today — the wrapper's tenant resolution never runs
+   and behavior is unchanged; this is what lets this step land on its own,
+   independently testable, without the mount replacement also being live yet.
+   `dax tenant set`/`dax tenants` are part of step 6, not this step, since
+   they write/enumerate `.dax-tenant` files that only matter once a project
+   has actually opted in.
+6. Replace the wholesale `~/.claude` mount and the `~/.claude.json` dotfile
+   mount with per-tenant/project trees under `~/.local/state/dax/tenants/`,
+   behind the same opt-in feature (`claude_tenant_state`) that sets
+   `DAX_TENANT_STATE`, `DAX_MULTI_TENANT`, and `DAX_PROJECT_NAME` (the last of
+   these is what lets Gate B tell a real project mount apart from `~/.claude`/
+   `~/.augment`/`~/.aws` sitting at the same `$HOME` level — see decision 7).
+   For a multi-tenant repo, mount only `tenants/*/<project>/` — the repo's own
+   subtree from each tenant the subdir map references, never a whole tenant
+   tree. Includes `dax tenant set`/`dax tenants`/`dax tenant classify` (see
+   decision 8).
+
+   **Implemented and unit-tested** (`feature_claude_tenant_state` in `dax.py`,
+   opted into via a project's own `features:` list — see decision 7's
+   "`multi_tenant` is an explicit flag" note — plus `config['multi_tenant']`
+   wired from the project registry in `cmd_run()`). `cmd_run()` also invokes
+   `_ensure_tenants_classified()` whenever `claude_tenant_state` is opted in,
+   refusing to launch until every root/child node resolves — 259 tests pass
+   as of 2026-07-28, covering the resolution table, `dax tenants`,
+   `_ensure_tenants_classified`, `_prompt_tenant`, and `dax tenant classify`.
+
+   **Verified 2026-07-27: Docker auto-creates a missing bind-mount host
+   directory owned by the actual host user, not root.** This mattered because
+   the per-tenant/project host directories under `~/.local/state/dax/tenants/`
+   don't exist until first use, and every manual test up to this point had
+   only exercised a container-local `mkdir -p` (the wrapper's own, run
+   entirely inside the container's filesystem) — never a real host bind-mount
+   of a brand-new nested path. Checked directly:
+   `docker run --rm -v ~/scratch-permission-test:/test alpine sh -c 'id; ls -la /test'`
+   auto-created the host directory; `ls -la ~/scratch-permission-test` on the
+   Mac side (not through a root-run container, which would trivially bypass
+   permission checks either way) showed it owned by the actual host user.
+   Since the container's own user is built with a matching UID (the repo's
+   "host UID matching" build step), this confirms a brand-new tenant/project
+   directory is fully writable by the container the moment Docker creates it —
+   the specific risk carried out of implementation is closed. Still not done:
+   the full end-to-end proof on a real opted-in project (all resolution-table
+   rows, real Claude Code launch through this exact mount path, multi-day
+   rotation soak) that the plan's Verification section calls for.
+7. ~~Credential-span escalation check.~~ **Dropped.** Traced through what
+   decision this would actually drive: it protects against a `dax_creds`
+   credential-delivery misconfiguration (a project's `creds:` list spanning
+   multiple tenants' credentials) that is orthogonal to the Claude-state-bleed
+   problem this feature fixes, and is exactly as possible today as it would be
+   after this feature ships — steps 3-6 fully close the actual bug without it.
+   Revisit later, separately, if it ever actually bites, rather than inventing
+   a tenant-labeling scheme now to guard a hypothetical.
 
 ## Verification log — paused 2026-07-27
 
@@ -426,7 +671,7 @@ Dave!` and is authenticated. For a zero-prompt launch, seed:
 | --- | --- |
 | `hasCompletedOnboarding` | theme picker, then **login prompt**, then browser OAuth |
 | `projects.<cwd>.hasTrustDialogAccepted` | trust dialog; `settings.local.json` permissions silently ignored |
-| `theme` | theme picker on first launch |
+| `theme` | ~~theme picker on first launch~~ — **retested 2026-07-27 against v2.1.220: false.** With only `hasCompletedOnboarding` seeded, `interactive_launch_probe.py --show` reaches `Welcome back Dave!` directly, no theme picker shown. Not seeded; nothing to fix. |
 | `oauthAccount`, `userID` | cosmetic only — banner omits org name; triggers a profile fetch |
 
 `oauthAccount` is **not** required for auth. It is copied host state, so whether
@@ -502,6 +747,69 @@ to produce FAIL without `--seed` and PASS with it.
 days" Known Limits calls for before trusting refresh-token rotation under an
 unmounted `~/.claude`. Leaving `~/.dax.yaml` unrestored (above) keeps extending
 this observation window for as long as steps 3–7 take to build.
+
+### Confirmed 2026-07-28 — steps 3-6 proven on the two real repos this design exists for
+
+`claude_tenant_state` opted in for real, on the actual `fabric` (single-tenant)
+and `discernment` (multi-tenant, `tenant_subdir: processes`) projects — not
+scratch directories. Both directly exercised the exact failure this whole
+design was written to fix (Problem section, above): `discernment` was the
+repo where a session got preloaded with another customer's candidate slate
+and a third party's compensation model.
+
+- **fabric**: declared (`personal`), real launch, real credential flow (found
+  and fixed a genuine, pre-existing `dax creds add`/Keychain-overwrite bug
+  along the way — see `CLAUDE.md` Backlog), history and arrow-up recall work.
+- **discernment**: `hydraulic-controls-it` and at least one other process
+  labeled under `processes/`. Two concurrent `claude` sessions, different
+  tmux windows, same container, different labeled processes — each got its
+  own isolated `CLAUDE_CONFIG_DIR`. Turns run, quit, restarted: history on
+  restart contained only that session's own prior turns, nothing from the
+  other window's tenant. This is the concrete, positive version of the bug
+  this design exists to fix, not just its absence.
+- Root refusal, unmapped-subdir refusal, and the `tenant_subdir` depth
+  accommodation all confirmed against the real repos, not just unit tests,
+  once the image was rebuilt with that code included (an earlier attempt hit
+  stale pre-rebuild behavior — see the `tenant_subdir` note above).
+
+Still outstanding before this can be trusted as the default: the shared
+`plugins`/`skills`/`commands`/`cache` migration (scoped, not yet built — see
+CLAUDE.md In progress), and the multi-day rotation soak, still not clear
+after any of today's testing since nothing here ran long enough to hit a
+rotation.
+
+### Confirmed 2026-07-28 — `unattributed` dropped, root-as-project, interactive classification
+
+Real-world testing above surfaced two further design gaps addressed the same
+day, both now implemented and tested (see decisions 7 and 8, and Sequencing
+step 6):
+
+- **discernment's own top-level tooling needs its own project/tenant.**
+  Working on discernment independent of any one customer process is a real,
+  recurring need, not an edge case — a multi-tenant repo's root now resolves
+  as its own project when declared, in both single- and multi-tenant modes,
+  rather than always refusing.
+- **The `unattributed` fallback is gone entirely**, replaced by interactive
+  classification at `dax run` time (`_ensure_tenants_classified()`), with
+  `dax tenant classify` as an on-demand re-walk. No location remains that
+  silently resolves to a pooled default; every start point either is already
+  declared, gets classified before the container launches, or hard-refuses
+  (only for a subdirectory discovered mid-session, where Docker's inability
+  to add mounts to a running container makes interactive resolution moot
+  anyway).
+
+Also fixed in the same pass, found while re-testing `dax tenants` against a
+multi-tenant repo whose root now resolves as a project: `cmd_tenants`' path
+computation used `tenant_base / project` unconditionally, which produced a
+nonsense doubled path (`discernment/processes/discernment`) for a declared
+root. Now branches on whether `project == reponame`.
+
+259 tests pass (`tests/test_dax_creds_tenant.py`,
+`tests/test_dax_creds_cli.py`, `tests/test_features.py`,
+`tests/test_dax_tenant_cmds.py`, full suite). Not yet re-run against the real
+fabric/discernment containers since this change — that would require an
+image rebuild (`dax_creds` is a frozen, non-editable install) and a fresh
+round of manual verification, not yet done.
 
 ## Deferred
 

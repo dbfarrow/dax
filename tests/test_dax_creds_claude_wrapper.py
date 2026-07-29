@@ -166,6 +166,16 @@ def test_seed_does_not_set_folder_trust(tmp_path):
     assert 'projects' not in seeded
 
 
+def test_seed_does_not_set_oauth_account(tmp_path):
+    # oauthAccount/userID need real account data (email, org, account UUID);
+    # nothing plumbs that from the daemon/host into the wrapper today, so
+    # seeding a fabricated value would be worse than seeding nothing.
+    _run(tmp_path, ENVELOPE_JSON)
+    seeded = json.loads((tmp_path / 'home' / '.claude.json').read_text())
+    assert 'oauthAccount' not in seeded
+    assert 'userID' not in seeded
+
+
 def test_seed_is_owner_only(tmp_path):
     _run(tmp_path, ENVELOPE_JSON)
     state = tmp_path / 'home' / '.claude.json'
@@ -199,4 +209,126 @@ def test_config_dir_created_when_missing(tmp_path):
     proc, _ = _run(tmp_path, ENVELOPE_JSON, env={'CLAUDE_CONFIG_DIR': str(cfg)})
     assert proc.returncode == 0
     assert (cfg / '.credentials.json').exists()
+    assert (cfg / '.claude.json').exists()
+
+
+# --- DAX_TENANT_STATE: Gate B tenant resolution -----------------------------
+#
+# DAX_TENANT_STATE is the master switch, set by `dax run` only for projects
+# that have opted into the (not yet built) claude_tenant_state feature. Unset
+# - every project today - none of this runs; the tests above already prove
+# that (none of them set it). These tests cover the opted-in path, stubbing
+# `dax-creds resolve-tenant` rather than exercising the real tenant-resolution
+# module - that module has its own full unit coverage in
+# tests/test_dax_creds_tenant.py.
+
+def _run_tenant_state(tmp_path, resolve_stdout, resolve_exit=0,
+                       dax_creds_stdout=ENVELOPE_JSON, dax_creds_exit=0, env=None):
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir(exist_ok=True)
+
+    wrapper = bin_dir / 'claude'
+    wrapper.write_text(WRAPPER.read_text())
+    wrapper.chmod(0o755)
+
+    call_log = tmp_path / 'dax-creds-calls.log'
+    stub = bin_dir / 'dax-creds'
+    stub.write_text(
+        '#!/bin/bash\n'
+        'echo "$@" >> {log!r}\n'
+        'if [ "$1" = "resolve-tenant" ]; then\n'
+        '    printf %b {resolve_stdout!r} >&1\n'
+        '    printf %b {resolve_stderr!r} >&2\n'
+        '    exit {resolve_exit}\n'
+        'else\n'
+        '    printf %s {get_stdout!r}\n'
+        '    exit {get_exit}\n'
+        'fi\n'.format(
+            log=str(call_log), resolve_stdout=resolve_stdout,
+            resolve_stderr='' if resolve_exit == 0 else 'dax-creds: refused\n',
+            resolve_exit=resolve_exit, get_stdout=dax_creds_stdout, get_exit=dax_creds_exit))
+    stub.chmod(0o755)
+
+    real = bin_dir / 'claude-real'
+    real.write_text('#!/bin/bash\necho ran-claude-real > {}\nexit 0\n'.format(
+        tmp_path / 'claude-real-ran'))
+    real.chmod(0o755)
+
+    home = tmp_path / 'home'
+    home.mkdir(exist_ok=True)
+
+    full_env = {
+        'PATH': f'{bin_dir}:/usr/bin:/bin',
+        'HOME': str(home),
+        'DAX_CREDS_SOCK': 'tcp:127.0.0.1:9999',
+        'DAX_CREDS_CLAUDE': 'claude-fre',
+        'DAX_CLAUDE_REAL': str(real),
+        'DAX_TENANT_STATE': '1',
+    }
+    if env:
+        full_env.update(env)
+
+    proc = subprocess.run([str(wrapper)], env=full_env, capture_output=True,
+                          text=True, timeout=30)
+    return proc, home, call_log
+
+
+def test_tenant_state_unset_never_invokes_resolve_tenant(tmp_path):
+    # Belt-and-suspenders on top of every test above not setting
+    # DAX_TENANT_STATE: confirm dax-creds is never even called with
+    # resolve-tenant when the switch is off.
+    proc, creds = _run(tmp_path, ENVELOPE_JSON)
+    assert proc.returncode == 0
+    assert json.loads(creds.read_text()) == ENVELOPE
+
+
+def test_tenant_state_sets_claude_config_dir_from_resolution(tmp_path):
+    proc, home, _ = _run_tenant_state(
+        tmp_path, resolve_stdout='TENANT=personal\nPROJECT=fabric\n')
+
+    assert proc.returncode == 0
+    cfg = home / '.local' / 'state' / 'dax' / 'tenants' / 'personal' / 'fabric'
+    assert json.loads((cfg / '.credentials.json').read_text()) == ENVELOPE
+    assert json.loads((cfg / '.claude.json').read_text()) == {
+        'hasCompletedOnboarding': True}
+
+
+def test_tenant_state_refusal_exits_nonzero_without_running_claude(tmp_path):
+    # Unlike a bad credential (which still execs claude, degraded), a
+    # resolution refusal must not start claude at all.
+    proc, home, _ = _run_tenant_state(tmp_path, resolve_stdout='', resolve_exit=1)
+
+    assert proc.returncode != 0
+    assert not (tmp_path / 'claude-real-ran').exists()
+    assert 'refused' in proc.stderr
+
+
+def test_tenant_state_refusal_does_not_fetch_credential(tmp_path):
+    # Refusing must happen before any credential work, not just before exec.
+    proc, home, call_log = _run_tenant_state(tmp_path, resolve_stdout='', resolve_exit=1)
+
+    calls = call_log.read_text().splitlines()
+    assert calls == ['resolve-tenant']
+
+
+def test_tenant_state_success_still_execs_claude(tmp_path):
+    proc, home, _ = _run_tenant_state(
+        tmp_path, resolve_stdout='TENANT=personal\nPROJECT=fabric\n')
+
+    assert proc.returncode == 0
+    assert (tmp_path / 'claude-real-ran').exists()
+
+
+def test_tenant_state_warn_reaches_stderr(tmp_path):
+    # dax-creds itself prints the warn/refuse detail (see cli.py); the
+    # wrapper does not need its own duplicate messaging for this path.
+    # tenant='unattributed' (not a combined 'unattributed/fabric' string) is
+    # what avoids the wrapper's tenants/$_tenant/$_project template stuttering
+    # into .../unattributed/fabric/fabric.
+    proc, home, _ = _run_tenant_state(
+        tmp_path, resolve_stdout='TENANT=unattributed\nPROJECT=fabric\n',
+        resolve_exit=0)
+
+    assert proc.returncode == 0
+    cfg = home / '.local' / 'state' / 'dax' / 'tenants' / 'unattributed' / 'fabric'
     assert (cfg / '.claude.json').exists()

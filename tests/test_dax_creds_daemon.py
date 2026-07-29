@@ -1,6 +1,33 @@
+import asyncio
 import json
 import pytest
-from dax_creds.daemon import handle_request, handle_open_url, handle_list, FileTokenStore, KeyringTokenStore
+from dax_creds.daemon import handle_request, handle_open_url, handle_list, FileTokenStore, KeyringTokenStore, _make_handle
+
+
+class FakeReader:
+    def __init__(self, data):
+        self._data = data
+
+    async def read(self, n):
+        return self._data
+
+
+class FakeWriter:
+    def __init__(self):
+        self.written = b''
+        self.closed = False
+
+    def write(self, data):
+        self.written += data
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        pass
 
 
 class FakeKeyring:
@@ -191,6 +218,97 @@ def test_handle_open_url_returns_error_when_url_missing():
         lambda url, browser, profile: None,
     )
     assert response['error'] == 'missing_url'
+
+
+def test_handle_open_url_rewrites_claude_localhost_redirect_to_device_flow():
+    credentials = {'claude-fre': {'provider': 'claude', 'browser': 'chrome', 'chrome_profile': 'Profile 2'}}
+    opened = []
+    localhost_url = (
+        'https://claude.com/cai/oauth/authorize?code=true&client_id=abc'
+        '&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A43775%2Fcallback'
+        '&scope=user%3Aprofile&code_challenge=xyz&code_challenge_method=S256&state=stateval'
+    )
+
+    response = handle_open_url(
+        {'action': 'open_url', 'credential': 'claude-fre', 'url': localhost_url},
+        credentials,
+        lambda url, browser, profile: opened.append((url, browser, profile)),
+    )
+
+    assert response == {'ok': True}
+    opened_url, browser, profile = opened[0]
+    assert browser == 'chrome'
+    assert profile == 'Profile 2'
+    assert 'redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback' in opened_url
+    # Everything else about the authorization request is preserved untouched.
+    assert 'client_id=abc' in opened_url
+    assert 'code_challenge=xyz' in opened_url
+    assert 'code_challenge_method=S256' in opened_url
+    assert 'state=stateval' in opened_url
+
+
+def test_handle_open_url_leaves_claude_non_localhost_redirect_untouched():
+    credentials = {'claude-fre': {'provider': 'claude'}}
+    opened = []
+    already_fine_url = (
+        'https://claude.com/cai/oauth/authorize?redirect_uri='
+        'https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=stateval'
+    )
+
+    handle_open_url(
+        {'action': 'open_url', 'credential': 'claude-fre', 'url': already_fine_url},
+        credentials,
+        lambda url, browser, profile: opened.append(url),
+    )
+
+    assert opened == [already_fine_url]
+
+
+def test_handle_open_url_does_not_rewrite_non_claude_localhost_redirect():
+    credentials = {'github-dfarrow': {'provider': 'github'}}
+    opened = []
+    localhost_url = 'https://github.com/login/device?redirect_uri=http%3A%2F%2Flocalhost%3A9999%2Fcallback'
+
+    handle_open_url(
+        {'action': 'open_url', 'credential': 'github-dfarrow', 'url': localhost_url},
+        credentials,
+        lambda url, browser, profile: opened.append(url),
+    )
+
+    assert opened == [localhost_url]
+
+
+def test_handle_closes_connection_silently_on_empty_read(caplog):
+    # A bare connect-then-disconnect (e.g. dax.py's _wait_for_tcp readiness
+    # probe) must not be logged as a malformed request - there's no client
+    # data to have been invalid in the first place.
+    handle = _make_handle(
+        credentials={}, token_store=None, token_exchanger=None, cache={},
+        url_opener=lambda url, browser, profile: None,
+    )
+    reader = FakeReader(b'')
+    writer = FakeWriter()
+
+    asyncio.run(handle(reader, writer))
+
+    assert writer.written == b''
+    assert writer.closed is True
+    assert 'invalid JSON' not in caplog.text
+
+
+def test_handle_still_logs_and_responds_to_genuinely_invalid_json():
+    handle = _make_handle(
+        credentials={}, token_store=None, token_exchanger=None, cache={},
+        url_opener=lambda url, browser, profile: None,
+    )
+    reader = FakeReader(b'not json')
+    writer = FakeWriter()
+
+    asyncio.run(handle(reader, writer))
+
+    response = json.loads(writer.written)
+    assert response == {'error': 'invalid_request', 'message': 'Invalid JSON'}
+    assert writer.closed is True
 
 
 def test_handle_list_returns_all_credentials_with_providers():

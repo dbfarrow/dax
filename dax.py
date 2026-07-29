@@ -74,6 +74,9 @@ def load_config():
 
     defaults['envname'] = cwd.replace(home, '').lstrip('/').replace('/', '-')
 
+    from dax_creds.config import dir_basename
+    defaults['workdir_name'] = dir_basename(cwd)
+
     local_features = local.pop('features', [])
     defaults.update(local)
     defaults['features'].extend(local_features)
@@ -103,7 +106,7 @@ def _add_volume(config, feature_key):
 
 
 def feature_workdir(config):
-    container = os.path.join(_container_home(config), config['workdir']['container'])
+    container = os.path.join(_container_home(config), config['workdir_name'])
     return ['--volume={}:{}'.format(config['cwd'], container)]
 
 
@@ -118,6 +121,62 @@ def feature_aws(config):
 
 def feature_claude(config):
     return _add_volume(config, 'claudedir')
+
+
+# Shared across every tenant (decision 11 in the design doc): plugins/,
+# skills/, commands/, and caches - nested into each project's own state tree
+# so Claude Code finds them at their usual CLAUDE_CONFIG_DIR-relative path
+# without duplicating them per tenant. 'cache' is an inferred addition
+# (observed as a real top-level Claude Code directory during manual testing
+# 2026-07-27) alongside the three the design doc names explicitly - not
+# contractual, worth re-checking after version bumps like the rest of the
+# seed mechanics.
+_CLAUDE_TENANT_SHARED_DIRS = ('plugins', 'skills', 'commands', 'cache')
+
+
+def feature_claude_tenant_state(config):
+    # Sequencing step 6 (docs/design/2026-07-27-tenant-isolation.md): the
+    # opt-in replacement for feature_claude's wholesale ~/.claude mount. A
+    # project adds 'claude_tenant_state' to its own features: list (not
+    # feature_claude's name) to switch this on - see the design doc's
+    # Sequencing section for why this stays a separate feature rather than
+    # replacing feature_claude outright.
+    #
+    # Host directories referenced here may not exist yet on first use for a
+    # brand-new tenant/project. Verified 2026-07-27: Docker auto-creates
+    # missing bind-mount host paths owned by the actual host user (not root),
+    # so the container can write into them immediately - see the design
+    # doc's Sequencing step 6 note for how this was checked.
+    from dax_creds.tenant import all_tenant_projects
+
+    project_name = config['workdir_name']
+    multi_tenant = bool(config.get('multi_tenant'))
+    tenant_subdir = config.get('tenant_subdir', '')
+    repo_root = Path(config['cwd'])
+    container_home = _container_home(config)
+    host_root = os.path.expanduser('~/.local/state/dax')
+    container_root = os.path.join(container_home, '.local/state/dax')
+
+    opts = [
+        '-e', 'DAX_TENANT_STATE=1',
+        '-e', 'DAX_PROJECT_NAME={}'.format(project_name),
+    ]
+    if multi_tenant:
+        opts += ['-e', 'DAX_MULTI_TENANT=1']
+    if tenant_subdir:
+        opts += ['-e', 'DAX_TENANT_SUBDIR={}'.format(tenant_subdir)]
+
+    for tenant, project in sorted(all_tenant_projects(repo_root, multi_tenant, tenant_subdir)):
+        host_dir = os.path.join(host_root, 'tenants', tenant, project)
+        container_dir = os.path.join(container_root, 'tenants', tenant, project)
+        opts.append('--volume={}:{}'.format(host_dir, container_dir))
+
+        for shared_dir in _CLAUDE_TENANT_SHARED_DIRS:
+            host_shared = os.path.join(host_root, 'shared', shared_dir)
+            container_shared = os.path.join(container_dir, shared_dir)
+            opts.append('--volume={}:{}'.format(host_shared, container_shared))
+
+    return opts
 
 
 def feature_auggie(config):
@@ -184,8 +243,7 @@ def feature_webpreview(config):
     port = config.get('webpreview', {}).get('port') or _find_preview_port(config['cwd'])
     shell = os.environ.get('SHELL', '/bin/zsh')
     container_home = _container_home(config)
-    work_subdir = config.get('workdir', {}).get('container', 'work')
-    preview_dir = os.path.join(container_home, work_subdir)
+    preview_dir = os.path.join(container_home, config['workdir_name'])
     dax_print("[-]   webpreview port: {}".format(port))
     config['_shell_cmd'] = 'DAX_PREVIEW_PORT={} DAX_PREVIEW_DIR={} dax-preview & exec {}'.format(
         port, preview_dir, shell)
@@ -350,8 +408,14 @@ def _start_login_daemon(credentials, port):
         '--tcp-port', str(port),
         '--credentials', json.dumps(credentials),
     ]
+    log_path = Path.home() / '.dax' / f'login-{port}.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_path, 'a')
     dax_print("[+] starting login credential daemon")
-    return subprocess.Popen(cmd, cwd=str(Path(__file__).parent))
+    proc = subprocess.Popen(cmd, cwd=str(Path(__file__).parent),
+                             stdout=log_file, stderr=log_file)
+    proc._dax_log_path = log_path
+    return proc
 
 
 def _find_free_port():
@@ -385,6 +449,29 @@ def _wait_for_tcp(host, port, timeout=5.0):
     return False
 
 
+_DOCKER_TWO_TOKEN_FLAGS = {'--name', '-h', '-v', '--volume', '-e', '-p', '--group-add', '-c'}
+
+
+def _format_docker_cmd(cmd):
+    """One flag (with its value, if it takes a separate one) per line.
+
+    `cmd` mixes combined single tokens (`--volume=host:container`) and
+    flag/value pairs (`-e`, `KEY=val`) depending on which feature built them;
+    this reads correctly either way rather than assuming one form throughout.
+    """
+    lines = []
+    i = 0
+    while i < len(cmd):
+        token = cmd[i]
+        if token in _DOCKER_TWO_TOKEN_FLAGS and i + 1 < len(cmd):
+            lines.append('{} {}'.format(token, cmd[i + 1]))
+            i += 2
+        else:
+            lines.append(token)
+            i += 1
+    return '\n  '.join(lines)
+
+
 def cmd_run(args):
     config = load_config()
     username = _get_username()
@@ -401,17 +488,32 @@ def cmd_run(args):
     daemon_proc = None
     project_creds = {}
     try:
-        from dax_creds.config import load_dax_config, find_project_by_dir, get_project_credentials, daemon_socket_path
+        from dax_creds.config import (
+            load_dax_config, find_project_by_dir, find_enclosing_project,
+            get_project_credentials, daemon_socket_path,
+        )
         from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
         dax_config = load_dax_config()
         try:
             project = find_project_by_dir(dax_config, Path.cwd())
         except KeyError:
+            enclosing = find_enclosing_project(dax_config, Path.cwd())
+            if enclosing is not None:
+                enclosing_name, enclosing_project = enclosing
+                project_dir = Path(enclosing_project['dir']).expanduser()
+                dax_print(
+                    "[!] {} is inside registered project '{}' at {} but is "
+                    "not its root. Run `dax run` from {}, then cd here "
+                    "inside the container.".format(
+                        Path.cwd(), enclosing_name, project_dir, project_dir))
+                sys.exit(1)
             dax_print("[+] project not registered — starting dax init")
             from dax_creds.init import run_init
             dax_config = run_init(dax_config, Path.cwd())
             project = find_project_by_dir(dax_config, Path.cwd())
         project_creds = get_project_credentials(dax_config, project)
+        config['multi_tenant'] = bool(project.get('multi_tenant'))
+        config['tenant_subdir'] = project.get('tenant_subdir', '')
 
         ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
         if ssh_creds:
@@ -447,6 +549,15 @@ def cmd_run(args):
         if 'ports' not in features:
             features.append('ports')
 
+    if 'claude_tenant_state' in features:
+        # Gate A, before mounts are computed: interactively fill in anything
+        # undeclared (silent no-op if everything already is) - this is what
+        # makes dax_creds/tenant.py's "no unattributed fallback, refuse
+        # instead" rule not just friction. Safe to prompt here specifically
+        # because nothing has launched yet; see _ensure_tenants_classified's
+        # own docstring for why the same isn't true mid-session.
+        _ensure_tenants_classified(config)
+
     for feature in features:
         cmd.extend(_add_feature(feature, config))
 
@@ -480,7 +591,7 @@ def cmd_run(args):
     if '_shell_cmd' in config:
         cmd += ['/bin/sh', '-c', config['_shell_cmd']]
 
-    dax_print("[+] running: " + ' '.join(cmd))
+    dax_print("[+] running:\n  " + _format_docker_cmd(cmd))
     try:
         if not args.test_only:
             subprocess.run(cmd)
@@ -511,7 +622,7 @@ _LOGIN_PROVIDERS = {
         'auth_command': 'gh auth login --hostname github.com --git-protocol https --web',
     },
     'claude': {
-        'mounts': ['~/.claude'],
+        'mounts': ['~/.claude', '~/.dax-debug'],
         'auth_command': 'claude auth login',
     },
 }
@@ -622,6 +733,7 @@ def cmd_creds_login(cred_name, config):
         subprocess.run(cmd)
     finally:
         daemon_proc.terminate()
+        dax_print(f'[-] login daemon log: {daemon_proc._dax_log_path}')
 
     # Post-login: import token to Keychain
     _post_login_import(cred_name, cred_def, config, provider)
@@ -639,7 +751,14 @@ def _post_login_import(cred_name, cred_def, config, provider):
         else:
             dax_print(f'[!] {cred_name}: no token found after auth flow.')
     elif provider == 'claude':
-        dax_print(f'[+] {cred_name}: auth complete. Run `dax creds add` to store the token if needed.')
+        from dax_creds.providers.claude import ClaudeProvider
+        provider_obj = ClaudeProvider()
+        token = provider_obj.import_from_disk(cred_def)
+        if token:
+            provider_obj.store(cred_name, token)
+            dax_print(f'[+] {cred_name}: token imported to Keychain.')
+        else:
+            dax_print(f'[!] {cred_name}: no token found after auth flow.')
     elif provider == 'auggie':
         from dax_creds.providers.auggie import AuggieProvider
         provider_obj = AuggieProvider()
@@ -732,6 +851,196 @@ def cmd_envs(args):
 
 def cmd_features(args):
     _print_features()
+
+
+def _known_tenant_names():
+    """Every tenant name declared anywhere across every registered project on
+    this host - the pick-list for the classification prompt below."""
+    from dax_creds.config import load_dax_config
+    from dax_creds.tenant import all_tenant_projects
+
+    try:
+        dax_config = load_dax_config()
+    except FileNotFoundError:
+        return set()
+
+    names = set()
+    for project_cfg in dax_config.get('projects', {}).values():
+        proj_dir = Path(project_cfg.get('dir', '')).expanduser()
+        if not proj_dir.is_dir():
+            continue
+        multi_tenant = bool(project_cfg.get('multi_tenant'))
+        tenant_subdir = project_cfg.get('tenant_subdir', '')
+        for tenant, _ in all_tenant_projects(proj_dir, multi_tenant, tenant_subdir):
+            names.add(tenant)
+    return names
+
+
+_NEW_TENANT_CHOICE = '(new tenant)'
+
+
+def _q_select_tenant(prompt, choices, default):
+    import questionary
+    return questionary.select(prompt, choices=choices, default=default).ask()
+
+
+def _q_text_tenant(prompt, default):
+    import questionary
+    return questionary.text(prompt, default=default).ask()
+
+
+def _prompt_tenant(subdir, known_tenants, default=None, _select=None, _text=None):
+    """Interactively ask which tenant `subdir` belongs to.
+
+    Offers a pick-list of tenants already known host-wide (reduces typo'd
+    variants like 'Ysecurity' vs 'ysecurity' fragmenting one tenant into
+    two), with an escape hatch to type a new one - falls straight to free
+    text if nothing is known yet. `_select`/`_text` are injectable for
+    testing, matching the `_picker` pattern already used in dax_creds/init.py
+    - real questionary prompts otherwise.
+    """
+    _select = _select or _q_select_tenant
+    _text = _text or _q_text_tenant
+
+    choices = sorted(known_tenants)
+    if choices:
+        picked = _select("Tenant for {}:".format(subdir), choices + [_NEW_TENANT_CHOICE],
+                          default if default in choices else None)
+        if picked is None:
+            raise KeyboardInterrupt
+        if picked != _NEW_TENANT_CHOICE:
+            return picked
+    result = _text("Tenant name for {}:".format(subdir), default or '')
+    if result is None or not result.strip():
+        raise KeyboardInterrupt
+    return result.strip()
+
+
+def _ensure_tenants_classified(config, reclassify_all=False):
+    """Interactively fill in (or, with reclassify_all, revise) tenant
+    assignments for a claude_tenant_state project: the repo root, and every
+    immediate child under tenant_subdir if multi-tenant.
+
+    Runs at `dax run` time (Gate A), before mounts are computed - which is
+    what makes doing this interactively safe here: nothing needs Docker to
+    add a mount to an already-running container after the fact. A brand-new
+    subdirectory discovered *mid-session* still just hard-refuses
+    (dax_creds/tenant.py's resolve_tenant) - this function only ever runs
+    before a container exists at all.
+
+    reclassify_all=False (the automatic dax-run-time check): silently skips
+    anything already declared - zero friction on routine use.
+    reclassify_all=True (`dax tenant classify`): prompts for everything,
+    defaulting to the current value, so pressing Enter keeps it and typing
+    something new changes it.
+    """
+    from dax_creds.tenant import _read_tenant_label, TENANT_FILE, _NOT_A_PROJECT_SUBDIR
+
+    repo_root = Path(config['cwd'])
+    multi_tenant = bool(config.get('multi_tenant'))
+    tenant_subdir = config.get('tenant_subdir', '')
+    known = _known_tenant_names()
+
+    def _classify(subdir):
+        current = _read_tenant_label(subdir / TENANT_FILE)
+        if current and not reclassify_all:
+            return
+        tenant = _prompt_tenant(subdir, known, default=current)
+        (subdir / TENANT_FILE).write_text(tenant)
+        known.add(tenant)
+
+    _classify(repo_root)
+
+    if multi_tenant:
+        tenant_base = (repo_root / tenant_subdir) if tenant_subdir else repo_root
+        if tenant_base.is_dir():
+            for child in sorted(tenant_base.iterdir()):
+                if not child.is_dir() or child.name in _NOT_A_PROJECT_SUBDIR:
+                    continue
+                _classify(child)
+
+
+def cmd_tenant(args):
+    if args.tenant_command == 'set':
+        subdir = Path(args.subdir)
+        if not subdir.is_dir():
+            dax_print("[!] {} is not a directory".format(subdir))
+            sys.exit(1)
+        (subdir / '.dax-tenant').write_text(args.tenant)
+        dax_print("[+] {}/.dax-tenant set to '{}'".format(subdir, args.tenant))
+    elif args.tenant_command == 'classify':
+        from dax_creds.config import load_dax_config, find_project_by_dir
+        dax_config = load_dax_config()
+        try:
+            project = find_project_by_dir(dax_config, Path.cwd())
+        except KeyError:
+            dax_print("[!] {} is not a registered dax project - run `dax init` "
+                      "first".format(Path.cwd()))
+            sys.exit(1)
+        config = {
+            'cwd': str(Path.cwd()),
+            'multi_tenant': bool(project.get('multi_tenant')),
+            'tenant_subdir': project.get('tenant_subdir', ''),
+        }
+        _ensure_tenants_classified(config, reclassify_all=True)
+
+
+def cmd_tenants(args):
+    # Registry- and declaration-driven, not state-tree-driven: this re-derives
+    # the live (tenant, project) set from ~/.dax.yaml's projects plus whatever
+    # .dax-tenant files actually say right now, the same way dax run would -
+    # so every declared tenant shows up immediately, not only ones that have
+    # had a session, and a stale/renamed declaration can never show something
+    # that no longer resolves that way.
+    from dax_creds.config import load_dax_config, dir_basename
+    from dax_creds.tenant import all_tenant_projects
+
+    try:
+        dax_config = load_dax_config()
+    except FileNotFoundError:
+        dax_print("[-] no ~/.dax.yaml found")
+        return
+
+    state_root = Path(os.path.expanduser('~/.local/state/dax/tenants'))
+    rows = []  # (tenant, project, session, path) - matches display column order
+
+    for project_cfg in dax_config.get('projects', {}).values():
+        proj_dir = Path(project_cfg.get('dir', '')).expanduser()
+        if not proj_dir.is_dir():
+            continue
+        multi_tenant = bool(project_cfg.get('multi_tenant'))
+        tenant_subdir = project_cfg.get('tenant_subdir', '')
+        tenant_base = (proj_dir / tenant_subdir) if (multi_tenant and tenant_subdir) else proj_dir
+        reponame = dir_basename(proj_dir)
+
+        for tenant, project in all_tenant_projects(proj_dir, multi_tenant, tenant_subdir):
+            # project == reponame identifies the repo root's own entry (both
+            # single-tenant and, since 2026-07-28, a multi-tenant repo's own
+            # root project) - everything else is a labeled child under
+            # tenant_base.
+            path = proj_dir if project == reponame else (tenant_base / project)
+            state_dir = state_root / tenant / project
+            used = (state_dir / '.claude.json').exists() or (state_dir / '.credentials.json').exists()
+            rows.append((tenant, project, 'yes' if used else 'no', str(path)))
+
+    if not rows:
+        dax_print("[-] no projects resolve to a tenant yet")
+        return
+
+    rows.sort(key=lambda r: (r[0], r[1]))
+
+    headers = ('TENANT', 'PROJECT', 'SESSION', 'PATH')
+    widths = [max(len(headers[i]), max(len(r[i]) for r in rows)) for i in range(4)]
+    fmt = '  '.join('{{:<{}}}'.format(w) for w in widths)
+    print()
+    print(fmt.format(*headers))
+    previous_tenant = None
+    for row in rows:
+        if previous_tenant is not None and row[0] != previous_tenant:
+            print()
+        print(fmt.format(*row))
+        previous_tenant = row[0]
+    print()
 
 
 def cmd_backup(args):
@@ -840,6 +1149,18 @@ def main():
     envs_sub = envs_p.add_subparsers(dest='envs_command', required=True)
     envs_sub.add_parser('list', help='List registered environments')
 
+    tenant_p = subparsers.add_parser('tenant', help='Manage tenant declarations')
+    tenant_sub = tenant_p.add_subparsers(dest='tenant_command', required=True)
+    tenant_set_p = tenant_sub.add_parser('set', help='Declare the tenant for a subdirectory')
+    tenant_set_p.add_argument('subdir', help='Directory to declare (writes its .dax-tenant file)')
+    tenant_set_p.add_argument('tenant', help='Tenant name to declare')
+    tenant_sub.add_parser(
+        'classify',
+        help='Walk through every subdirectory needing a tenant (run from the project root); '
+             're-prompts even already-declared ones, defaulting to the current value')
+
+    subparsers.add_parser('tenants', help='List known tenants and their projects')
+
     args = parser.parse_args()
 
     if args.command == 'build':
@@ -856,6 +1177,10 @@ def main():
         cmd_creds(args)
     elif args.command == 'envs':
         cmd_envs(args)
+    elif args.command == 'tenant':
+        cmd_tenant(args)
+    elif args.command == 'tenants':
+        cmd_tenants(args)
 
 
 if __name__ == '__main__':
