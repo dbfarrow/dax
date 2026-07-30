@@ -319,23 +319,25 @@ functions in `dax.py`.
   auto-registering, whenever cwd is nested inside — not equal to — an
   already-registered project. See `docs/design/2026-07-27-tenant-isolation.md`
   decision 6's "Gate 0" note. 259 tests pass.
-- **Shared plugins/skills/commands/cache migration** — scoped but not yet
-  built, and **reshaped by the 2026-07-29 redesign**: with the state tree now
-  mounted at `~/.claude` itself, these become *nested* mounts inside it
-  (`shared/plugins` → `~/.claude/plugins`), not a sibling path. Docker orders
-  mounts by destination depth, so the nesting resolves. `skills/` is further
-  changed — discernment's shared skills now arrive via the sidecar's second
-  mount at `~/.claude/skills/`, and project-specific skills belong in the
-  project's own `.claude/skills/`. Original plan, still broadly applicable:
-  one-time, host-wide copy (not a symlink) from
-  `~/.claude/{plugins,skills,commands}` into
-  `~/.local/state/dax/shared/{plugins,skills,commands,cache}` the first time
-  `claude_tenant_state` runs and the shared dir doesn't exist yet, gated on
-  `claude_tenant_state` actually being active, living in `cmd_run()`'s
-  orchestration rather than inside `feature_claude_tenant_state` (which stays
-  a pure argv-builder like every other `feature_*` function). Without this,
-  a project opting in loses access to whatever plugins/commands are already
-  installed under the old `~/.claude`.
+- **~~Shared plugins/skills/commands/cache migration~~ — deleted, not built
+  (decision B2, 2026-07-30).** No `shared/` tree and no seeding copy. Instead
+  mount the host's own `~/.claude/commands` and `~/.claude/plugins` **rw**,
+  nested inside the tree mount at `~/.claude` (Docker orders mounts by
+  destination depth, so the nesting resolves).
+
+  Checked against the real directories rather than assumed: `commands` holds 11
+  live commands and is the only genuine user state; `plugins` has **nothing
+  installed** — just the official marketplace catalog that Claude Code
+  auto-installs and refreshes itself, so mounting it is an optimization against
+  four redundant 6.3M clones, not state preservation. `skills` drops out
+  (discernment content, arriving via decision D's sidecar mount) and `cache`
+  drops out (derived, generic, cheap to refetch, and the only one of the four
+  where fetched content can turn account-specific).
+
+  With the list down to two, the copy step isn't worth its cost: direct mounts
+  need no seeding code, keep one source of truth, remove the divergence class
+  where a host-authored command is invisible in containers, and are *strictly
+  less* container write access than today's wholesale rw `~/.claude`.
 
 ## Backlog
 

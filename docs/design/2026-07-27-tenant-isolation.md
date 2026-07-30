@@ -521,6 +521,55 @@ Note this was a regression being fixed, not just a new capability: `.claude.json
 has been discarded on every teardown since the step-2 diagnostic removed it from
 `dotfiles.rw` on 2026-07-27 (see Environment state).
 
+### B2. No `shared/` tree — mount the host's own directories, decided 2026-07-30
+
+Supersedes decision 11's shared-directory list and the "shared
+plugins/commands/cache migration" work item, which is **deleted rather than
+built**.
+
+`shared/` was never multi-tenant machinery, so abandoning multi-tenancy does not
+remove its rationale by itself: it solved "install once, use in every tree", and
+that multiplicity is *per project*, which survives the redesign intact — four
+envs means four trees. What changes is the membership, and then whether a copy
+step is warranted at all.
+
+Membership, checked against the real host directories rather than assumed:
+
+| Dir | Actual contents | Verdict |
+| --- | --- | --- |
+| `commands` | 132K, 11 commands in active use (`tdd.md`, `pr-review.md`, `refactor.md`, …), all mtime Feb 19 | **mount** — real user state, lost per project otherwise |
+| `plugins` | 6.3M, and *nothing installed*: only the official marketplace catalog, which Claude Code auto-installs itself (`officialMarketplaceAutoInstalled: true`, no `enabledPlugins` key, `lastUpdated` moving on its own) | **mount, weakly** — no state to preserve; avoids four independent catalog clones and refetches. Pure optimization |
+| `skills` | discernment's own skills (`Council`, `FirstPrinciples`, `discernment.md`, …) | **drop** — arrives via decision D's sidecar mount at `~/.claude/skills/`. A `shared/skills` would be a stale copy of the repo |
+| `cache` | 472K: a generic `changelog.md` plus a 2-byte `my-closed-issues.json` | **drop** — derived, generic, cheap to refetch, adds write contention, and is the only one of the four where fetched content can turn account-specific |
+
+The `plugins` finding inverts the original justification. "Install once" was the
+argument for sharing, and nothing is installed — so what would be shared is a
+self-healing catalog, not user state.
+
+**And with the list down to two, the copy step is not worth its cost.** The
+original plan was a one-time host-wide copy into
+`~/.local/state/dax/shared/{...}`, seeded on first use. Mounting the host's
+`~/.claude/commands` and `~/.claude/plugins` directly — nested inside the tree
+mount, which Docker orders by destination depth — achieves the same thing with no
+seeding code, one source of truth, and no divergence class where a command
+authored on the host is invisible in containers or vice versa. It is also
+*strictly less* container write access than today, narrowing a wholesale rw
+`~/.claude` mount to two subdirectories.
+
+Mounted **rw**: authoring a command inside a container and having it persist is
+worth more than insulating the host directory, which is already fully writable
+from every container today. Read-only remains a cheap change if that stops being
+true.
+
+Accepted cost: an env wanting a *different* command set — a customer container
+with none of the personal tooling — needs an opt-out. That is a per-env flag if it
+ever comes up, not a reason to maintain a copy.
+
+Retires decision 11's open caveat that `skills/` stops being shareable "the
+moment a customer-specific skill is written": D resolves it differently, with
+shared skills versioned in the discernment repo and project-specific ones in the
+project's own `.claude/skills/`.
+
 ### C. One credential per tenant/project, each from its own fresh login
 
 Credentials are named `claude-<tenant>-<project>`. Expect N Anthropic accounts
