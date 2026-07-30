@@ -238,7 +238,23 @@ functions in `dax.py`.
   against), so `check_claude_grants.py` remains the audit for sharing that
   already exists. 20 tests, suite at **367**.
 
-  **Also new: C7 — `dax creds add` rebuilds the definition and drops unprompted
+  **C8 built 2026-07-30 — `dax creds add` asks the provider first and never asks
+  for a per-env name.** Naming is dax's job (C2), so once the provider is one of
+  `BARE_PROVIDER_CREDS` the name is derived, not typed — which also removes the
+  way a derived credential got silently converted to an explicitly registered one
+  (no "Overwrite it?" fires, since there is no registry entry to collide with, and
+  it then stops inheriting `credential_defaults`). Flow: provider → env (cwd's env
+  offered first) → tenant *only if that env has none* → derived name printed →
+  offer to add the bare token to the env's `creds:` → write
+  `credential_defaults` only if missing → **hand off to `dax creds login`, never
+  importing a token from disk**. `_run_creds_add` returns
+  `(config, pending_login)` and `cmd_creds` runs the login when accepted. Every
+  `_setup_*` now returns whether a secret was stored, so `Credential "X" saved.`
+  stops appearing when nothing was. **`dax init`'s inline creds loop still has
+  the old shape** — safe (C6's guard holds) but still hand-named; fold it in with
+  the backlogged `dax init` tenant prompt. 18 tests, suite at **385**.
+
+  **Superseded: C7 — `dax creds add` rebuilds the definition and drops unprompted
   fields.** `_define_credential` starts from `{'provider': ...}` (`init.py:113`)
   and `_run_creds_add` assigns it wholesale (`init.py:369`), so re-running `add`
   on an existing credential silently loses anything its prompts don't ask for;

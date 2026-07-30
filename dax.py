@@ -926,7 +926,13 @@ def cmd_creds(args):
     except FileNotFoundError:
         config = {'defaults': {'image': 'dax-base'}, 'credentials': {}, 'projects': {}}
     if args.creds_command == 'add':
-        run_creds_add(config)
+        # A per-env credential's secret is only ever minted by its own login, so
+        # `add` sets up the definition and then hands off rather than copying a
+        # token off disk (decisions C, C6).
+        config, pending_login = run_creds_add(config)
+        if pending_login:
+            print()
+            cmd_creds_login(pending_login, config)
     elif args.creds_command == 'list':
         run_creds_list(config)
     elif args.creds_command == 'remove':

@@ -798,6 +798,9 @@ them" is loose: the flow stores a secret, it registers nothing.
 
 ### C7. `dax creds add` rebuilds the definition, dropping unprompted fields
 
+*Partly superseded by C8, which reorders the flow so a per-env name is never
+typed. The lossy rebuild still applies to explicitly named credentials.*
+
 Found by inspection 2026-07-30 while scoping the manual step 6.
 
 `_define_credential` starts from `{'provider': provider_name}` (`init.py:113`) and
@@ -823,6 +826,63 @@ reachable by accident while testing something else.
 All three `replace=` behaviors are unit-tested
 (`tests/test_dax_creds_init.py:281–320`), so the manual step was downgraded to
 optional rather than made safe.
+
+### C8. `dax creds add` asks the provider first and never asks for a per-env name
+
+Built 2026-07-30, replacing C7's confirmation-prompt idea with a reordering that
+makes the problem structural rather than something to warn about.
+
+The old flow asked for a **name** first, then the provider. Two consequences:
+
+- A per-env credential's name is dax's to build (C2), so asking for it invites
+  exactly the typo C2 exists to eliminate — a misspelled `claud-fre` sat unused
+  for weeks, silently, because a name nothing resolves to is never matched.
+- Typing a derived name converted it to an explicitly registered one, with no
+  "Overwrite it?" prompt (it has no registry entry to collide with), which
+  silently stopped it inheriting `credential_defaults` (C4).
+
+Provider first dissolves both: once the answer is a provider in
+`BARE_PROVIDER_CREDS`, dax knows the name is derived and never asks.
+
+The claude path is now:
+
+1. `Provider:` → `claude`
+2. `Env:` — the registry's envs, with the one containing cwd offered first
+   (`find_named_project_by_dir`, falling back to `find_enclosing_project`, so a
+   subdirectory resolves too)
+3. `tenant` **only if that env has none** — the one point where it genuinely is
+   not known, and where C2 refuses rather than falling back to a shared
+   credential. Asked here rather than earlier because tenant belongs to the env,
+   not the credential; everywhere else the registry already knows it, and a
+   separate prompt would let the answer disagree with the env.
+4. the derived name is printed, not requested
+5. offer to add the bare `claude` token to that env's `creds:` list when absent —
+   otherwise the credential would exist and go unused
+6. `credential_defaults.<provider>` is written **only if missing**, since browser
+   and profile belong to the human authenticating, not the env (C4)
+7. **no token is ever imported from disk.** `add` hands off to
+   `dax creds login <derived-name>`, offering to run it immediately
+
+Point 7 is the substantive change, and it is what closes the last route to a
+shared grant by construction rather than by refusal. C6 still refuses collisions
+at store time, but not offering the copy is better than rejecting it afterward.
+`_run_creds_add` returns `(config, pending_login)`; `cmd_creds` runs the login
+when the user accepts.
+
+Related fix in the same pass: every `_setup_*` now returns whether a usable
+secret ended up stored, so the flow stops printing `Credential "X" saved.` for a
+credential nothing was stored for. That message was not false — the YAML write
+did happen — but it answered a different question than the one being asked,
+which is whether the credential works now.
+
+**Still carrying the old shape: `dax init`'s inline creds loop** (`init.py`,
+~line 325) has its own copy of name → provider → define → setup, so a claude
+credential registered during `dax init` is still hand-named. It is safe rather
+than correct: `_setup_claude_credential` keeps C6's collision guard, so the worst
+case is a badly named credential, not a shared grant. Folding it into this flow
+belongs with the already-backlogged work to prompt for `tenant` during `dax init`.
+
+18 tests in `tests/test_dax_creds_add_flow.py`; suite at 385.
 
 ### D. Discernment becomes a sidecar, not a multi-tenant repo
 

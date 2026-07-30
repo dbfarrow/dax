@@ -142,6 +142,12 @@ def _define_credential(cred_name, provider_name, browser_enumerator=None):
     return cred_def
 
 
+# Every _setup_* below returns True when the credential ends up with a usable
+# secret and False when it does not, so the caller can stop announcing "saved"
+# for a credential nothing was stored for. The YAML write really did happen in
+# that case — but "saved" answers a different question than the one the user is
+# asking, which is whether the credential works now.
+#
 # Every _setup_* below takes `replace`. It is False for ordinary setup, where
 # an existing secret means there is nothing to do, and True only when the user
 # has explicitly confirmed "Overwrite it?" in `dax creds add`. Without it the
@@ -152,13 +158,15 @@ def _setup_ssh_credential(cred_name, cred_def, replace=False):
     provider = SshProvider()
     if not replace and provider.check(cred_def):
         print(f'  [{cred_name}] already loaded in SSH agent.')
-        return
+        return True
     print(f'  [{cred_name}] loading {cred_def["key"]} into macOS Keychain...')
     try:
         provider.setup(cred_def)
         print(f'  [{cred_name}] done.')
+        return True
     except RuntimeError as e:
         print(f'  [{cred_name}] failed: {e}', file=sys.stderr)
+        return False
 
 
 def _setup_github_credential(cred_name, cred_def, config, replace=False):
@@ -167,20 +175,20 @@ def _setup_github_credential(cred_name, cred_def, config, replace=False):
 
     if not replace and provider.check(cred_def, cred_name):
         print(f'  [{cred_name}] token already in Keychain.')
-        return
+        return True
 
     token = provider.import_from_disk(cred_def, credential_name=cred_name)
     if token:
         print(f'  [{cred_name}] importing existing token from ~/.config/gh/hosts.yml')
         provider.store(cred_name, token)
         print(f'  [{cred_name}] done. Consider removing the token from hosts.yml.')
-        return
+        return True
 
     if not cred_def.get('client_id'):
         client_id = _prompt('GitHub OAuth App client_id')
         if not client_id:
             print(f'  [{cred_name}] skipped — no client_id provided.')
-            return
+            return False
         cred_def['client_id'] = client_id
         config.setdefault('credentials', {})[cred_name] = cred_def
 
@@ -198,8 +206,10 @@ def _setup_github_credential(cred_name, cred_def, config, replace=False):
 
     try:
         provider.acquire(cred_def, cred_name, opener=opener)
+        return True
     except RuntimeError as e:
         print(f'  [{cred_name}] failed: {e}', file=sys.stderr)
+        return False
 
 
 def _setup_claude_credential(cred_name, cred_def, replace=False, config=None):
@@ -208,7 +218,7 @@ def _setup_claude_credential(cred_name, cred_def, replace=False, config=None):
 
     if not replace and provider.check(cred_def, cred_name):
         print(f'  [{cred_name}] token already in Keychain.')
-        return
+        return True
 
     token = provider.import_from_disk(cred_def)
     if token:
@@ -225,13 +235,14 @@ def _setup_claude_credential(cred_name, cred_def, replace=False, config=None):
             print(f'  [{cred_name}] {lines[0]}')
             for line in lines[1:]:
                 print(f'  [{cred_name}] {line}')
-            return
+            return False
         print(f'  [{cred_name}] importing existing token from ~/.claude/.credentials.json')
         provider.store(cred_name, token)
         print(f'  [{cred_name}] done.')
-        return
+        return True
 
     _report_no_token(cred_name, provider, cred_def, replace)
+    return False
 
 
 def _setup_auggie_credential(cred_name, cred_def, replace=False):
@@ -240,16 +251,17 @@ def _setup_auggie_credential(cred_name, cred_def, replace=False):
 
     if not replace and provider.check(cred_def, cred_name):
         print(f'  [{cred_name}] token already in Keychain.')
-        return
+        return True
 
     token = provider.import_from_disk(cred_def)
     if token:
         print(f'  [{cred_name}] importing existing token from ~/.augment/session.json')
         provider.store(cred_name, token)
         print(f'  [{cred_name}] done.')
-        return
+        return True
 
     _report_no_token(cred_name, provider, cred_def, replace)
+    return False
 
 
 def _setup_google_credential(cred_name, cred_def, replace=False):
@@ -258,9 +270,10 @@ def _setup_google_credential(cred_name, cred_def, replace=False):
 
     if not replace and provider.check(cred_def, cred_name):
         print(f'  [{cred_name}] refresh token already in Keychain.')
-        return
+        return True
 
     _report_no_token(cred_name, provider, cred_def, replace)
+    return False
 
 
 def _report_no_token(cred_name, provider, cred_def, replace):
@@ -355,20 +368,38 @@ def _run_init(config, cwd):
     return config
 
 
-def run_creds_add(config):
+def run_creds_add(config, cwd=None):
+    """Returns (config, pending_login). See `_run_creds_add`."""
     print('\ndax creds add\n')
     try:
-        return _run_creds_add(config)
+        return _run_creds_add(config, cwd=cwd)
     except KeyboardInterrupt:
         print('\n\nCancelled. Nothing was saved.')
         sys.exit(0)
 
 
-def _run_creds_add(config):
+_CRED_PROVIDERS = ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive']
+
+
+def _run_creds_add(config, cwd=None):
+    """Returns (config, pending_login) — a credential name to log in, or None.
+
+    Provider is asked *first*, because the answer decides whether a name is even
+    a question. For a per-env provider (`BARE_PROVIDER_CREDS` — claude) dax
+    builds the name from the env, so prompting for one would invite exactly the
+    typo decision C2 exists to eliminate: a misspelled `claud-fre` sat unused in
+    ~/.dax.yaml for weeks, silently, because a name nothing matches is simply
+    never used.
+    """
+    provider_name = _q_select('Provider:', _CRED_PROVIDERS)
+
+    if provider_name in BARE_PROVIDER_CREDS:
+        return _add_per_env_credential(config, provider_name, cwd=cwd)
+
     cred_name = _prompt('Credential name (e.g. ssh-github, github-dfarrow)')
     if not cred_name:
         print('No name provided. Nothing saved.')
-        return config
+        return config, None
 
     existing = config.get('credentials', {}).get(cred_name)
     replace = False
@@ -376,28 +407,131 @@ def _run_creds_add(config):
         print(f'  "{cred_name}" already exists (provider: {existing.get("provider")}).')
         if not _q_confirm('Overwrite it?', default=False):
             print('Nothing changed.')
-            return config
+            return config, None
         # Carried into setup so the provider actually re-stores the secret.
         replace = True
 
-    provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive'])
     cred_def = _define_credential(cred_name, provider_name)
     config.setdefault('credentials', {})[cred_name] = cred_def
 
     if provider_name == 'ssh':
-        _setup_ssh_credential(cred_name, cred_def, replace=replace)
+        stored = _setup_ssh_credential(cred_name, cred_def, replace=replace)
     elif provider_name == 'github':
-        _setup_github_credential(cred_name, cred_def, config, replace=replace)
-    elif provider_name == 'claude':
-        _setup_claude_credential(cred_name, cred_def, replace=replace, config=config)
+        stored = _setup_github_credential(cred_name, cred_def, config, replace=replace)
     elif provider_name == 'auggie':
-        _setup_auggie_credential(cred_name, cred_def, replace=replace)
-    elif provider_name in ('gmail', 'drive'):
-        _setup_google_credential(cred_name, cred_def, replace=replace)
+        stored = _setup_auggie_credential(cred_name, cred_def, replace=replace)
+    else:
+        stored = _setup_google_credential(cred_name, cred_def, replace=replace)
 
     save_config(config)
-    print(f'\nCredential "{cred_name}" saved.')
-    return config
+    if stored:
+        print(f'\nCredential "{cred_name}" saved.')
+    else:
+        print(f'\nCredential "{cred_name}" was written to ~/.dax.yaml, but no secret '
+              f'is stored for it yet.')
+        print(f'Run `dax creds login {cred_name}` to authenticate.')
+    return config, None
+
+
+def _env_choices(config, cwd=None):
+    """Env names, with the one containing cwd first so it is the default."""
+    from dax_creds.config import find_enclosing_project, find_named_project_by_dir
+
+    names = list((config.get('projects') or {}))
+    if cwd is None:
+        cwd = Path.cwd()
+    here = None
+    try:
+        here = find_named_project_by_dir(config, cwd)[0]
+    except KeyError:
+        enclosing = find_enclosing_project(config, cwd)
+        if enclosing:
+            here = enclosing[0]
+    if here in names:
+        names.remove(here)
+        names.insert(0, here)
+    return names
+
+
+def _add_per_env_credential(config, provider, cwd=None):
+    """Set up a per-env credential: dax derives the name, a login mints the secret.
+
+    Deliberately never imports a token from disk. That path copies whatever is
+    already in the provider's on-disk location — under a shared `~/.claude` mount,
+    some *other* env's credential — putting two names on one OAuth grant, which
+    is the isolation failure decision C exists to prevent. Grant collisions are
+    refused at store time too (decision C6), but not offering the copy at all is
+    better than refusing it after the fact.
+    """
+    from dax_creds.config import derived_credential_name
+
+    projects = config.get('projects') or {}
+    if not projects:
+        print(f'  no envs registered, so there is nothing to scope a {provider} '
+              f'credential to.\n  Run `dax init` first.')
+        return config, None
+
+    print(f'\n  {provider} credentials are per env, and dax builds the name from the '
+          f'env\'s\n  tenant and name rather than asking you to type it.\n')
+    env_name = _q_select('Env:', _env_choices(config, cwd=cwd))
+    project = projects[env_name]
+
+    tenant = project.get('tenant')
+    if not tenant:
+        # The one point where tenant genuinely is not known yet: the derived name
+        # cannot be built without it, and decision C2 refuses rather than falling
+        # back to a shared credential. Asked here rather than earlier because
+        # tenant belongs to the env, not to the credential — everywhere else the
+        # registry already knows the answer.
+        print(f'  env {env_name!r} has no tenant, and the credential name is built '
+              f'from it.')
+        tenant = _prompt('Tenant to group this env under')
+        if not tenant:
+            print('  no tenant given. Nothing saved.')
+            return config, None
+        project['tenant'] = tenant
+
+    cred_name = derived_credential_name(provider, tenant, env_name)
+    print(f'\n  -> {cred_name}')
+
+    creds = project.setdefault('creds', [])
+    if provider not in creds and cred_name not in creds:
+        print(f'  {env_name} does not use it yet.')
+        if _q_confirm(f'Add `{provider}` to {env_name}\'s creds list?', default=True):
+            creds.append(provider)
+        else:
+            print(f'  leaving {env_name}\'s creds list alone — the credential will '
+                  f'exist but go unused.')
+
+    # Browser and profile belong to the human authenticating, not to the env, so
+    # they live in one `credential_defaults` block covering every derived
+    # credential of this provider (decision C4) rather than being re-answered per
+    # env.
+    defaults = (config.get('credential_defaults') or {}).get(provider) or {}
+    if not defaults:
+        print(f'\n  no credential_defaults for {provider} yet — this applies to every '
+              f'derived\n  {provider} credential, not just this one.')
+        picked = _pick_browser()
+        entry = {'browser': picked['browser']}
+        if picked['chrome_profile']:
+            entry['chrome_profile'] = picked['chrome_profile']
+        config.setdefault('credential_defaults', {})[provider] = entry
+
+    save_config(config)
+
+    stored = bool(_keyring_module
+                  and _keyring_module.get_password(_KEYCHAIN_SERVICE, cred_name))
+    if stored:
+        print(f'\n  [{cred_name}] already has a secret in Keychain — nothing to mint.')
+        print(f'  [{cred_name}] to replace it: dax creds login {cred_name}')
+        return config, None
+
+    print(f'\n  [{cred_name}] no secret yet — it is minted by its own login,')
+    print(f'                so that each name is an independent OAuth grant.')
+    if _q_confirm(f'Run `dax creds login {cred_name}` now?', default=True):
+        return config, cred_name
+    print(f'  [{cred_name}] run it when ready: dax creds login {cred_name}')
+    return config, None
 
 
 def _cred_status(config, name, cred_def):
