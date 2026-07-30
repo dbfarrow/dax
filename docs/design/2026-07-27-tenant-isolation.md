@@ -718,9 +718,10 @@ refusal prevented a harmless self-copy; the dangerous case is the disk holding a
 token before and after and never inspects whose grant it is — so this exercised
 the same code path with the same shape of input.
 
-### C6. The abandoned-login guard compares the file, not the grant
+### C6. Enforce one-grant-per-name at import time — built 2026-07-30
 
-Residual hole in C3, found by inspection 2026-07-30 while confirming the fix.
+Residual hole in C3, found by inspection 2026-07-30 while confirming the fix,
+and closed the same day.
 
 `_disk_token_for` returns the whole re-serialized envelope
 (`providers/claude.py:77`), so `after == before` answers "is the file
@@ -734,16 +735,47 @@ C3's silent-success signature.
 Requires a refresh inside a window of minutes, and access tokens live hours, so
 the probability is low but not negligible.
 
-The tighter form is to enforce the invariant directly rather than proxy it:
-before storing a Claude credential, hash its `refreshToken` and compare against
-every *other* stored Claude credential's. Refuse on collision. That is
-`tests/manual/check_claude_grants.py`'s logic applied at import time, which turns
-the manual script into a redundant safety net instead of the only detector.
-Comparing refresh tokens rather than whole envelopes would also close the
-access-token-refresh case on its own, though not a refresh that rotates the
-refresh token too.
+**What was built.** Rather than tightening the proxy, the invariant is now
+enforced directly: before storing a Claude credential, hash its `refreshToken`
+and compare against every *other* stored Claude credential. Refuse on collision.
+This is `tests/manual/check_claude_grants.py`'s logic applied at the moment of
+storing, which demotes the manual script from sole detector to redundant safety
+net.
 
-Unit tests cover the current guard (`tests/test_dax_cmd_creds_login.py`).
+- `grant_id(blob)` (`providers/claude.py`) — sha256 of the refresh token,
+  truncated. The blob carries no grant ID, so the refresh token stands in for
+  one; hashing means callers can report and log it without handling the secret.
+  None for anything that isn't a refreshable envelope.
+- `ClaudeProvider.grant_collision(name, token, candidates)` — the already-stored
+  credential this token would share a grant with, or None. Skips `name` itself,
+  since re-importing a credential's own token is a no-op rather than sharing —
+  and refusing it would block re-importing after a `dax creds remove`.
+- `credential_names_for_provider(config, provider)` (`config.py`) — registered
+  **and derived** names. Enumerating only the registry would have made the check
+  pass by seeing nothing, since the colliding name is normally derived.
+- `grant_collision_message()` — shared, so `login` and `add` explain the refusal
+  identically.
+
+Wired into **both** doors: `_post_login_import`'s claude branch (`dax.py`), and
+`_setup_claude_credential` (`init.py`), which never had the before/after guard at
+all and was the outstanding item under "Outstanding after this redesign". Its
+`config` parameter is optional, so callers without one still work and the check
+simply doesn't run.
+
+Deliberately claude-only. Sharing a grant is a problem because decision C makes
+per-env Claude credentials load-bearing for isolation; github/gmail/ssh are
+genuinely user-level, where one credential under one name is the intent.
+
+Where it is still inert: inside a container there is no Keychain to compare
+against, so `grant_collision` returns None. Nothing to check is not the same as
+a collision, so the import proceeds — but the enforcement is a host-side
+property, and the manual script remains the only way to audit sharing that
+already exists.
+
+20 tests in `tests/test_dax_claude_grant_collision.py`; suite at 367. Verified
+that `grant_id` on the live shared `~/.claude/.credentials.json` returns
+`56b0ef07fcbe`, matching what the manual script computed independently for
+`claude-personal-fabric`.
 
 **Side effect of any Claude login, worth knowing before running one:**
 `_LOGIN_PROVIDERS['claude']` mounts the host's `~/.claude` (`dax.py:644`), so the

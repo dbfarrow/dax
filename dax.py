@@ -813,6 +813,15 @@ def _disk_token_for(cred_def, provider):
     return None
 
 
+def _report_grant_collision(cred_name, other_name):
+    from dax_creds.providers.claude import grant_collision_message
+
+    lines = grant_collision_message(cred_name, other_name)
+    dax_print(f'[!] {cred_name}: {lines[0]}')
+    for line in lines[1:]:
+        dax_print(f'    {line}')
+
+
 def _post_login_import(cred_name, cred_def, config, provider, before=None):
     """Store whatever the auth flow just wrote to disk into Keychain.
 
@@ -843,10 +852,20 @@ def _post_login_import(cred_name, cred_def, config, provider, before=None):
         else:
             dax_print(f'[!] {cred_name}: no token found after auth flow.')
     elif provider == 'claude':
+        from dax_creds.config import credential_names_for_provider
         from dax_creds.providers.claude import ClaudeProvider
         provider_obj = ClaudeProvider()
         token = provider_obj.import_from_disk(cred_def)
         if token:
+            # The `before` comparison above only answers whether the file
+            # changed, not whether the grant did — a Claude Code token refresh
+            # landing inside the login window makes an abandoned login look
+            # successful. Checking the grant itself closes that (decision C6).
+            clash = provider_obj.grant_collision(
+                cred_name, token, credential_names_for_provider(config, 'claude'))
+            if clash:
+                _report_grant_collision(cred_name, clash)
+                return
             provider_obj.store(cred_name, token)
             dax_print(f'[+] {cred_name}: token imported to Keychain.')
         else:

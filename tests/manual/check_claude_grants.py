@@ -18,6 +18,13 @@ passed every check except this one.
 Refresh tokens are never printed — only a short hash, enough to compare.
 Exits non-zero if any grant is shared.
 
+Since 2026-07-30 (decision C6) dax also enforces this at the moment of storing:
+`dax creds login` and `dax creds add` both refuse to store a Claude token whose
+grant already sits under another name. This script is therefore no longer the
+only detector — but it is still the only way to audit sharing that *already*
+exists, and the only check that runs where the Keychain does (the in-container
+check is inert, having no Keychain to compare against).
+
 LIMIT, and it bounds what a PASS is worth: the refresh token is a proxy for
 grant identity, not the identity itself — the blob carries no grant ID. A copy
 is caught only while both entries still hold the *same* token. If each side then

@@ -4,9 +4,9 @@ import time
 from pathlib import Path
 
 from dax_creds.config import (
-    BARE_PROVIDER_CREDS, ENV_FIELDS, credential_users, daemon_socket_path,
-    derived_credentials, env_field_help, resolve_credential_names,
-    state_tree_path, state_trees,
+    BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
+    credential_users, daemon_socket_path, derived_credentials, env_field_help,
+    resolve_credential_names, state_tree_path, state_trees,
 )
 from dax_creds.providers.ssh import SshProvider
 
@@ -202,8 +202,8 @@ def _setup_github_credential(cred_name, cred_def, config, replace=False):
         print(f'  [{cred_name}] failed: {e}', file=sys.stderr)
 
 
-def _setup_claude_credential(cred_name, cred_def, replace=False):
-    from dax_creds.providers.claude import ClaudeProvider
+def _setup_claude_credential(cred_name, cred_def, replace=False, config=None):
+    from dax_creds.providers.claude import ClaudeProvider, grant_collision_message
     provider = ClaudeProvider()
 
     if not replace and provider.check(cred_def, cred_name):
@@ -212,6 +212,20 @@ def _setup_claude_credential(cred_name, cred_def, replace=False):
 
     token = provider.import_from_disk(cred_def)
     if token:
+        # This path copies whatever sits in ~/.claude/.credentials.json, which
+        # under a shared mount is some *other* env's credential — the sharing
+        # decision C exists to prevent, and the one door `dax creds login`'s
+        # before/after guard never covered. Refuse on a grant collision rather
+        # than storing a second name for one grant (decision C6).
+        candidates = (credential_names_for_provider(config, 'claude')
+                      if config is not None else set())
+        clash = provider.grant_collision(cred_name, token, candidates)
+        if clash:
+            lines = grant_collision_message(cred_name, clash)
+            print(f'  [{cred_name}] {lines[0]}')
+            for line in lines[1:]:
+                print(f'  [{cred_name}] {line}')
+            return
         print(f'  [{cred_name}] importing existing token from ~/.claude/.credentials.json')
         provider.store(cred_name, token)
         print(f'  [{cred_name}] done.')
@@ -327,7 +341,7 @@ def _run_init(config, cwd):
         elif provider_name == 'github':
             _setup_github_credential(cred_name, cred_def, config)
         elif provider_name == 'claude':
-            _setup_claude_credential(cred_name, cred_def)
+            _setup_claude_credential(cred_name, cred_def, config=config)
         elif provider_name == 'auggie':
             _setup_auggie_credential(cred_name, cred_def)
         elif provider_name in ('gmail', 'drive'):
@@ -375,7 +389,7 @@ def _run_creds_add(config):
     elif provider_name == 'github':
         _setup_github_credential(cred_name, cred_def, config, replace=replace)
     elif provider_name == 'claude':
-        _setup_claude_credential(cred_name, cred_def, replace=replace)
+        _setup_claude_credential(cred_name, cred_def, replace=replace, config=config)
     elif provider_name == 'auggie':
         _setup_auggie_credential(cred_name, cred_def, replace=replace)
     elif provider_name in ('gmail', 'drive'):

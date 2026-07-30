@@ -215,6 +215,20 @@ def derived_credentials(config):
     return found
 
 
+def credential_names_for_provider(config, provider):
+    """Every credential name using this provider — registered and derived.
+
+    Used to enforce one-grant-per-name at import time: the check needs the full
+    set of names whose Keychain secrets could collide, and a derived name holds a
+    secret just as a registered one does.
+    """
+    names = {name for name, cred in (config.get('credentials') or {}).items()
+             if (cred or {}).get('provider') == provider}
+    names |= {name for name, cred in derived_credentials(config).items()
+              if cred.get('provider') == provider}
+    return names
+
+
 def credential_users(config, name):
     """Envs whose creds list resolves to this credential — derived or not."""
     users = []

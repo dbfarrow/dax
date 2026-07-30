@@ -222,14 +222,21 @@ functions in `dax.py`.
   grants. **C3's refusal path confirmed live** on a second, cancelled run — the
   "predates this login" refusal printed and Keychain was untouched.
 
-  **New: C6 — the C3 guard compares the file, not the grant.**
-  `_disk_token_for` returns the whole envelope (`providers/claude.py:77`), so a
-  Claude Code token refresh landing inside the login window makes an abandoned
-  login look successful and imports another env's grant under the new name.
-  Low probability, C3's silent-success signature. Tighter fix: before storing,
-  compare the credential's `refreshToken` hash against every other stored Claude
-  credential and refuse on collision — `check_claude_grants.py`'s logic enforced
-  at import time. Not yet built.
+  **C6 built 2026-07-30 — one grant per name, enforced at import time.** C3's
+  guard compares the on-disk *file*, not the grant, so a Claude Code token
+  refresh landing inside the login window made an abandoned login look
+  successful. Rather than tightening that proxy, the invariant is now enforced
+  directly: `grant_id()` hashes the refresh token, and
+  `ClaudeProvider.grant_collision()` refuses to store a token whose grant already
+  sits under another name (skipping the credential's own name, since re-importing
+  its own token is a no-op). `credential_names_for_provider()` supplies
+  registered **and derived** names — enumerating only the registry would let the
+  check pass by seeing nothing. Wired into both doors, which **closes the
+  outstanding `dax creds add` gap**: that path never had the before/after guard
+  at all. Claude-only by design; github/gmail/ssh are user-level, where one name
+  per credential is the intent. Inert in a container (no Keychain to compare
+  against), so `check_claude_grants.py` remains the audit for sharing that
+  already exists. 20 tests, suite at **367**.
 
   **Also new: C7 — `dax creds add` rebuilds the definition and drops unprompted
   fields.** `_define_credential` starts from `{'provider': ...}` (`init.py:113`)
