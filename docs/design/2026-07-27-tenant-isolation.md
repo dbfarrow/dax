@@ -1,11 +1,22 @@
 # Tenant Isolation for Claude Code State
 
+> **⚠ SUBSTANTIALLY REVISED 2026-07-29 — read
+> "[Redesign 2026-07-29](#redesign-2026-07-29--multi-tenant-abandoned)" first.**
+> The multi-tenant model is abandoned. Decisions 4, 6 (Gate B), 7, 8, and 12
+> below are superseded in whole or in part, and the implemented code they
+> describe is slated for deletion. The decisions are left in place rather than
+> rewritten because the reasoning that produced them — especially decision 4's
+> deletion argument — is what the replacement had to answer, and a reader who
+> only sees the conclusion will re-derive the old model.
+
 **Status:** Sequencing steps 1–2 implemented and merged (PR #4, 2026-07-27);
 steps 3–6 implemented, unit-tested (259 tests), and confirmed on the two real
 target repos (2026-07-28) — see Verification log; step 7 dropped (see
-Sequencing). Outstanding before this is trusted as the default: the shared
-`plugins`/`skills`/`commands`/`cache` migration and the multi-day
-refresh-token rotation soak.
+Sequencing). **Superseded by the 2026-07-29 redesign:** multi-tenant support is
+being removed, and the outstanding work list is restated there. Still
+outstanding from the original list: the shared
+`plugins`/`skills`/`commands`/`cache` migration (reshaped — it becomes a nested
+mount) and the multi-day refresh-token rotation soak.
 **Date:** 2026-07-27
 **Motivation:** hygiene today; anticipated contractual obligation later; existing
 obligation to delete customer data when a relationship ends
@@ -104,6 +115,11 @@ obligation. `~/.config/dax/` remains available for genuine dax configuration.
 
 ### 4. Tenant is the outer key, not project
 
+> **Partly superseded (redesign A).** The conclusion survives — tenant is still
+> the outer directory, for exactly the deletion reason below. What changed is
+> that tenant is now a *declared grouping label* rather than something resolved
+> from a repo's structure.
+
 Deletion is the deciding constraint. Ending an engagement must be one verifiable
 operation on one tree, not a hunt across N project directories where correctness
 depends on remembering which projects belonged to whom.
@@ -126,6 +142,11 @@ Where standing customer context is genuinely wanted, it belongs in a curated
 tenant-level `CLAUDE.md` — explicit and reviewable — not emergent recall.
 
 ### 6. Two gates, only one of which refuses
+
+> **Partly superseded (redesign E).** Gate B is deleted: with one project per
+> container and a single state mount, there is nothing to mis-resolve and
+> nothing to refuse. Gate A survives, as does the separate "Gate 0" note below
+> about `dax run` from a subdirectory.
 
 | | Gate A: `dax run` | Gate B: `claude` launch |
 | --- | --- | --- |
@@ -176,6 +197,9 @@ already-running container, Gate B resolves it) never goes through `cmd_run`
 at all.
 
 ### 7. Resolution table
+
+> **Superseded (redesign A/E).** The table enumerates cwd→tenant outcomes that
+> no longer arise once a container holds exactly one project.
 
 **Revised 2026-07-28 — the `unattributed` fallback is gone.** See decision 8
 below for why, and Sequencing step 6 for the classification mechanism that
@@ -291,6 +315,10 @@ one fixed subdirectory name — there is exactly one project shaped like this
 today, and YAGNI argues against building for a second that may never exist.
 
 ### 8. Undeclared locations are classified before launch, never pooled
+
+> **Superseded (redesign A/E).** Interactive classification existed to resolve
+> undeclared subdirectories inside a multi-tenant repo. With one project per
+> repo there are none, and this machinery is slated for deletion.
 
 **Superseded 2026-07-28.** The original design routed anything undeclared to
 `unattributed/<reponame>/` — a real tenant slot, warn, proceed. Rejected once
@@ -421,6 +449,539 @@ The moment a customer-specific skill is written, that stops being true, and rule
 ### 12. Credential files are never mounted
 
 Credentials come from the dax-creds daemon. Requires the auth bug fixed first.
+
+> **Wording superseded (redesign C).** Still true that no *host* credential file
+> is bind-mounted in. But the credential now lives on host disk for the
+> session's duration, as `.credentials.json` inside the bind-mounted state tree,
+> written there by the wrapper on first launch and thereafter owned and
+> refreshed by Claude Code. The intended end state removes it on teardown; that
+> write-back is not built yet.
+
+## Redesign 2026-07-29 — multi-tenant abandoned
+
+**Provenance:** the conversation in which the decision to abandon multi-tenant
+was originally reached is **lost**. The Anthropic outage of 2026-07-28/29 left
+sessions hanging; they were killed, and neither `~/.claude/projects/` nor
+`history.jsonl` contains anything between 2026-07-27 18:55 and 2026-07-29
+21:14 — the entire two days that produced commit `4c8fb6c`. The decisions below
+were reconstructed from scratch on 2026-07-29 by walking the open questions one
+at a time. **That loss is the reason this section exists and the reason the
+memory directory is now populated.** Write decisions down when they are made.
+
+### A. Multi-tenant is abandoned; `tenant` survives only as a grouping label
+
+The only multi-tenant repo was discernment. It is being reworked so that each
+process becomes its own repository (see D), which removes the sole justification
+for the model. With one project per repo, tenant resolution becomes trivial.
+
+`tenant` is **not** dropped, because decision 4's argument still holds for
+*grouping* even though it no longer holds for *resolution*: a customer with two
+repos still needs "end the engagement" to be one operation. So:
+
+- `tenant:` becomes a declared field on the project's `~/.dax.yaml` entry. One
+  value, no inference.
+- State stays at `~/.local/state/dax/tenants/<tenant>/<project>/`, keeping
+  tenant as the outer directory so `rm -rf .../tenants/<tenant>/` remains a
+  complete deletion for that customer's Claude state.
+- `.dax-tenant` files go away entirely. They labelled subdirectories inside a
+  multi-tenant repo; there are none.
+
+### B. The state tree mounts at `~/.claude`, and `CLAUDE_CONFIG_DIR` is a constant
+
+```
+host:       ~/.local/state/dax/tenants/<tenant>/<project>/
+container:  ~/.claude
+env:        CLAUDE_CONFIG_DIR=$HOME/.claude
+```
+
+The variable is kept **only** because of finding 1 (`CLAUDE_CONFIG_DIR`
+relocates `.claude.json` too). It is no longer a selector — no cwd resolution,
+no per-session computation — just a constant `dax run` sets.
+
+Dropping it entirely was considered and rejected. Unset, Claude Code reads
+`~/.claude.json`, a *sibling* of `~/.claude` rather than a child, so the file
+falls outside the tree mount: container-local, discarded on teardown, taking
+per-project trust, permissions, and the `projects{}` block with it. The symptom
+is the first-run wizard reappearing, not an error. Two workarounds were
+rejected:
+
+- **Single-file bind mount** of `.claude.json` — reintroduces exactly what this
+  design was pleased to escape (see the end of Concurrency): single-file
+  grpcfuse mounts are where write-temp-plus-rename breaks.
+- **Symlink** `~/.claude.json` → `~/.claude/.claude.json` — fails silently.
+  Claude Code writes temp-then-rename; the rename *replaces the symlink* with a
+  regular file and state quietly stops persisting.
+
+Accepted cost: the "Accepted costs" table below applies per project. The seed
+template mitigates most of it, but the wrapper currently seeds only
+`hasCompletedOnboarding` — folder trust is deliberately not seeded — so expect a
+trust dialog and replayed tips on each project's first launch.
+
+Note this was a regression being fixed, not just a new capability: `.claude.json`
+has been discarded on every teardown since the step-2 diagnostic removed it from
+`dotfiles.rw` on 2026-07-27 (see Environment state).
+
+### C. One credential per tenant/project, each from its own fresh login
+
+Credentials are named `claude-<tenant>-<project>`. Expect N Anthropic accounts
+under M Keychain entries, where N is usually 1.
+
+**Each entry must be minted by its own login flow.** This is load-bearing, not
+incidental. Independent authorization grants have independent refresh-token
+chains, so rotation in one project cannot invalidate another's credential — even
+when every entry authenticates the same account. If a second project's entry is
+instead created by *copying* an existing credential blob, the two share one
+grant and the first rotation kills the other.
+
+That copy path is live in the code today: both `_setup_claude_credential`
+(`init.py`) and `_post_login_import` (`dax.py`) call
+`ClaudeProvider.import_from_disk()`. Minting a per-project credential must not
+go through it.
+
+Intended lifecycle, once teardown is built:
+
+```
+dax run   → inject from Keychain into the project's state tree, if absent
+session   → Claude Code owns the file and refreshes it in place
+teardown  → write the current file back to Keychain, remove it from disk
+```
+
+**Implemented as of 2026-07-29: inject-if-absent only.** The wrapper previously
+overwrote `.credentials.json` from the Keychain snapshot on *every* launch,
+which under a persistent state tree would clobber a refreshed token with a stale
+one on the next start — turning the rotation gap from "one shared copy might go
+stale" into "every project independently walks into it." Create-if-absent lets
+Claude Code own rotation from first launch onward and makes Keychain a
+*bootstrap* rather than the running source of truth.
+
+Teardown write-back is deliberately **not** built yet, and the gap is accepted:
+a `kill -9`, host reboot, or Docker Desktop crash skips it, leaving the
+refreshed credential in the tree and a stale one in Keychain. Because injection
+is now create-if-absent, that stale copy is never forced back over the good one
+— the tree's file simply persists and continues to work. A later sweep can
+hoover up or re-import stray files.
+
+Residual unknown, unchanged: whether Anthropic caps concurrent grants per
+account or invalidates older grants for the same `client_id`. Cheap to test —
+log in for two projects, use the first, confirm the second still works.
+
+### C2. The per-env credential name is derived, not typed — built 2026-07-30
+
+Listing a bare provider name in an env's `creds:` asks dax to build the name:
+
+```yaml
+projects:
+  fabric:
+    tenant: personal
+    creds: [claude, github-dbfarrow, ssh-id-rsa]   # -> claude-personal-fabric
+```
+
+`BARE_PROVIDER_CREDS` (`dax_creds/config.py`) holds the providers this applies
+to, and contains **only claude**: its credentials are per tenant/project by
+decision C, while github/gmail/ssh are genuinely user-level, so naming those
+explicitly stays correct.
+
+Rationale: decision C makes correct naming load-bearing for isolation, and a
+hand-maintained convention is one users typo. A real `claud-fre` entry sat
+unused in `~/.dax.yaml` for weeks — silently, because a misspelled credential
+is simply never matched.
+
+- **An explicit name always wins**, keeping existing configs working and
+  leaving an escape hatch for deliberately sharing one credential across two
+  envs.
+- **A bare token with no `tenant` is refused**, and `cmd_run` exits. Falling
+  back to a shared credential would be the exact isolation failure the
+  convention exists to prevent, so this fails loudly. It also makes declaring
+  `tenant` load-bearing rather than optional.
+- **Unregistered derived names are synthesized in memory**, not written to
+  `~/.dax.yaml`. Resolution stays a pure read; the caller reports the
+  credential missing from Keychain and offers the login that registers it.
+- `dax env show` prints the resolved name, so the convention is visible rather
+  than magic.
+- `find_named_project_by_dir()` is new — returning `(name, project)` — because
+  a derived name needs the registry name, which `find_project_by_dir` discarded.
+
+Ambiguity to guard: a credential named literally `claude` would collide with
+the bare token. Not yet blocked in `dax creds add`.
+
+### C3. An abandoned login must not import the credential already on disk
+
+**Found in live testing 2026-07-30, and it is the sharing failure C exists to
+prevent — presenting as success.**
+
+`dax creds login claude-personal-discernment` was cancelled at the browser step
+(it opened the wrong Chrome profile — see C4). `_post_login_import` nevertheless
+ran, because `cmd_creds_login` called it unconditionally after
+`subprocess.run()` with no check that the flow succeeded. Its claude branch
+reads `~/.claude/.credentials.json` — which, with `claude` back in `features`,
+holds the *existing shared* credential. That token was stored under the new
+per-env name.
+
+The result authenticates perfectly, which is exactly the problem: two Keychain
+entries backed by one OAuth grant, no isolation, and a rotation on either kills
+both. Nothing in the output suggested anything had gone wrong.
+
+Fix: snapshot what the provider's on-disk location holds *before* launching the
+flow, compare after, and refuse to import when unchanged. Provider-agnostic —
+`_disk_token_for()` covers github, claude, and auggie, all of which import from
+disk and had the same hole. A real login always replaces the file, so a
+before/after match means the flow wrote nothing.
+
+Corollary fixed in the same pass: a derived credential could not be *removed*.
+`dax creds remove` rejected it as unknown, since it has no `credentials:` entry,
+leaving no way to clear a bad one. It now clears the Keychain secret, writes no
+config, and reports that the env will be offered a fresh login next run —
+exempt from the still-referenced refusal, because for a derived name the
+reference is the convention, which survives removal and simply re-mints.
+
+### C4. Derived credentials inherit browser settings from `credential_defaults`
+
+Also found in the same test: the login opened the wrong browser. A derived
+credential is synthesized as `{'provider': ...}` and has no entry to carry
+`browser`/`chrome_profile`, so every per-env login fell back to the default
+browser rather than the Chrome profile the account lives in.
+
+```yaml
+credential_defaults:
+  claude:
+    browser: chrome
+    chrome_profile: Profile 2
+```
+
+Merged into every synthesized definition. This is the right shape rather than a
+patch: browser and profile are properties of the human authenticating, not of
+the env, so one setting covering all derived Claude credentials is correct.
+Defaults never override `provider`, and an explicitly registered credential
+ignores them entirely.
+
+Related fix: `dax creds list` omitted derived credentials, so the host
+disagreed with `dax-creds list` inside the container about which credentials
+exist. It now unions the registry with `derived_credentials()` and tags them
+`(derived)`. The "used by" column was matching names literally, so an env
+listing a bare `claude` matched nothing — `credential_users()` resolves now,
+which also correctly shows a superseded explicit credential as unused.
+
+### C5. `dax creds login` refuses derived names — found 2026-07-30, step 4
+
+**Blocking, and it means no sanctioned way to mint a per-env Claude credential
+currently exists.**
+
+`dax creds login claude-personal-fabric` answers `Unknown credential` while
+`dax creds list` displays that same name as `(derived)`, `stored: yes`.
+`cmd_creds_login` (`dax.py:698`) resolves against `config['credentials']` only.
+`derived_credentials()` was wired into `creds list` (`init.py:434`), `creds
+remove` (`init.py:741`), and `env show` (`init.py:591`) in the C2/C3/C4 pass —
+login was missed.
+
+Consequence: `login` refuses derived names, and `add`'s claude path is the
+unguarded one C3 warns against, so **neither door works**. C3's guard is
+unreachable for the case it was written for, and C2's promise that the caller
+"offers the login that registers it" leads to a command that fails.
+
+Fix (small — C4 comes free, since `derived_credentials()` builds definitions
+through `synthesized_credential()`, which already merges `credential_defaults`):
+
+```python
+cred_def = config.get('credentials', {}).get(cred_name)
+if cred_def is None:
+    from dax_creds.config import derived_credentials
+    cred_def = derived_credentials(config).get(cred_name)
+if cred_def is None:
+    raise KeyError(cred_name)
+```
+
+How the three existing derived secrets came to exist, by inference: they were
+minted while those names were still *explicitly* registered in `credentials:`,
+and C2's migration to bare `claude` tokens dropped those entries — Keychain
+secrets are keyed by name and survived. Consistent with C3's record of a
+`claude-personal-discernment` login opening a browser on 2026-07-30, and with
+step 3's staggered mint dates. `backup/.dax.yaml`'s git history can't confirm
+it: only one version exists and it predates per-env credentials.
+
+**Fixed and confirmed live 2026-07-30.** `_login_credential_def()` now resolves
+registered-then-derived, and `cmd_creds_login` calls it; 5 tests added, suite at
+347. `dax creds login claude-personal-fabric` launched for real: Chrome on
+Profile 2 (C4, reachable for a derived name for the first time), the device-flow
+`redirect_uri` rewritten to `platform.claude.com/oauth/code/callback` (so
+`_force_claude_device_flow_redirect` works), and a token imported to Keychain.
+The grant hash changed `49a03025bda2` → `56b0ef07fcbe`, which is **direct**
+proof the flow minted a new grant rather than copying an existing one — a copy
+would have shown dax's or discernment's hash. Step 3 re-run: still PASS, 4
+distinct grants.
+
+**C3's refusal path confirmed live 2026-07-30**, on a second run cancelled at
+the paste-code prompt: the refusal printed, and Keychain was untouched
+(`claude-personal-fabric` still `56b0ef07fcbe`, unchanged from the completed
+login). Note the disk happened to hold fabric's *own* grant at the time, so the
+refusal prevented a harmless self-copy; the dangerous case is the disk holding a
+*different* env's grant. The guard is name-agnostic — it compares the on-disk
+token before and after and never inspects whose grant it is — so this exercised
+the same code path with the same shape of input.
+
+### C6. The abandoned-login guard compares the file, not the grant
+
+Residual hole in C3, found by inspection 2026-07-30 while confirming the fix.
+
+`_disk_token_for` returns the whole re-serialized envelope
+(`providers/claude.py:77`), so `after == before` answers "is the file
+byte-identical", not "is this the same OAuth grant". Under `feature_claude`'s
+shared `~/.claude` mount, a container running Claude Code can refresh
+`.credentials.json` *during* the login window. An abandoned login then sees a
+changed file, concludes the flow wrote it, and imports another env's refreshed
+token under the new name — C3's failure again, through a narrower door, and with
+C3's silent-success signature.
+
+Requires a refresh inside a window of minutes, and access tokens live hours, so
+the probability is low but not negligible.
+
+The tighter form is to enforce the invariant directly rather than proxy it:
+before storing a Claude credential, hash its `refreshToken` and compare against
+every *other* stored Claude credential's. Refuse on collision. That is
+`tests/manual/check_claude_grants.py`'s logic applied at import time, which turns
+the manual script into a redundant safety net instead of the only detector.
+Comparing refresh tokens rather than whole envelopes would also close the
+access-token-refresh case on its own, though not a refresh that rotates the
+refresh token too.
+
+Unit tests cover the current guard (`tests/test_dax_cmd_creds_login.py`).
+
+**Side effect of any Claude login, worth knowing before running one:**
+`_LOGIN_PROVIDERS['claude']` mounts the host's `~/.claude` (`dax.py:644`), so the
+flow writes its new credential into the **shared** `.credentials.json`. The
+verification script's "matches" line moved from `claude-personal-dax` to
+`claude-personal-fabric` accordingly. While `feature_claude`'s wholesale mount is
+still in play, that repoints *every* container — inject-if-absent skips a
+non-empty file, so each one authenticates on whichever env logged in last,
+regardless of its own `DAX_CREDS_CLAUDE`. Logging in for one env silently
+changes the grant every other env runs on. It is also exactly why C3's
+before/after guard functions: the flow writes to the same file the guard
+snapshots.
+
+Corollary sharpening the step-2 presentation finding: `_post_login_import`
+stores to Keychain and never writes a `credentials:` entry, so a derived name
+stays derived **permanently**. `env show`'s `[not registered yet]` will therefore
+never stop saying "yet" no matter how many successful logins run — the label is
+wrong, not merely ambiguous. And C2's phrase "the login flow is what registers
+them" is loose: the flow stores a secret, it registers nothing.
+
+### C7. `dax creds add` rebuilds the definition, dropping unprompted fields
+
+Found by inspection 2026-07-30 while scoping the manual step 6.
+
+`_define_credential` starts from `{'provider': provider_name}` (`init.py:113`) and
+`_run_creds_add` assigns the result wholesale (`init.py:369`), so re-running
+`dax creds add` on an existing credential **silently drops every field its prompts
+do not ask for**. `dax creds update` is the non-lossy path for metadata.
+
+This makes the "Overwrite it?" confirmation misleading in a second, opposite
+direction from the bug fixed on 2026-07-30: the *definition* is always
+overwritten by reconstruction, whether or not the user is thinking about it,
+while the *secret* was the thing that used to survive.
+
+Consequence for testing the `replace=` plumbing live: the safe-looking target is
+the wrong one. `github-dbfarrow` rebuilds losslessly but, having no `client_id`,
+exits at "skipped" before `_report_no_token` runs, so it never demonstrates the
+message. `gmail-personal` does reach it but requires retyping `client_id`,
+`client_secret`, and `scopes` exactly. `claude-fre` rebuilds cleanly and must
+*not* be used at all: claude's replace path calls `import_from_disk`, which would
+copy the shared `~/.claude/.credentials.json` under that name and manufacture the
+very shared grant C3 exists to prevent — the still-open `dax creds add` gap,
+reachable by accident while testing something else.
+
+All three `replace=` behaviors are unit-tested
+(`tests/test_dax_creds_init.py:281–320`), so the manual step was downgraded to
+optional rather than made safe.
+
+### D. Discernment becomes a sidecar, not a multi-tenant repo
+
+Discernment exists to give a set of processes a shared spine of context (telos)
+and skills. Reworked shape:
+
+- Each process moves to **its own repository**, with **history split, not
+  `git mv`** — deleting a directory does not remove it from git history, and a
+  wholesale sidecar mount would otherwise put every customer's historical
+  process data in every other customer's container. Out of scope for dax; the
+  combined repo is to be distributed into per-process repos and then deleted.
+- Discernment mounts **wholesale** at `~/discernment` (rw), a sibling of the
+  process repo at `~/<processname>`. Any process session can update telos and
+  skills directly.
+- Its `skills/` mounts a **second time** at `~/.claude/skills/` (rw, same host
+  directory). This is required: Claude Code discovers skills by scanning
+  `~/.claude/skills/`, project `.claude/skills/`, and plugins. A CLAUDE.md
+  *pointing* at `~/discernment/skills/` registers nothing — the files would be
+  readable as prose but not invokable, losing progressive disclosure. Edits
+  through either path land in the same working tree.
+- Telos lives as **repo files** and is reached from each process's CLAUDE.md by
+  `@`-import, not by prose reference. Prose is advisory and may not be acted on;
+  `@`-imports are inlined at load.
+- Memory stays per-project and isolated. `feedback_*`/`user_*` spine material
+  belongs in the discernment repo as telos; `project_*` stays with its process
+  and dies with it. Some existing process memory is lost in the move —
+  acceptable, possibly worth a migration pass.
+
+Decision 10 already anticipated this: *"The telos is a bleed channel by design.
+Isolation is the wrong control there; hygiene rules are the right one."* The
+sidecar is the mechanism decision 10 assumed but never built.
+
+Concurrency: the sidecar is rw in every process container, so two process
+sessions can write telos concurrently — dax's container-naming guard does not
+help, since these are different projects. Accepted. It is strictly better than
+the status quo, which is multiple Claude instances inside *one* container
+writing the same discernment artifacts.
+
+### E. What gets deleted
+
+Delete: `_ensure_tenants_classified()`, `_prompt_tenant()`, `dax tenant
+classify`, `dax tenant set`'s `.dax-tenant` writing, `.dax-tenant` files,
+`DAX_MULTI_TENANT`/`DAX_TENANT_SUBDIR`, `multi_tenant`/`tenant_subdir` registry
+fields, `resolve_for_cwd()`, `dax-creds resolve-tenant`, and **Gate B in the
+`claude` wrapper**. Gate B's refusal existed to stop a session starting
+somewhere that would pool state; with one project per container and one mount,
+there is nothing to mis-resolve and nothing to refuse.
+
+Keep: `find_enclosing_project()` and Gate 0 — not tenant machinery; it stops
+`dax run` from a subdirectory silently auto-registering a new project, which is
+an independent bug. `dax tenants` stays as a flat enumeration.
+`all_tenant_projects()` collapses to reading the registry.
+
+Roughly 68 tests across `test_dax_creds_tenant.py` and `test_dax_tenant_cmds.py`
+go with the deletions.
+
+### F. `claude_tenant_state` stays opt-in for now
+
+Not flipped to default-on. The 2026-07-28/29 outage forced a fallback to the old
+shared-mount model to get a session running at all, and that escape hatch is
+worth keeping until the new path has been exercised. Also still gated on the
+shared `plugins`/`commands` migration, without which an opting-in project loses
+access to already-installed plugins.
+
+### G. `tenant` is set through `dax env set`, not `dax tenant set`
+
+**Revised 2026-07-30.** The original plan routed tenant-setting through
+`dax init` plus a surviving `dax tenant set`. Both parts changed once the
+command surface was looked at directly:
+
+- **`dax init` is the wrong tool for changing one field.** `_run_init` does
+  detect an existing project and offer "Update it?", but then walks image →
+  credential checkbox → new-credential loop before reaching anything else. That
+  is a lot of confirmation for a one-string edit, and every pass is a chance to
+  disturb something unrelated. A tenant prompt still belongs in `init` for
+  *registration*; it is not the path for *editing*.
+- **`dax tenant set` is retired rather than repointed.** It wrote `.dax-tenant`
+  files, which no longer exist. Reusing the name for a different mechanism would
+  preserve nothing but muscle memory.
+
+**Built 2026-07-30** — singular `env` acts on one environment, matching the
+existing `tenant`/`tenants` singular/plural split:
+
+- `dax env show [name]` — full registry entry, plus the resolved container name
+  and running state, the state-tree path and whether it exists, and a warning
+  when the entry still carries deprecated `multi_tenant`/`tenant_subdir` keys.
+- `dax env set [name] <field> <value>` — one field, no wizard. Fields are
+  `tenant`, `dir`, `image`, `creds` (comma-separated, replaces the list, and
+  validated against `~/.dax.yaml`'s `credentials` before writing). `--help`
+  lists every field with a description, and an unknown field error reprints the
+  same table.
+
+`name` is optional in both and defaults to the env containing the cwd, falling
+back to the *enclosing* project so it also works from a subdirectory — where
+`dax run` itself refuses (Gate 0). `ENV_FIELDS`/`env_field_help()` live in
+`dax_creds/config.py` rather than `init.py` so building the argument parser
+does not import keyring on every `dax` invocation.
+
+Deliberately not settable: `multi_tenant`/`tenant_subdir` (being deleted — not
+worth teaching), and `features` (top-level in `~/.dax.yaml` or in a
+project-local `.dax.yaml`, not a registry field).
+
+**Prerequisite, now met:** `save_config` used pyyaml, so every write deleted all
+comments and alphabetised all keys — including the commented-out
+`#- claude_tenant_state` toggle, which is configuration rather than decoration.
+`dax env set` is a routinely-invoked writer, which would have made that much
+worse. Fixed 2026-07-29 with ruamel round-trip loading and saving; `save_config`
+now refuses outright when ruamel is unavailable rather than falling back and
+trampling, while reads still fall back so `dax run` never breaks.
+
+### G2. `dax envs list` absorbs the tenant view — built 2026-07-30
+
+`dax tenants` was registry-driven by design, deriving its rows from
+`~/.dax.yaml` plus `.dax-tenant` files. Once tenant is a declared field, its
+rows become 1:1 with `dax envs list`, which is already the richer view (it also
+knows about running containers). Keeping both means answering the same question
+twice.
+
+The merged `dax envs list` walks **both** the registry and
+`~/.local/state/dax/tenants/`, as an outer join, because an env can be orphaned
+from either direction:
+
+| condition | meaning |
+| --- | --- |
+| registry entry, no state tree | declared but never launched, or its state was deleted |
+| state tree, no registry entry | true orphan — deregistered or renamed, transcripts and memory still on disk |
+| both, `dir` missing | repo moved or deleted, state stranded |
+
+That second row is what no previous command could show, and it is exactly what
+decision A's deletion-grouping rationale needs. TENANT, STATE, and USED columns
+added — STATE the tree's size on disk, USED a compact relative age (`now`, `3d`,
+`5w`, `1y`). Size and recency answer different halves of "is this worth
+keeping": a large tree nobody has opened in a year is a better deletion
+candidate than a small one from this morning. Both come from a single walk
+(`_tree_stats`), so recency is effectively free.
+
+USED is the newest *file* mtime, not the directory's own — a directory's mtime
+only moves when entries are added or removed, so editing a transcript in place
+would otherwise read as ancient.
+
+Status markers: `*` running, `!` directory missing, `?` orphaned tree, with a
+legend printed for whichever markers appear.
+
+A registry row **claims** its matching tree, so whatever survives the join is by
+definition an orphan. Only a *declared* tenant can claim one — with `tenant`
+unset there is no path to look under, so a tree bearing that project's name
+stays unclaimed and is reported. That is the honest reading: the registry no
+longer says which tenant it belongs to.
+
+`state_trees()` / `state_tree_path()` live in `dax_creds/config.py` and are
+filesystem-driven by design, unlike the registry-driven listing they replace.
+
+Caught while testing: the original `run_envs_list` returned early on an empty
+registry, which would have hidden every orphan in exactly the case where
+*everything* is one — deregistering all projects. The empty check now runs after
+the join instead of before it.
+
+Naming settled: **env and tenant are different cardinalities, not synonyms.** An
+env is one repo, one container, one state tree — the row. A tenant is a grouping
+label that can span several envs — a column, plus a `--tenant` filter. So the
+command stays `envs`.
+
+Related, unfixed: `_run_init` finds an existing project by exact `dir == cwd`
+match, the same blind spot `find_enclosing_project` closed for `cmd_run`, so
+`dax init` from a subdirectory still registers a duplicate.
+
+### Outstanding after this redesign
+
+- Reinstall dax on the host and rebuild the image — gates both the ruamel fix
+  and the still-pending classification-flow retest on the real repos.
+- Enforce fresh-login-per-project. **Login path fixed 2026-07-30 (see C3);
+  `dax creds add` still outstanding** — its claude path imports from
+  `~/.claude/.credentials.json` with no such guard, so minting a *derived* name
+  that way would still share a grant.
+- Teardown write-back to Keychain (deferred by choice — see C).
+- ~~`dax creds add`'s overwrite early-return~~ — **fixed 2026-07-30.** Every
+  `_setup_*_credential` takes `replace=`, set only on a confirmed "Overwrite
+  it?", so the provider's store is actually reached. A confirmed replace that
+  finds nothing new now says the old secret survived, rather than printing the
+  ordinary "no token found" and leaving the user believing it was cleared.
+  `dax creds remove` was fixed in the same pass to drop the config entry as
+  well as the Keychain secret, refusing if any project still references it.
+- Remove the debug scaffolding: `~/.dax-debug/open-url.log` in the
+  `dax-creds-open-url` wrapper and the `~/.dax-debug` mount in `_LOGIN_PROVIDERS`.
+- Retire `dax tenants` and `dax tenant classify`, now that the merged
+  `dax envs list` (G2) supersedes them.
+- Prompt for `tenant` during `dax init` registration (editing is now covered by
+  `dax env set`).
+- Shared `plugins`/`commands`/`cache` migration — reshaped by B into nested
+  mounts inside the `~/.claude` tree mount.
+- Execute the deletions in E.
 
 ## Accepted costs of per-tenant/project `.claude.json`
 
@@ -810,6 +1371,104 @@ root. Now branches on whether `project == reponame`.
 fabric/discernment containers since this change — that would require an
 image rebuild (`dax_creds` is a frozen, non-editable install) and a fresh
 round of manual verification, not yet done.
+
+### Confirmed 2026-07-30 — post-rebuild manual pass, steps 0–2
+
+Sequence and full expectations in
+`docs/testing/2026-07-30-cred-management-test-sequence.md`.
+
+**Step 0 (container), passed twice in separate containers.** 342 tests pass;
+installed `dax_creds` byte-identical to the repo; `/usr/bin/claude` identical to
+`dax_creds/wrappers/claude`, so inject-if-absent shipped; `ruamel.yaml`
+importable; and `DAX_CREDS_CLAUDE=claude-personal-dax` in a live container —
+C2's derived naming resolves end to end, from `~/.dax.yaml` through `dax run`
+into the container environment.
+
+**Step 1 (host), passed.** Editable reinstall picked up ruamel 0.19.1 (host is
+Python 3.9; the container is 3.14). `dax env set dax tenant personal` rewrote
+`~/.dax.yaml` byte-identically — empty diff, comments and the commented-out
+`#- claude_tenant_state` toggle intact. This is a real round-trip proof rather
+than a short-circuit: `run_env_set` calls `save_config` unconditionally
+(`init.py:649`), so a same-value set still serializes and rewrites the whole
+file while leaving its content unchanged. Any diff would therefore be pure
+round-trip damage.
+
+**Step 2 (host), passed, with findings.** `stored: yes` for all three derived
+Claude names; `claude-fre` shows used by **nothing**, so the resolving "used by"
+column does read the typo'd credential as dead; `dax env show` prints the
+resolved name; `dax envs list` reports orphans.
+
+- **All three derived credentials already exist in Keychain, minted before the
+  C3 fix.** The likeliest provenance is the abandoned-login import path, which
+  copies `~/.claude/.credentials.json` under the new name. Step 3 therefore has
+  a high prior of failing, and that is exactly what it is for.
+- **8 orphaned state trees, all recognizable as discernment processes** —
+  `a-priest-and-an-imam`, `seans-new-gig`, `self-employment-setup`,
+  `ysecurity-onboard`, `american-binary-soc2`, `augmentcode`,
+  `symlink-disclosure`, `hydraulic-controls-it`, under tenants `hci` and
+  `ysecurity` that no project declares. These are artifacts of the abandoned
+  multi-tenant classification (decision 8). Most are 0B shells; two hold real
+  data (`ysecurity-onboard` 1020K, `hydraulic-controls-it` 393K). G2 was built
+  to make exactly this visible, and did — every one of them was invisible to
+  every previous command.
+- **`dax`'s own state tree exists (122K, last used 21h) but is not in use.**
+  `claude_tenant_state` is commented out and the running container has
+  `.claude.json` at `$HOME`, outside the tree. Tree existence is not evidence of
+  activation, in this doc's own test output as much as anywhere.
+
+Two presentation defects, both in the same family as C4's related fix — two
+views disagreeing about what exists:
+
+- `dax env show` prints `[not registered yet]` (no `credentials:` entry) for a
+  name that `dax creds list` reports as `stored: yes` (Keychain holds a secret).
+  Both are true of different stores, but "not registered yet" reads as "you must
+  log in". Worth distinguishing registered-in-config from stored-in-Keychain.
+- `[!] key on disk` tests the single global `~/.claude/.credentials.json`
+  (`ClaudeProvider().has_disk_copy()`), so it repeats identically on every
+  claude row — a per-provider condition rendered in a per-credential column,
+  saying nothing about which credential the disk copy is.
+
+Unrelated, noticed in passing: `ssh-id-rsa` reports `stored: no` on both host
+and container. Worth checking whether `~/.ssh/id_rsa` is still the right path.
+
+**Step 3 (host), PASSED — and the step-2 prediction above was wrong.** 4
+distinct grants across 4 credentials, no sharing, despite all three derived
+credentials having been minted before the C3 fix landed. Refresh expiries are
+staggered 08-27 (`claude-fre`), 08-28 (`dax`), 08-29 (`discernment`), 08-28
+(`fabric`) — spread across the days the logins actually happened, which is what
+separate mints look like. `~/.claude/.credentials.json` matched
+`claude-personal-dax`, so every non-tenant-state container is currently riding
+dax's grant.
+
+Limit of this result, now recorded in the script's docstring: the refresh token
+is a **proxy** for grant identity, since the blob carries no grant ID. A copy is
+caught only while both entries still hold the same token. If each side then
+refreshes independently, each gets a new token while still descending from one
+grant, and the check reports PASS. These credentials predate the fix and have
+been used since (access tokens now expiring 07-31), so rotation was possible.
+The staggered refresh expiries are what make this PASS read as genuine rather
+than a rotation artifact — inference, not proof. Consequence for the sequence:
+run step 3 **immediately after** minting in step 5, where the signal is
+strongest, not only on the multi-day soak.
+
+**Correction, from step 4's mint (recorded in C5 above): the staggering inference
+is weaker than stated here.** A `claude-personal-fabric` grant minted on 2026-07-30
+reported `refreshTokenExpiresAt` of **2026-08-27** — *earlier* than grants
+already in Keychain (08-28, 08-29), where a fixed ~30-day window would have put
+a same-day mint near 08-29. So that field does not reliably encode mint date and
+cannot corroborate separate mints. What does carry the claim is a grant hash
+**changing across a known-good login**, which step 4 observed directly.
+
+**Step 4 (host), passed — recorded in C5 and C6 rather than here**, since it
+produced a code change and a new finding rather than only a result. In short: it
+found C5 (login refused every derived name), the fix was made and confirmed live,
+C4's Chrome profile and the device-flow redirect were both verified, a real mint
+produced a new grant, the abandoned-login refusal was confirmed on a second
+cancelled run, and inspection turned up C6.
+
+Steps 5–8 not run: step 5 is moot (step 3 found no sharing to repair, and step 4
+effectively re-minted fabric), step 6 is pending, and steps 7–8 are gated on
+decision B, without which per-env credentials remain inert at runtime.
 
 ## Deferred
 

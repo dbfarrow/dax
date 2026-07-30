@@ -108,6 +108,56 @@ def test_no_fetch_attempted_without_credential_name(tmp_path):
     assert proc.stderr == ''
 
 
+# --- inject-if-absent ------------------------------------------------------
+#
+# The Keychain copy is a bootstrap, not the running source of truth. Claude Code
+# refreshes the credential into its own state tree and nothing propagates back,
+# so re-writing the daemon snapshot on every launch would clobber a refreshed
+# token with a stale one — and if refresh tokens rotate on use, that stale token
+# is already dead. See decision C of docs/design/2026-07-27-tenant-isolation.md.
+
+REFRESHED = {'claudeAiOauth': {'accessToken': 'sk-ant-oat01-rotated',
+                               'refreshToken': 'sk-ant-ort01-rotated'}}
+
+
+def _seed_credential(tmp_path, content):
+    creds = tmp_path / 'home' / '.claude' / '.credentials.json'
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    creds.write_text(content)
+    return creds
+
+
+def test_existing_credential_is_not_overwritten(tmp_path):
+    """A token Claude Code refreshed in-tree must survive the next launch."""
+    _seed_credential(tmp_path, json.dumps(REFRESHED))
+
+    proc, creds = _run(tmp_path, ENVELOPE_JSON)
+
+    assert proc.returncode == 0
+    assert json.loads(creds.read_text()) == REFRESHED
+
+
+def test_existing_credential_skips_the_daemon_fetch(tmp_path):
+    """Nothing is fetched when the tree already has a credential — so a daemon
+    that is down or holding a dead snapshot cannot break an existing session."""
+    _seed_credential(tmp_path, json.dumps(REFRESHED))
+
+    proc, creds = _run(tmp_path, '', dax_creds_exit=1)
+
+    assert proc.returncode == 0
+    assert 'could not fetch' not in proc.stderr
+    assert json.loads(creds.read_text()) == REFRESHED
+
+
+def test_empty_credential_file_is_treated_as_absent(tmp_path):
+    """An interrupted write leaves a zero-byte file; that must not wedge auth."""
+    _seed_credential(tmp_path, '')
+
+    proc, creds = _run(tmp_path, ENVELOPE_JSON)
+
+    assert json.loads(creds.read_text()) == ENVELOPE
+
+
 # --- onboarding seed -------------------------------------------------------
 #
 # Claude Code's first-run wizard is gated on .claude.json and runs *ahead of*

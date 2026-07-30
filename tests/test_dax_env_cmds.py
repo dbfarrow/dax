@@ -1,0 +1,182 @@
+"""Tests for `dax env show` / `dax env set`.
+
+These exist so changing one field on a registered env doesn't require walking
+`dax init`'s full wizard (image -> credential checkbox -> new-credential loop)
+just to edit a single string.
+"""
+import pytest
+
+from dax_creds.config import ENV_FIELDS, env_field_help, load_dax_config
+from dax_creds.init import run_env_set, run_env_show
+
+
+CONFIG = """\
+# hand-maintained
+credentials:
+  claude-personal-fabric:
+    provider: claude
+  github-dfarrow:
+    provider: github
+
+features:
+- claude
+#- claude_tenant_state
+
+projects:
+  fabric:
+    dir: /Users/dfarrow/src/fabric
+    image: dax-base
+    creds:
+    - claude-personal-fabric
+  legacy:
+    dir: /Users/dfarrow/src/legacy
+    image: dax-base
+    multi_tenant: true
+    tenant_subdir: processes
+"""
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / '.dax.yaml').write_text(CONFIG)
+    return tmp_path
+
+
+# --- set -------------------------------------------------------------------
+
+def test_set_tenant_persists_to_disk(home):
+    run_env_set(load_dax_config(), 'fabric', 'tenant', 'personal')
+
+    assert load_dax_config()['projects']['fabric']['tenant'] == 'personal'
+
+
+def test_set_preserves_comments(home):
+    """The whole point of the ruamel prerequisite — `set` is a routine writer."""
+    run_env_set(load_dax_config(), 'fabric', 'tenant', 'personal')
+
+    written = (home / '.dax.yaml').read_text()
+    assert '#- claude_tenant_state' in written
+    assert '# hand-maintained' in written
+
+
+def test_set_creds_splits_a_comma_list(home):
+    run_env_set(load_dax_config(), 'fabric', 'creds',
+                'claude-personal-fabric, github-dfarrow')
+
+    assert load_dax_config()['projects']['fabric']['creds'] == [
+        'claude-personal-fabric', 'github-dfarrow']
+
+
+def test_set_creds_rejects_undefined_credential(home):
+    with pytest.raises(ValueError, match='bogus'):
+        run_env_set(load_dax_config(), 'fabric', 'creds', 'claude-personal-fabric,bogus')
+
+    assert 'bogus' not in (home / '.dax.yaml').read_text()
+
+
+def test_set_unknown_env_names_the_known_ones(home):
+    with pytest.raises(KeyError) as excinfo:
+        run_env_set(load_dax_config(), 'nope', 'tenant', 'x')
+
+    assert 'fabric' in excinfo.value.args[0] and 'legacy' in excinfo.value.args[0]
+
+
+def test_set_unknown_field_lists_valid_fields(home):
+    with pytest.raises(ValueError) as excinfo:
+        run_env_set(load_dax_config(), 'fabric', 'nonsense', 'x')
+
+    message = excinfo.value.args[0]
+    for field in ENV_FIELDS:
+        assert field in message
+
+
+def test_set_does_not_write_when_it_rejects(home):
+    before = (home / '.dax.yaml').read_text()
+
+    with pytest.raises(ValueError):
+        run_env_set(load_dax_config(), 'fabric', 'nonsense', 'x')
+
+    assert (home / '.dax.yaml').read_text() == before
+
+
+# --- show ------------------------------------------------------------------
+
+def test_show_reports_unset_tenant(home, capsys):
+    run_env_show(load_dax_config(), 'fabric')
+
+    assert '(unset)' in capsys.readouterr().out
+
+
+def test_show_reports_tenant_and_state_path(home, capsys):
+    config = load_dax_config()
+    run_env_set(config, 'fabric', 'tenant', 'personal')
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'personal' in out
+    assert 'state/dax/tenants/personal/fabric' in out
+    assert 'not created yet' in out
+
+
+def test_show_flags_deprecated_multi_tenant_fields(home, capsys):
+    run_env_show(load_dax_config(), 'legacy')
+
+    out = capsys.readouterr().out
+    assert 'multi_tenant' in out and 'tenant_subdir' in out
+    assert 'deprecated' in out
+
+
+def test_show_unknown_env_raises(home):
+    with pytest.raises(KeyError):
+        run_env_show(load_dax_config(), 'nope')
+
+
+# --- bare provider tokens --------------------------------------------------
+
+def test_set_accepts_a_bare_provider_token(home):
+    run_env_set(load_dax_config(), 'fabric', 'creds', 'claude,github-dfarrow')
+
+    assert load_dax_config()['projects']['fabric']['creds'] == ['claude', 'github-dfarrow']
+
+
+def test_show_resolves_a_bare_token_to_the_derived_name(home, capsys):
+    run_env_set(load_dax_config(), 'fabric', 'tenant', 'personal')
+    run_env_set(load_dax_config(), 'fabric', 'creds', 'claude')
+    capsys.readouterr()  # drop the `set` echoes
+
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert '-> claude-personal-fabric' in out
+    # This fixture already registers claude-personal-fabric, so it is not flagged.
+    assert 'not registered yet' not in out
+
+
+def test_show_flags_a_derived_name_that_is_not_registered(home, capsys):
+    run_env_set(load_dax_config(), 'fabric', 'tenant', 'ysecurity')
+    run_env_set(load_dax_config(), 'fabric', 'creds', 'claude')
+    capsys.readouterr()
+
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert '-> claude-ysecurity-fabric' in out
+    assert 'not registered yet' in out
+
+
+def test_show_explains_a_bare_token_that_cannot_resolve(home, capsys):
+    """No tenant means no derivable name — say so here, not at launch."""
+    run_env_set(load_dax_config(), 'fabric', 'creds', 'claude')
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'unresolved' in out and 'no tenant' in out
+
+
+# --- field help ------------------------------------------------------------
+
+def test_field_help_documents_every_settable_field():
+    text = env_field_help()
+    for field, description in ENV_FIELDS.items():
+        assert field in text and description in text

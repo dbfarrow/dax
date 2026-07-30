@@ -1,8 +1,13 @@
+import os
 import sys
-import yaml
+import time
 from pathlib import Path
 
-from dax_creds.config import daemon_socket_path
+from dax_creds.config import (
+    BARE_PROVIDER_CREDS, ENV_FIELDS, credential_users, daemon_socket_path,
+    derived_credentials, env_field_help, resolve_credential_names,
+    state_tree_path, state_trees,
+)
 from dax_creds.providers.ssh import SshProvider
 
 try:
@@ -24,9 +29,29 @@ def register_project(config, name, project_dir, image, creds):
 
 
 def save_config(config):
+    """Rewrite ~/.dax.yaml, preserving comments, key order, and quoting.
+
+    Refuses rather than falling back to pyyaml when ruamel is missing: a
+    pyyaml rewrite silently deletes every comment in the file and alphabetises
+    the keys, which is worse than not saving at all. Reads still fall back —
+    see `dax_creds.config.load_dax_config`.
+
+    Serialises fully before opening the file so a dump that raises cannot
+    leave a truncated config behind. Deliberately an in-place write rather
+    than write-temp-plus-rename: ~/.dax.yaml is a single-file bind mount
+    inside a dax container, and single-file grpcfuse mounts are exactly where
+    atomic rename breaks (see docs/design/2026-07-27-tenant-isolation.md).
+    """
+    from io import StringIO
+    from dax_creds.config import yaml_round_trip
+
+    buf = StringIO()
+    yaml_round_trip('save_config').dump(config, buf)
+    rendered = buf.getvalue()
+
     config_path = Path.home() / '.dax.yaml'
     with open(config_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
+        f.write(rendered)
 
 
 def _q_text(prompt, default=None):
@@ -117,9 +142,15 @@ def _define_credential(cred_name, provider_name, browser_enumerator=None):
     return cred_def
 
 
-def _setup_ssh_credential(cred_name, cred_def):
+# Every _setup_* below takes `replace`. It is False for ordinary setup, where
+# an existing secret means there is nothing to do, and True only when the user
+# has explicitly confirmed "Overwrite it?" in `dax creds add`. Without it the
+# early-exits made that confirmation a lie: the YAML metadata was rewritten
+# while the Keychain secret was left untouched, so a rotated credential could
+# not be re-imported without `dax creds remove` first.
+def _setup_ssh_credential(cred_name, cred_def, replace=False):
     provider = SshProvider()
-    if provider.check(cred_def):
+    if not replace and provider.check(cred_def):
         print(f'  [{cred_name}] already loaded in SSH agent.')
         return
     print(f'  [{cred_name}] loading {cred_def["key"]} into macOS Keychain...')
@@ -130,11 +161,11 @@ def _setup_ssh_credential(cred_name, cred_def):
         print(f'  [{cred_name}] failed: {e}', file=sys.stderr)
 
 
-def _setup_github_credential(cred_name, cred_def, config):
+def _setup_github_credential(cred_name, cred_def, config, replace=False):
     from dax_creds.providers.github import GitHubProvider
     provider = GitHubProvider()
 
-    if provider.check(cred_def, cred_name):
+    if not replace and provider.check(cred_def, cred_name):
         print(f'  [{cred_name}] token already in Keychain.')
         return
 
@@ -171,11 +202,11 @@ def _setup_github_credential(cred_name, cred_def, config):
         print(f'  [{cred_name}] failed: {e}', file=sys.stderr)
 
 
-def _setup_claude_credential(cred_name, cred_def):
+def _setup_claude_credential(cred_name, cred_def, replace=False):
     from dax_creds.providers.claude import ClaudeProvider
     provider = ClaudeProvider()
 
-    if provider.check(cred_def, cred_name):
+    if not replace and provider.check(cred_def, cred_name):
         print(f'  [{cred_name}] token already in Keychain.')
         return
 
@@ -186,14 +217,14 @@ def _setup_claude_credential(cred_name, cred_def):
         print(f'  [{cred_name}] done.')
         return
 
-    print(f'  [{cred_name}] no token found — run `dax creds login {cred_name}` to authenticate.')
+    _report_no_token(cred_name, provider, cred_def, replace)
 
 
-def _setup_auggie_credential(cred_name, cred_def):
+def _setup_auggie_credential(cred_name, cred_def, replace=False):
     from dax_creds.providers.auggie import AuggieProvider
     provider = AuggieProvider()
 
-    if provider.check(cred_def, cred_name):
+    if not replace and provider.check(cred_def, cred_name):
         print(f'  [{cred_name}] token already in Keychain.')
         return
 
@@ -204,18 +235,32 @@ def _setup_auggie_credential(cred_name, cred_def):
         print(f'  [{cred_name}] done.')
         return
 
-    print(f'  [{cred_name}] no token found — run `dax creds login {cred_name}` to authenticate.')
+    _report_no_token(cred_name, provider, cred_def, replace)
 
 
-def _setup_google_credential(cred_name, cred_def):
+def _setup_google_credential(cred_name, cred_def, replace=False):
     from dax_creds.providers.google import GoogleProvider
     provider = GoogleProvider(cred_def['provider'])
 
-    if provider.check(cred_def, cred_name):
+    if not replace and provider.check(cred_def, cred_name):
         print(f'  [{cred_name}] refresh token already in Keychain.')
         return
 
+    _report_no_token(cred_name, provider, cred_def, replace)
+
+
+def _report_no_token(cred_name, provider, cred_def, replace):
+    """Nothing was found to store. Say plainly whether the old secret survived.
+
+    On a confirmed overwrite this matters: the user asked for the secret to be
+    replaced and it was not, so silently printing the usual "no token found"
+    would leave them believing the old one is gone.
+    """
     print(f'  [{cred_name}] no token found — run `dax creds login {cred_name}` to authenticate.')
+    if replace and provider.check(cred_def, cred_name):
+        print(f'  [{cred_name}] the existing Keychain secret was left in place — '
+              f'nothing new was found to replace it.')
+        print(f'  [{cred_name}] to clear it anyway: dax creds remove {cred_name}')
 
 
 def run_init(config, cwd):
@@ -312,26 +357,29 @@ def _run_creds_add(config):
         return config
 
     existing = config.get('credentials', {}).get(cred_name)
+    replace = False
     if existing:
         print(f'  "{cred_name}" already exists (provider: {existing.get("provider")}).')
         if not _q_confirm('Overwrite it?', default=False):
             print('Nothing changed.')
             return config
+        # Carried into setup so the provider actually re-stores the secret.
+        replace = True
 
     provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive'])
     cred_def = _define_credential(cred_name, provider_name)
     config.setdefault('credentials', {})[cred_name] = cred_def
 
     if provider_name == 'ssh':
-        _setup_ssh_credential(cred_name, cred_def)
+        _setup_ssh_credential(cred_name, cred_def, replace=replace)
     elif provider_name == 'github':
-        _setup_github_credential(cred_name, cred_def, config)
+        _setup_github_credential(cred_name, cred_def, config, replace=replace)
     elif provider_name == 'claude':
-        _setup_claude_credential(cred_name, cred_def)
+        _setup_claude_credential(cred_name, cred_def, replace=replace)
     elif provider_name == 'auggie':
-        _setup_auggie_credential(cred_name, cred_def)
+        _setup_auggie_credential(cred_name, cred_def, replace=replace)
     elif provider_name in ('gmail', 'drive'):
-        _setup_google_credential(cred_name, cred_def)
+        _setup_google_credential(cred_name, cred_def, replace=replace)
 
     save_config(config)
     print(f'\nCredential "{cred_name}" saved.')
@@ -342,10 +390,9 @@ def _cred_status(config, name, cred_def):
     """Return (stored, envs_list, warnings_list) for a credential."""
     stored = bool(_keyring_module and _keyring_module.get_password(_KEYCHAIN_SERVICE, name))
 
-    envs = []
-    for proj_name, proj in config.get('projects', {}).items():
-        if name in proj.get('creds', []):
-            envs.append(proj_name)
+    # Resolved rather than matched literally: an env listing a bare `claude`
+    # never matches the derived name it actually uses.
+    envs = credential_users(config, name)
 
     warnings = []
     provider = cred_def.get('provider', '?')
@@ -380,7 +427,13 @@ def _cred_status(config, name, cred_def):
 
 
 def run_creds_list(config):
-    credentials = config.get('credentials', {})
+    # Derived credentials have no entry in ~/.dax.yaml but do hold a Keychain
+    # secret once logged in. Omitting them made `dax creds list` on the host
+    # disagree with `dax-creds list` inside the container, which lists what the
+    # daemon was actually given.
+    derived = derived_credentials(config)
+    credentials = dict(config.get('credentials', {}))
+    credentials.update(derived)
     if not credentials:
         print('No credentials registered.')
         return
@@ -420,6 +473,8 @@ def run_creds_list(config):
             detail = browser_label(cred_def.get('browser', 'default'), cred_def.get('chrome_profile'))
         else:
             detail = ''
+        if name in derived:
+            warnings = warnings + ['(derived)']
         flags = '  '.join(warnings)
         if len(detail) > _DETAIL_MAX:
             detail = detail[:_DETAIL_MAX - 3] + '...'
@@ -453,39 +508,252 @@ def _is_container_running(container_name):
 _CREDS_MAX = 38
 
 
-def run_envs_list(config):
+def _tree_stats(path):
+    """(total bytes, newest mtime) for a state tree, in a single walk.
+
+    Size and recency answer different halves of "is this worth keeping": a
+    large tree nobody has opened in a year is a better deletion candidate than
+    a small one from this morning.
+
+    Newest-file mtime rather than the directory's own: a directory's mtime only
+    moves when entries are added or removed, so editing a transcript in place
+    would not register.
+    """
+    total = 0
+    newest = 0.0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                st = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue  # vanished mid-walk or unreadable — not worth failing a listing over
+            total += st.st_size
+            newest = max(newest, st.st_mtime)
+    return total, newest
+
+
+def _human_size(n):
+    for unit in ('B', 'K', 'M'):
+        if n < 1024:
+            return f'{int(n)}{unit}'
+        n /= 1024
+    return f'{n:.1f}G'
+
+
+def _human_age(mtime, now=None):
+    """Compact relative age — the useful question is staleness, not the date."""
+    if not mtime:
+        return '-'
+    seconds = max(0.0, (time.time() if now is None else now) - mtime)
+    if seconds < 60:
+        return 'now'
+    for div, unit, limit in ((60, 'm', 3600), (3600, 'h', 86400),
+                             (86400, 'd', 7 * 86400), (7 * 86400, 'w', 365 * 86400)):
+        if seconds < limit:
+            return f'{int(seconds // div)}{unit}'
+    return f'{int(seconds // (365 * 86400))}y'
+
+
+def _home_relative(path):
+    """Shorten host paths for display. Returns the path unchanged when it isn't
+    under $HOME — which is the normal case inside a container, where registry
+    entries hold host paths like /Users/... that don't exist locally."""
+    try:
+        return '~/' + str(Path(path).relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+def run_env_show(config, name):
+    """Print one env's full registry entry plus what it resolves to."""
     projects = config.get('projects', {})
-    if not projects:
-        print('No environments registered.')
-        return
+    if name not in projects:
+        known = ', '.join(sorted(projects)) or '(none registered)'
+        raise KeyError(f'no env named {name!r}. Known envs: {known}')
+
+    proj = projects[name]
+    dir_path = proj.get('dir', '')
+    tenant = proj.get('tenant')
+    creds = proj.get('creds', []) or []
+
+    print()
+    print(f'  env      {name}')
+    print(f'  tenant   {tenant or "(unset)"}')
+    print(f'  dir      {dir_path}{"" if Path(dir_path).exists() else "   [missing]"}')
+    print(f'  image    {proj.get("image", "?")}')
+    print(f'  creds    {", ".join(creds) or "(none)"}')
+
+    # A bare provider token in `creds:` is a request for a per-env credential
+    # whose name dax derives. Showing the resolved name keeps the convention
+    # visible rather than magic — and surfaces the "no tenant" error here,
+    # where it is cheap, rather than at launch.
+    if any(c in BARE_PROVIDER_CREDS for c in creds):
+        try:
+            for resolved, derived_provider in resolve_credential_names(proj, name):
+                if derived_provider:
+                    registered = '' if resolved in config.get('credentials', {}) else '   [not registered yet]'
+                    print(f'           -> {resolved}{registered}')
+        except ValueError as e:
+            print(f'           -> unresolved: {e.args[0]}')
+
+    container = _container_name_for(dir_path)
+    if container:
+        running = _is_container_running(container)
+        print(f'  container {container}   [{"running" if running else "stopped"}]')
+
+    if tenant:
+        state = state_tree_path(tenant, name)
+        if state.exists():
+            size, used = _tree_stats(state)
+            suffix = f'   [{_human_size(size)}, last used {_human_age(used)} ago]'
+        else:
+            suffix = '   [not created yet]'
+        print(f'  state    {state}{suffix}')
+
+    # Surfaced because these are being removed, so an entry still carrying them
+    # is a migration to-do rather than configuration.
+    legacy = [k for k in ('multi_tenant', 'tenant_subdir') if k in proj]
+    if legacy:
+        print()
+        print(f'  note: entry still carries {", ".join(legacy)} — '
+              'deprecated by the 2026-07-29 redesign')
+    print()
+
+
+def run_env_set(config, name, field, value):
+    """Set a single field on one env's registry entry. Returns the new value."""
+    projects = config.get('projects', {})
+    if name not in projects:
+        known = ', '.join(sorted(projects)) or '(none registered)'
+        raise KeyError(f'no env named {name!r}. Known envs: {known}')
+    if field not in ENV_FIELDS:
+        raise ValueError(
+            f'unknown field {field!r}.\n' + env_field_help())
+
+    if field == 'creds':
+        new = [c.strip() for c in value.split(',') if c.strip()]
+        # A bare provider name is not a credential in the registry — it asks
+        # dax to derive one per tenant/project (see BARE_PROVIDER_CREDS).
+        unknown = [c for c in new
+                   if c not in config.get('credentials', {})
+                   and c not in BARE_PROVIDER_CREDS]
+        if unknown:
+            raise ValueError(
+                'not defined in ~/.dax.yaml credentials: {} (or use a bare provider '
+                'name for a per-env credential: {})'.format(
+                    ', '.join(unknown), ', '.join(BARE_PROVIDER_CREDS)))
+    else:
+        new = value
+
+    old = projects[name].get(field)
+    projects[name][field] = new
+    save_config(config)
+
+    shown_old = ', '.join(old) if isinstance(old, list) else old
+    shown_new = ', '.join(new) if isinstance(new, list) else new
+    print(f'  [{name}] {field}: {shown_old if old is not None else "(unset)"} -> {shown_new}')
+    return new
+
+
+def run_envs_list(config):
+    # No early return on an empty registry: deregistering every project is
+    # precisely when every state tree becomes an orphan, and bailing here would
+    # hide them all.
+    projects = config.get('projects', {})
+    trees = state_trees()
 
     rows = []
     for name, proj in projects.items():
         dir_path = proj.get('dir', '')
-        image = proj.get('image', '?')
+        tenant = proj.get('tenant')
         creds_str = ', '.join(proj.get('creds', [])) or '(none)'
         dir_exists = Path(dir_path).exists() if dir_path else False
         running = _is_container_running(_container_name_for(dir_path)) if dir_exists else False
-        status = '*' if running else (' ' if dir_exists else '!')
-        rows.append((status, name, image, dir_path, creds_str))
 
-    nc = max(len(r[1]) for r in rows)
-    ic = max(len(r[2]) for r in rows)
-    dc = max(len(r[3]) for r in rows)
+        # Claiming the tree here is what makes whatever survives an orphan.
+        # Only a declared tenant can claim one: without it there is no path to
+        # look under, so any tree bearing this project's name stays unclaimed
+        # and shows up below — which is the honest reading, since the registry
+        # no longer says which tenant it belongs to.
+        tree = trees.pop((tenant, name), None) if tenant else None
+
+        size, used = _tree_stats(tree) if tree else (None, None)
+        status = '*' if running else (' ' if dir_exists else '!')
+        rows.append((status, tenant or '-', name, proj.get('image', '?'),
+                     _home_relative(dir_path) if dir_path else '-',
+                     creds_str,
+                     _human_size(size) if tree else '-',
+                     _human_age(used) if tree else '-'))
+
+    # Anything still on disk has no registry entry pointing at it: the project
+    # was deregistered or its tenant renamed, and its transcripts and memory
+    # are still there. Invisible to every other command.
+    for (tenant, name), tree in sorted(trees.items()):
+        size, used = _tree_stats(tree)
+        rows.append(('?', tenant, name, '-', '-', '-',
+                     _human_size(size), _human_age(used)))
+
+    if not rows:
+        print('No environments registered, and no state trees on disk.')
+        return
+
+    headers = ('', 'tenant', 'name', 'image', 'dir', 'creds', 'state', 'used')
+    ncols = len(headers)
+    widths = [max(len(headers[i]), max(len(r[i]) for r in rows)) for i in range(ncols)]
+    widths[5] = min(widths[5], _CREDS_MAX)
+
+    def _line(cells):
+        return '  [{}]  {}'.format(cells[0], '  '.join(
+            str(c)[:widths[i]].ljust(widths[i]) for i, c in enumerate(cells[1:], start=1)))
 
     print()
-    print(f"  {'':3}  {'name':<{nc}}  {'image':<{ic}}  {'dir':<{dc}}  creds")
-    print(f"  {'':3}  {'-'*nc}  {'-'*ic}  {'-'*dc}  {'-'*_CREDS_MAX}")
-    for status, name, image, dir_path, creds_str in rows:
+    print(_line((' ',) + headers[1:]).replace('[ ]', '   ', 1))
+    print(_line((' ',) + tuple('-' * widths[i] for i in range(1, ncols))).replace('[ ]', '   ', 1))
+    for row in rows:
+        creds_str = row[5]
         if len(creds_str) > _CREDS_MAX:
             creds_str = creds_str[:_CREDS_MAX - 3] + '...'
-        print(f"  [{status}]  {name:<{nc}}  {image:<{ic}}  {dir_path:<{dc}}  {creds_str}")
+        print(_line(row[:5] + (creds_str,) + row[6:]))
+
+    markers = {r[0] for r in rows}
+    legend = [(m, t) for m, t in (('*', 'running'),
+                                  ('!', 'directory missing'),
+                                  ('?', 'orphaned state tree — no registry entry'))
+              if m in markers]
+    if legend:
+        print()
+        for marker, text in legend:
+            print(f'  [{marker}] {text}')
     print()
 
 
 def run_creds_remove(config, name, keyring=None):
-    if name not in config.get('credentials', {}):
+    """Remove a credential from both Keychain and ~/.dax.yaml.
+
+    Used to clear only the Keychain secret, leaving the definition in the
+    config — so the credential kept appearing in `dax creds list` and a
+    fat-fingered name could never actually be got rid of.
+    """
+    registered = name in config.get('credentials', {})
+    # A derived credential holds a Keychain secret but has no config entry, so
+    # without this it could not be removed at all — `dax creds remove` reported
+    # it as unknown. Clearing one is a legitimate "re-authenticate this env"
+    # operation: the next `dax run` finds it missing and offers a fresh login.
+    is_derived = not registered and name in derived_credentials(config)
+    if not registered and not is_derived:
         raise KeyError(name)
+
+    if registered:
+        # Checked before anything is deleted, so a refusal leaves both the
+        # Keychain and the config untouched. Removing a referenced credential
+        # would strand the project pointing at it with no error until its next
+        # launch. Derived names are exempt — the reference is the *convention*,
+        # which survives removal and simply re-mints.
+        referenced = sorted(credential_users(config, name))
+        if referenced:
+            raise ValueError(
+                f'{name} is still used by: {", ".join(referenced)}. Detach it first, '
+                f'e.g. `dax env set {referenced[0]} creds <remaining,names>`.')
+
     kr = keyring or _keyring_module
     if kr is None:
         raise ImportError('keyring package required: pip install keyring')
@@ -494,6 +762,16 @@ def run_creds_remove(config, name, keyring=None):
         print(f'  [{name}] removed from Keychain.')
     except Exception:
         print(f'  [{name}] not found in Keychain (nothing to remove).')
+
+    if is_derived:
+        users = ', '.join(credential_users(config, name)) or 'no env'
+        print(f'  [{name}] derived credential — nothing to remove from ~/.dax.yaml.')
+        print(f'  [{name}] {users} will be offered a fresh login on the next `dax run`.')
+        return
+
+    del config['credentials'][name]
+    save_config(config)
+    print(f'  [{name}] removed from ~/.dax.yaml.')
 
 
 def ensure_project_credentials(config, project_creds, keyring=None):

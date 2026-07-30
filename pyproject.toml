@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "dax"
 dynamic = ["version"]
 requires-python = ">=3.7"
-dependencies = ["pyyaml", "questionary"]
+dependencies = ["pyyaml", "ruamel.yaml", "questionary"]
 
 [project.optional-dependencies]
 container = ["mcp", "python-docx", "lxml"]

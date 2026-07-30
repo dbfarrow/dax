@@ -36,12 +36,31 @@ else
     _dax_state_file="$HOME/.claude.json"
 fi
 
-if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ]; then
+_dax_creds_file="$_dax_cfg_dir/.credentials.json"
+
+# Inject from Keychain only when the state tree has no credential yet. Claude
+# Code owns and refreshes this file from first launch onward; the daemon copy is
+# a *bootstrap*, not the running source of truth.
+#
+# Overwriting on every launch was harmless while ~/.claude was a shared mount
+# that Claude Code refreshed in place — the daemon snapshot and the file stayed
+# in step. Under a persistent per-tenant/project state tree they diverge: the
+# session refreshes the token into its own tree, nothing propagates back to
+# Keychain, and the next launch would clobber the good token with the stale
+# snapshot. If Anthropic rotates refresh tokens on use, that snapshot is already
+# dead, so every project would independently break on its second start.
+#
+# `-s` rather than `-e`: a zero-byte file left by an interrupted write counts as
+# no credential. To force a re-fetch, delete the file and relaunch.
+#
+# Teardown write-back to Keychain is deliberately not built yet — see decision C
+# of docs/design/2026-07-27-tenant-isolation.md.
+if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ] && [ ! -s "$_dax_creds_file" ]; then
     if _creds=$(dax-creds get "$DAX_CREDS_CLAUDE"); then
         case "$_creds" in
             *'"claudeAiOauth"'*)
                 mkdir -p "$_dax_cfg_dir"
-                ( umask 077; printf '%s' "$_creds" > "$_dax_cfg_dir/.credentials.json" )
+                ( umask 077; printf '%s' "$_creds" > "$_dax_creds_file" )
                 ;;
             *)
                 echo "dax: credential '$DAX_CREDS_CLAUDE' is not a Claude credentials blob" >&2

@@ -58,7 +58,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && npm install -g @augmentcode/auggie
 
 # install markdown renderer for dax-preview, and MS Office doc support
-RUN pip3 install --break-system-packages markdown pyyaml openpyxl python-docx python-pptx pandas pytest
+RUN pip3 install --break-system-packages markdown pyyaml ruamel.yaml openpyxl python-docx python-pptx pandas pytest
 
 # install dax-preview web server
 RUN cat > /usr/local/bin/dax-preview << 'PYEOF'

@@ -489,13 +489,13 @@ def cmd_run(args):
     project_creds = {}
     try:
         from dax_creds.config import (
-            load_dax_config, find_project_by_dir, find_enclosing_project,
+            load_dax_config, find_named_project_by_dir, find_enclosing_project,
             get_project_credentials, daemon_socket_path,
         )
         from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
         dax_config = load_dax_config()
         try:
-            project = find_project_by_dir(dax_config, Path.cwd())
+            project_name, project = find_named_project_by_dir(dax_config, Path.cwd())
         except KeyError:
             enclosing = find_enclosing_project(dax_config, Path.cwd())
             if enclosing is not None:
@@ -510,8 +510,27 @@ def cmd_run(args):
             dax_print("[+] project not registered — starting dax init")
             from dax_creds.init import run_init
             dax_config = run_init(dax_config, Path.cwd())
-            project = find_project_by_dir(dax_config, Path.cwd())
-        project_creds = get_project_credentials(dax_config, project)
+            project_name, project = find_named_project_by_dir(dax_config, Path.cwd())
+        try:
+            project_creds = get_project_credentials(dax_config, project, project_name)
+        except ValueError as e:
+            # A bare provider token with no tenant to derive from. Refusing
+            # beats silently falling back to a shared credential, which is the
+            # exact isolation failure this convention exists to prevent.
+            dax_print(f'[!] {e}')
+            sys.exit(1)
+
+        # Make synthesized definitions for derived names visible to everything
+        # downstream that looks credentials up by name in the config — notably
+        # cmd_creds_login below, which would otherwise raise KeyError on an
+        # env's first run and have it swallowed by this block's except clause,
+        # silently skipping both the login and the daemon.
+        #
+        # In memory only, deliberately: after a successful login the secret is
+        # in Keychain, and the next run re-derives the same name and finds it.
+        # Nothing needs persisting, so `dax run` stays a non-writer.
+        for _name, _cdef in project_creds.items():
+            dax_config.setdefault('credentials', {}).setdefault(_name, _cdef)
         config['multi_tenant'] = bool(project.get('multi_tenant'))
         config['tenant_subdir'] = project.get('tenant_subdir', '')
 
@@ -675,10 +694,39 @@ def _cmd_creds_login_google(cred_name, cred_def, config):
         sys.exit(1)
 
 
-def cmd_creds_login(cred_name, config):
+def _login_credential_def(config, cred_name):
+    """The definition to log in with — registered in `credentials:` or derived.
+
+    A per-env Claude credential normally has *no* registry entry: its name is
+    derived from the env's bare `claude` token (decision C2), and
+    `_post_login_import` stores a Keychain secret without ever writing a
+    `credentials:` block. So resolving against the registry alone refused every
+    derived name, and since `dax creds add`'s claude path is the unguarded
+    copy-from-disk route decision C3 exists to prevent, that left *no* sanctioned
+    way to mint a per-env credential at all. `creds list`, `creds remove`, and
+    `env show` already resolved derived names; login was missed. Found by manual
+    step 4 on 2026-07-30 — see decision C5.
+
+    An explicit registration wins, matching resolution everywhere else. The
+    derived definition arrives via `synthesized_credential()`, so it carries the
+    `credential_defaults` browser/profile settings (C4) rather than falling back
+    to the default browser.
+
+    Raises KeyError for a name that is neither, which `cmd_creds` renders as the
+    "Unknown credential" message.
+    """
+    from dax_creds.config import derived_credentials
+
     cred_def = config.get('credentials', {}).get(cred_name)
     if cred_def is None:
+        cred_def = derived_credentials(config).get(cred_name)
+    if cred_def is None:
         raise KeyError(cred_name)
+    return cred_def
+
+
+def cmd_creds_login(cred_name, config):
+    cred_def = _login_credential_def(config, cred_name)
 
     provider = cred_def.get('provider')
     if provider == 'auggie':
@@ -728,6 +776,15 @@ def cmd_creds_login(cred_name, config):
 
     cmd += [image, '/bin/sh', '-c', provider_cfg['auth_command']]
 
+    # What the provider's on-disk location holds *before* the flow runs. The
+    # import below reads that same location, and cannot otherwise tell a token
+    # the login just wrote from one that was already sitting there — so an
+    # abandoned login silently stored the pre-existing shared credential under
+    # the new name, producing two Keychain entries backed by one OAuth grant.
+    # That is the exact sharing the per-env naming exists to prevent, and it
+    # presented as success. Observed 2026-07-30.
+    before = _disk_token_for(cred_def, provider)
+
     dax_print(f'[+] dax creds login: starting auth flow for {cred_name} ({provider})')
     try:
         subprocess.run(cmd)
@@ -736,10 +793,45 @@ def cmd_creds_login(cred_name, config):
         dax_print(f'[-] login daemon log: {daemon_proc._dax_log_path}')
 
     # Post-login: import token to Keychain
-    _post_login_import(cred_name, cred_def, config, provider)
+    _post_login_import(cred_name, cred_def, config, provider, before=before)
 
 
-def _post_login_import(cred_name, cred_def, config, provider):
+def _disk_token_for(cred_def, provider):
+    """Whatever the provider would import from disk right now, or None."""
+    try:
+        if provider == 'github':
+            from dax_creds.providers.github import GitHubProvider
+            return GitHubProvider().import_from_disk(cred_def)
+        if provider == 'claude':
+            from dax_creds.providers.claude import ClaudeProvider
+            return ClaudeProvider().import_from_disk(cred_def)
+        if provider == 'auggie':
+            from dax_creds.providers.auggie import AuggieProvider
+            return AuggieProvider().import_from_disk(cred_def)
+    except Exception:
+        pass
+    return None
+
+
+def _post_login_import(cred_name, cred_def, config, provider, before=None):
+    """Store whatever the auth flow just wrote to disk into Keychain.
+
+    `before` is what that same on-disk location held beforehand. When the flow
+    leaves it unchanged — the user abandoned the login, closed the browser, or
+    it failed — importing would store a credential the flow did not create. For
+    Claude that means copying an existing grant under a new name, silently
+    defeating per-env isolation, so an unchanged token is refused rather than
+    imported.
+    """
+    if before is not None:
+        after = _disk_token_for(cred_def, provider)
+        if after == before:
+            dax_print(f'[!] {cred_name}: the auth flow did not write a new credential.')
+            dax_print(f'    Nothing was imported — the token already on disk predates this '
+                      f'login and storing it would share an existing grant.')
+            dax_print(f'    Re-run `dax creds login {cred_name}` and complete the browser flow.')
+            return
+
     if provider == 'github':
         from dax_creds.providers.github import GitHubProvider
         provider_obj = GitHubProvider()
@@ -824,6 +916,9 @@ def cmd_creds(args):
         except KeyError:
             print(f"Unknown credential '{args.name}'. Run `dax creds list` to see registered credentials.")
             sys.exit(1)
+        except ValueError as e:
+            dax_print(f'[!] {e}')
+            sys.exit(1)
     elif args.creds_command == 'update':
         try:
             run_creds_update(config, args.name)
@@ -847,6 +942,53 @@ def cmd_envs(args):
         config = {'defaults': {'image': 'dax-base'}, 'credentials': {}, 'projects': {}}
     if args.envs_command == 'list':
         run_envs_list(config)
+
+
+def _resolve_env_name(config, explicit):
+    """The name given on the command line, or the env that contains cwd.
+
+    Defaulting to cwd is what makes `dax env show` answer "what am I in right
+    now" without having to remember the registered name. Falls back to the
+    *enclosing* project so it also works from a subdirectory, where `dax run`
+    itself refuses (Gate 0).
+    """
+    if explicit:
+        return explicit
+
+    from dax_creds.config import find_enclosing_project
+
+    cwd = Path.cwd()
+    for name, proj in config.get('projects', {}).items():
+        if Path(proj.get('dir', '')).expanduser() == cwd:
+            return name
+
+    enclosing = find_enclosing_project(config, cwd)
+    if enclosing:
+        return enclosing[0]
+
+    dax_print(f'[!] {cwd} is not inside a registered env — pass a name explicitly')
+    sys.exit(1)
+
+
+def cmd_env(args):
+    from dax_creds.config import load_dax_config
+    from dax_creds.init import run_env_set, run_env_show
+
+    try:
+        config = load_dax_config()
+    except FileNotFoundError:
+        dax_print('[!] no ~/.dax.yaml found — run `dax init` first')
+        sys.exit(1)
+
+    name = _resolve_env_name(config, args.name)
+    try:
+        if args.env_command == 'show':
+            run_env_show(config, name)
+        elif args.env_command == 'set':
+            run_env_set(config, name, args.field, args.value)
+    except (KeyError, ValueError) as e:
+        dax_print('[!] {}'.format(e.args[0] if e.args else e))
+        sys.exit(1)
 
 
 def cmd_features(args):
@@ -1149,6 +1291,25 @@ def main():
     envs_sub = envs_p.add_subparsers(dest='envs_command', required=True)
     envs_sub.add_parser('list', help='List registered environments')
 
+    # Singular `env` acts on one environment, plural `envs` lists them — the
+    # same split the existing `tenant`/`tenants` pair uses.
+    from dax_creds.config import ENV_FIELDS, env_field_help
+    env_p = subparsers.add_parser(
+        'env', help='Inspect or edit a single environment',
+        description='Operates on the env for the current directory when no name is given.')
+    env_sub = env_p.add_subparsers(dest='env_command', required=True)
+
+    env_show_p = env_sub.add_parser('show', help="Show one env's configuration")
+    env_show_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
+
+    env_set_p = env_sub.add_parser(
+        'set', help='Set a single field on an env',
+        epilog=env_field_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    env_set_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
+    env_set_p.add_argument('field', choices=sorted(ENV_FIELDS), help='Field to set')
+    env_set_p.add_argument('value', help='New value')
+
     tenant_p = subparsers.add_parser('tenant', help='Manage tenant declarations')
     tenant_sub = tenant_p.add_subparsers(dest='tenant_command', required=True)
     tenant_set_p = tenant_sub.add_parser('set', help='Declare the tenant for a subdirectory')
@@ -1177,6 +1338,8 @@ def main():
         cmd_creds(args)
     elif args.command == 'envs':
         cmd_envs(args)
+    elif args.command == 'env':
+        cmd_env(args)
     elif args.command == 'tenant':
         cmd_tenant(args)
     elif args.command == 'tenants':
