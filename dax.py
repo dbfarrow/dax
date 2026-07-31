@@ -139,6 +139,20 @@ def feature_claude(config):
 # can turn account-specific.
 _CLAUDE_HOST_SHARED_DIRS = ('commands', 'plugins')
 
+# User-level *files* that a tree mount would otherwise replace, taking your global
+# instructions and settings with it. Found 2026-07-31, after `fabric` had already
+# been running without them: no error, just absent — which is the worst shape a
+# loss can take.
+#
+# Mounted read-only, unlike the directories above. Claude Code rewrites
+# settings.json when `/config` changes it, and a *writable* single-file bind mount
+# is precisely where write-temp-plus-rename breaks on grpcfuse (see the design
+# doc's Concurrency section) — the rename replaces the mount with a regular file
+# and the write silently stops reaching the host. Read-only makes that failure
+# explicit instead: `/config` edits inside a container don't persist, so make them
+# on the host.
+_CLAUDE_HOST_SHARED_FILES = ('CLAUDE.md', 'settings.json', 'settings.local.json')
+
 
 def feature_claude_tenant_state(config):
     """Decision B: this env's state tree mounts at `~/.claude` itself.
@@ -205,6 +219,13 @@ def feature_claude_tenant_state(config):
             continue
         opts.append('--volume={}:{}'.format(
             host_shared, os.path.join(cfg_dir, shared_dir)))
+
+    for shared_file in _CLAUDE_HOST_SHARED_FILES:
+        host_file = os.path.expanduser(os.path.join('~/.claude', shared_file))
+        if not os.path.isfile(host_file):
+            continue
+        opts.append('--volume={}:{}:ro'.format(
+            host_file, os.path.join(cfg_dir, shared_file)))
 
     return opts
 

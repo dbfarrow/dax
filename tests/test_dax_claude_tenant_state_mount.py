@@ -13,7 +13,10 @@ import os
 import pytest
 
 import dax as dax_module
-from dax import _CLAUDE_HOST_SHARED_DIRS, feature_claude_tenant_state
+from dax import (
+    _CLAUDE_HOST_SHARED_DIRS, _CLAUDE_HOST_SHARED_FILES,
+    feature_claude_tenant_state,
+)
 
 
 @pytest.fixture
@@ -157,3 +160,54 @@ def test_a_different_tenant_changes_the_path(config):
 
     assert '/tenants/personal/' in a
     assert '/tenants/acme/' in b
+
+
+# --- user-level files the tree mount would otherwise hide -------------------
+#
+# Found 2026-07-31, after `fabric` had run for a day without them: a tree mount
+# replaces ~/.claude wholesale, so the global CLAUDE.md and settings.json simply
+# vanished. Silently — no error, just absent instructions.
+
+def test_global_claude_md_and_settings_are_mounted(config, tmp_path):
+    for f in _CLAUDE_HOST_SHARED_FILES:
+        (tmp_path / '.claude').mkdir(exist_ok=True)
+        (tmp_path / '.claude' / f).write_text('x')
+
+    vols = volumes(feature_claude_tenant_state(config))
+
+    assert f'{tmp_path}/.claude/CLAUDE.md:/home/dfarrow/.claude/CLAUDE.md:ro' in vols
+    assert f'{tmp_path}/.claude/settings.json:/home/dfarrow/.claude/settings.json:ro' in vols
+
+
+def test_those_files_are_read_only(config, tmp_path):
+    """A writable single-file bind mount is where write-temp-plus-rename breaks on
+    grpcfuse: the rename replaces the mount with a regular file and the write stops
+    reaching the host silently. Read-only fails loudly instead."""
+    (tmp_path / '.claude').mkdir()
+    (tmp_path / '.claude' / 'settings.json').write_text('{}')
+
+    vols = volumes(feature_claude_tenant_state(config))
+
+    settings = [v for v in vols if v.endswith('/settings.json:ro')]
+    assert settings, vols
+
+
+def test_absent_user_files_are_skipped(config, tmp_path):
+    (tmp_path / '.claude').mkdir()
+    (tmp_path / '.claude' / 'CLAUDE.md').write_text('x')
+
+    vols = volumes(feature_claude_tenant_state(config))
+
+    assert not any('settings.json' in v for v in vols)
+    assert any('CLAUDE.md' in v for v in vols)
+
+
+def test_directories_stay_writable(config, tmp_path):
+    """commands/ is mounted rw on purpose — authoring a command inside a container
+    and having it persist is worth more than insulating the host directory."""
+    (tmp_path / '.claude' / 'commands').mkdir(parents=True)
+
+    vols = volumes(feature_claude_tenant_state(config))
+
+    commands = next(v for v in vols if v.endswith('/commands'))
+    assert not commands.endswith(':ro')

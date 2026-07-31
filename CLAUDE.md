@@ -289,6 +289,23 @@ functions in `dax.py`.
   still outstanding, so the old tenant machinery remains present but unreachable
   from the wrapper.
 
+  **B2's shared list was incomplete — fixed 2026-07-31.** A tree mount replaces
+  `~/.claude` wholesale, so the *user-level* `CLAUDE.md`, `settings.json`, and
+  `settings.local.json` vanished with it. `fabric` ran a full day without your
+  global instructions, silently. `_CLAUDE_HOST_SHARED_FILES` now mounts all three
+  **read-only** — writable single-file bind mounts are exactly where
+  write-temp-plus-rename breaks on grpcfuse, and a silent write failure is worse
+  than `/config` visibly not persisting inside a container.
+
+  **Migration runbook: `docs/testing/2026-07-31-migrate-env-to-state-tree.md`** —
+  how to move an env's accumulated state into its tree rather than starting empty.
+  The separability was checked, not assumed: `projects/<mangled-cwd>/` is keyed by
+  container cwd so it is already per-env (transcripts + auto-memory);
+  `history.jsonl` carries a `project` field per line so it filters cleanly (92 of
+  2185 lines were dax); and a container's `~/.claude.json` already has just the one
+  project key, so it seeds the tree wholesale and preserves trust/`allowedTools`/
+  tips. `file-history/` is keyed by session UUID and mappable but low value.
+
   **Watch for orphan grants in state trees.** `fabric`'s tree held a
   `.credentials.json` from 2026-07-28 whose grant matched no Keychain entry.
   Inject-if-absent correctly left it alone (non-empty file), so the env would have
