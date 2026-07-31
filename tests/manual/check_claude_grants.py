@@ -102,6 +102,74 @@ def claude_credential_names(config):
     return names
 
 
+def state_tree_credentials():
+    """[(tenant/project, blob)] for every credential sitting in a state tree.
+
+    Under decision B each env's tree mounts at ~/.claude, so this is where the
+    *working* credential lives — Keychain only ever holds the bootstrap copy. An
+    audit that reads Keychain alone is therefore looking in the wrong place.
+    """
+    root = Path.home() / '.local' / 'state' / 'dax' / 'tenants'
+    found = []
+    if not root.is_dir():
+        return found
+    for path in sorted(root.glob('*/*/.credentials.json')):
+        try:
+            found.append((f'{path.parent.parent.name}/{path.parent.name}',
+                          path.read_text()))
+        except OSError:
+            continue
+    return found
+
+
+def report_state_trees(keychain_grants):
+    """Print each tree's grant. Returns {grant: [tree, ...]}.
+
+    Two findings here are unambiguous and worth acting on:
+
+      * the same grant in two trees — two envs sharing one refresh-token chain,
+        which is the isolation failure this whole design exists to prevent;
+      * a credential in a tree for an env that no longer exists, which is dead
+        weight holding a live grant.
+
+    A tree grant that matches *no* Keychain entry is **not** conclusive, and the
+    report says so rather than crying orphan. A refresh may rotate the refresh
+    token, and the grant id is a hash of that token, so a tree's id legitimately
+    drifts from its Keychain snapshot while still descending from the same grant.
+    Keychain is not updated on refresh — teardown write-back is deliberately not
+    built (decision C) — so drift is the expected steady state, not a red flag.
+    """
+    trees = state_tree_credentials()
+    print()
+    if not trees:
+        print('state trees: no credentials on disk '
+              '(~/.local/state/dax/tenants/*/*/.credentials.json)')
+        return {}
+
+    name_for_grant = {g: ', '.join(n) for g, n in keychain_grants.items()}
+    print(f'{"state tree":34}  {"grant":14}  {"refresh expires":15}  matches Keychain')
+    print(f'{"-" * 34}  {"-" * 14}  {"-" * 15}  {"-" * 20}')
+
+    by_grant = {}
+    for tree, blob in trees:
+        oauth = envelope(blob)
+        if oauth is None:
+            print(f'{tree:34}  (not a Claude envelope)')
+            continue
+        gid = grant_id(oauth)
+        by_grant.setdefault(gid, []).append(tree)
+        match = name_for_grant.get(gid, 'nothing — see note below')
+        print(f'{tree:34}  {gid:14}  '
+              f'{when(oauth.get("refreshTokenExpiresAt")):15}  {match}')
+
+    if any(g not in name_for_grant for g in by_grant):
+        print('\n  Note: a tree grant matching nothing in Keychain is expected, not')
+        print('  necessarily an orphan — a refresh rotates the refresh token this id')
+        print('  hashes, and Keychain is never updated on refresh. It *is* worth a look')
+        print('  when the tree belongs to an env you no longer have.')
+    return by_grant
+
+
 def main():
     config_path = Path.home() / '.dax.yaml'
     if not config_path.exists():
@@ -154,8 +222,22 @@ def main():
     else:
         print('~/.claude/.credentials.json  absent')
 
+    tree_grants = report_state_trees(grants)
+
     shared_grants = {g: n for g, n in grants.items() if len(n) > 1}
+    shared_trees = {g: t for g, t in tree_grants.items() if len(t) > 1}
     print()
+    if shared_trees:
+        print('FAIL — these state trees hold the same grant, so two envs are not '
+              'isolated:')
+        for gid, trees in shared_trees.items():
+            print(f'  grant:{gid}  {", ".join(trees)}')
+        print('\nDelete the credential from all but one and let each re-bootstrap:')
+        for trees in shared_trees.values():
+            for tree in trees:
+                print(f'  rm ~/.local/state/dax/tenants/{tree}/.credentials.json')
+        return 1
+
     if shared_grants:
         print('FAIL — these credentials are the same grant under different names:')
         for gid, sharers in shared_grants.items():
