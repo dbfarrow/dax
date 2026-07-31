@@ -65,10 +65,17 @@ def envelope(blob):
 
 
 def grant_id(oauth):
-    """Short hash of the refresh token — the grant's identity, not its value."""
+    """Short hash of the refresh token — the grant's identity, not its value.
+
+    **None** when there is no refresh token, deliberately rather than a sentinel
+    string. A sentinel compares equal to itself, so grouping by it reported every
+    credential that had *no* grant as all sharing *one* grant — three state trees
+    with junk files were flagged as an isolation failure on 2026-07-31. Absence of
+    an identity is not an identity; callers must exclude None from comparisons.
+    """
     token = oauth.get('refreshToken') or ''
     if not token:
-        return 'NO-REFRESH-TOKEN'
+        return None
     return hashlib.sha256(token.encode()).hexdigest()[:12]
 
 
@@ -151,16 +158,37 @@ def report_state_trees(keychain_grants):
     print(f'{"-" * 34}  {"-" * 14}  {"-" * 15}  {"-" * 20}')
 
     by_grant = {}
+    unusable = []
     for tree, blob in trees:
         oauth = envelope(blob)
         if oauth is None:
-            print(f'{tree:34}  (not a Claude envelope)')
+            print(f'{tree:34}  {"-":14}  {"-":15}  not a Claude envelope')
+            unusable.append(tree)
             continue
         gid = grant_id(oauth)
+        if gid is None:
+            # Excluded from the sharing comparison on purpose: no refresh token
+            # means no grant to share, and treating that as a value made three
+            # junk files look like an isolation failure.
+            print(f'{tree:34}  {"-":14}  {"-":15}  no refresh token')
+            unusable.append(tree)
+            continue
         by_grant.setdefault(gid, []).append(tree)
         match = name_for_grant.get(gid, 'nothing — see note below')
         print(f'{tree:34}  {gid:14}  '
               f'{when(oauth.get("refreshTokenExpiresAt")):15}  {match}')
+
+    if unusable:
+        print(f'\n  {len(unusable)} tree(s) hold a credentials file with no usable '
+              f'refresh token:')
+        for tree in unusable:
+            print(f'    {tree}')
+        print('  This blocks the Keychain bootstrap rather than being merely stale:')
+        print('  the wrapper injects only when the file is absent or empty (`-s`), not')
+        print('  when it is invalid — so the env starts unauthenticated and re-runs')
+        print('  onboarding. Delete the file and it will bootstrap on next launch:')
+        for tree in unusable:
+            print(f'    rm ~/.local/state/dax/tenants/{tree}/.credentials.json')
 
     if any(g not in name_for_grant for g in by_grant):
         print('\n  Note: a tree grant matching nothing in Keychain is expected, not')
@@ -199,6 +227,10 @@ def main():
             print(f'{name:34}  {names[name]:16}  (not a Claude envelope)')
             continue
         gid = grant_id(oauth)
+        if gid is None:
+            # Not grouped: see grant_id's docstring on why absence is not a value.
+            print(f'{name:34}  {names[name]:16}  (no refresh token — not refreshable)')
+            continue
         grants.setdefault(gid, []).append(name)
         print(f'{name:34}  {names[name]:16}  {gid:14}  '
               f'{when(oauth.get("refreshTokenExpiresAt")):15}  '
