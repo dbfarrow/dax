@@ -9,6 +9,20 @@ choice.
 Every step runs on the **host**. The destination tree is not mounted into any
 container except the one that owns it, so a container cannot migrate itself.
 
+**Steps 1-5 are scripted** — `tools/migrate_env_state.py <env>` does the
+preconditions, the transcript copy, the history filter, and the credential and
+`.claude.json` checks, dry-run by default:
+
+```bash
+python3 tools/migrate_env_state.py dax            # shows the plan
+python3 tools/migrate_env_state.py dax --apply
+```
+
+It deliberately does **not** touch `~/.dax.yaml` (step 6 stays a manual
+`dax env set`) and does not handle `.claude.json` (step 4), which has to be copied
+out of the running container before shutdown. The prose below is the reference for
+what it does and why, and for the steps it leaves to you.
+
 ---
 
 ## What is actually per-env, and how it separates
