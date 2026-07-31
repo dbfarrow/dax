@@ -277,13 +277,26 @@ functions in `dax.py`.
   expiries cannot corroborate separate mints. A grant hash changing across a
   known-good login is the evidence that does.
 
-  Note for step 7: `feature_claude_tenant_state` and the wrapper's Gate B are
-  still the **pre-redesign shape** (trees under
-  `~/.local/state/dax/tenants/<t>/<p>`, `dax-creds resolve-tenant`), so
-  decision B is not built and inject-if-absent can only be exercised under the
-  shared `~/.claude` mount, where the divergence it guards against cannot
-  arise. Don't switch on `claude_tenant_state` to test it — that exercises the
-  abandoned design.
+  **Superseded 2026-07-31: decision B steps 1-3 are built and live-verified on
+  `fabric`.** The feature now mounts the env's state tree **at** `~/.claude` with
+  `CLAUDE_CONFIG_DIR` a constant, Gate B is gone from the wrapper, and
+  `claude`/`claude_tenant_state` are mutually exclusive (`dax run` refuses). No
+  image rebuild was needed: `dax run` deliberately stops setting
+  `DAX_TENANT_STATE`, so a wrapper still carrying Gate B leaves it dormant.
+  Verified live — mount shape, credential bootstrap from Keychain, and **state
+  surviving a full container destroy/recreate**, which closes the regression where
+  `.claude.json` was discarded on every teardown. Step 5 (the E deletions) is
+  still outstanding, so the old tenant machinery remains present but unreachable
+  from the wrapper.
+
+  **Watch for orphan grants in state trees.** `fabric`'s tree held a
+  `.credentials.json` from 2026-07-28 whose grant matched no Keychain entry.
+  Inject-if-absent correctly left it alone (non-empty file), so the env would have
+  refreshed and used an untracked grant indefinitely.
+  `tests/manual/check_claude_grants.py` cannot see it — it reads Keychain only,
+  never the trees, which is where credentials now live. Extending it to scan
+  `~/.local/state/dax/tenants/*/*/.credentials.json` and flag grants that match no
+  Keychain entry (or duplicate another tree's) is **not yet built**.
 
 - **Claude credentials are per tenant/project** — named
   `claude-<tenant>-<project>`, each minted by its **own fresh login**. That is
@@ -341,6 +354,23 @@ functions in `dax.py`.
 
 ## Backlog
 
+- **Per-env features are additive only — no way to opt *out*.** Features
+  accumulate from four sources (global `features:`, the env entry, a `.dax.yaml`
+  in cwd, `-f`) and every one only adds. So an env cannot decline a globally
+  inherited feature, which is why switching one env to `claude_tenant_state`
+  takes four writes: a hand-edit to strip `claude` from the global list, plus
+  three `dax env set … features claude` calls to give it back to the envs that
+  still want it.
+
+  Fit-and-polish fix, deferred: make `claude_tenant_state` **supersede an
+  inherited `claude`** (it was designed as the replacement for that mount, not a
+  peer), printing `claude_tenant_state supersedes claude for <env>` so it is
+  never silent — while still *refusing* when both are listed explicitly on the
+  same env, where the intent is genuinely ambiguous. That reduces the four writes
+  to one and leaves the global list alone. The general form — a `-claude` removal
+  syntax any env could use — is a bigger mechanism and not worth building until
+  something needs it.
+
 - **`dax init` should prompt for `tenant`** at registration time — editing an
   existing env is now covered by `dax env set`.
 
@@ -376,6 +406,16 @@ functions in `dax.py`.
   deferred, not part of any current stage.
 
 ## Notes
+
+- **Tests must never write the real `$HOME`.** A dax container bind-mounts the
+  host's `~/.dax.yaml` **rw**, so a test that writes `$HOME/.dax.yaml` destroys
+  the live config — env definitions, credential metadata, and gmail
+  `client_id`/`client_secret` values that exist nowhere else. This happened on
+  2026-07-31: four tests called `run_env_set` (which calls `save_config`
+  unconditionally) with no `HOME` isolation, and pytest overwrote the real config
+  with fixture data. `tests/conftest.py` now redirects `HOME` for every test via
+  an autouse fixture; per-module `home` fixtures still override it. Don't remove
+  it, and pass an explicit `HOME=<tmpdir>` to ad-hoc verification scripts too.
 
 - `safe.directory` is already set in `~/.gitconfig` — no need for `-c safe.directory=` flag in git commands.
 - Files NOT to back up: credentials, `~/.claude/projects/`, `history.jsonl`, caches, sessions, auggie ephemeral data.

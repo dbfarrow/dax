@@ -18,6 +18,7 @@ ENV_FIELDS = {
     'dir': 'absolute path to the project directory on the host',
     'image': 'docker image to run for this env',
     'creds': 'comma-separated credential names (replaces the whole list)',
+    'features': 'comma-separated features for this env, on top of the global list',
 }
 
 

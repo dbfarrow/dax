@@ -123,58 +123,88 @@ def feature_claude(config):
     return _add_volume(config, 'claudedir')
 
 
-# Shared across every tenant (decision 11 in the design doc): plugins/,
-# skills/, commands/, and caches - nested into each project's own state tree
-# so Claude Code finds them at their usual CLAUDE_CONFIG_DIR-relative path
-# without duplicating them per tenant. 'cache' is an inferred addition
-# (observed as a real top-level Claude Code directory during manual testing
-# 2026-07-27) alongside the three the design doc names explicitly - not
-# contractual, worth re-checking after version bumps like the rest of the
-# seed mechanics.
-_CLAUDE_TENANT_SHARED_DIRS = ('plugins', 'skills', 'commands', 'cache')
+# Mounted from the host's own ~/.claude into every state tree, nested at their
+# usual CLAUDE_CONFIG_DIR-relative paths (decision B2, which replaced decision
+# 11's four-directory `shared/` tree and its seeding copy).
+#
+# `commands` is the real user state — 11 commands in active use, and lost per
+# project without this. `plugins` earns its place weakly: nothing is installed
+# there, only the marketplace catalog Claude Code auto-installs and refreshes
+# itself, so this avoids N redundant multi-megabyte clones rather than preserving
+# anything.
+#
+# `skills` and `cache` were dropped. Skills arrive from the discernment sidecar
+# (decision D), so a copy here would go stale against the repo. Cache is derived,
+# generic, cheap to refetch, and the only one of the four where fetched content
+# can turn account-specific.
+_CLAUDE_HOST_SHARED_DIRS = ('commands', 'plugins')
 
 
 def feature_claude_tenant_state(config):
-    # Sequencing step 6 (docs/design/2026-07-27-tenant-isolation.md): the
-    # opt-in replacement for feature_claude's wholesale ~/.claude mount. A
-    # project adds 'claude_tenant_state' to its own features: list (not
-    # feature_claude's name) to switch this on - see the design doc's
-    # Sequencing section for why this stays a separate feature rather than
-    # replacing feature_claude outright.
-    #
-    # Host directories referenced here may not exist yet on first use for a
-    # brand-new tenant/project. Verified 2026-07-27: Docker auto-creates
-    # missing bind-mount host paths owned by the actual host user (not root),
-    # so the container can write into them immediately - see the design
-    # doc's Sequencing step 6 note for how this was checked.
-    from dax_creds.tenant import all_tenant_projects
+    """Decision B: this env's state tree mounts at `~/.claude` itself.
 
+    The opt-in replacement for `feature_claude`'s wholesale `~/.claude` mount —
+    the two are mutually exclusive, since both target the same destination, and
+    `cmd_run` refuses rather than letting Docker fail on a duplicate mount point.
+
+    `CLAUDE_CONFIG_DIR` is a **constant**, not a selector: no cwd resolution, no
+    per-session computation. It is set only because it is what relocates
+    `.claude.json` *into* the tree. Unset, Claude Code writes `~/.claude.json` — a
+    sibling of `~/.claude`, so outside the mount, container-local, and discarded
+    on teardown, taking per-project trust and the `projects{}` block with it. The
+    symptom is the first-run wizard reappearing, not an error.
+
+    Deliberately does not set `DAX_TENANT_STATE`. That was Gate B's master switch,
+    telling the wrapper to resolve a tenant from cwd and compute the path itself.
+    The path is now handed down, so a wrapper that still contains Gate B (any
+    image built before this change) simply skips it and honours what is set here —
+    which is what makes this testable without an image rebuild.
+
+    Tenant comes from the env's `~/.dax.yaml` entry (decision A: a declared
+    grouping label), not a `.dax-tenant` file. Without one there is no path to
+    mount, and pooling into a default is the isolation failure this design exists
+    to prevent, so it refuses.
+
+    Host directories may not exist yet for a brand-new env. Verified 2026-07-27:
+    Docker auto-creates missing bind-mount host paths owned by the real host user
+    rather than root, so the container can write into them immediately.
+    """
     project_name = config['workdir_name']
-    multi_tenant = bool(config.get('multi_tenant'))
-    tenant_subdir = config.get('tenant_subdir', '')
-    repo_root = Path(config['cwd'])
+    tenant = config.get('tenant')
+    if not tenant:
+        dax_print('[!] claude_tenant_state needs a tenant for {}, and none is '
+                  'declared.'.format(project_name))
+        dax_print('    The state tree lives at '
+                  '~/.local/state/dax/tenants/<tenant>/{}/, so there is nowhere'.format(
+                      project_name))
+        dax_print('    to mount without one. Set it with:')
+        dax_print('      dax env set {} tenant <name>'.format(project_name))
+        sys.exit(1)
+
     container_home = _container_home(config)
-    host_root = os.path.expanduser('~/.local/state/dax')
-    container_root = os.path.join(container_home, '.local/state/dax')
+    cfg_dir = os.path.join(container_home, '.claude')
+    host_tree = os.path.expanduser(
+        os.path.join('~/.local/state/dax/tenants', tenant, project_name))
 
     opts = [
-        '-e', 'DAX_TENANT_STATE=1',
-        '-e', 'DAX_PROJECT_NAME={}'.format(project_name),
+        '-e', 'CLAUDE_CONFIG_DIR={}'.format(cfg_dir),
+        '--volume={}:{}'.format(host_tree, cfg_dir),
     ]
-    if multi_tenant:
-        opts += ['-e', 'DAX_MULTI_TENANT=1']
-    if tenant_subdir:
-        opts += ['-e', 'DAX_TENANT_SUBDIR={}'.format(tenant_subdir)]
 
-    for tenant, project in sorted(all_tenant_projects(repo_root, multi_tenant, tenant_subdir)):
-        host_dir = os.path.join(host_root, 'tenants', tenant, project)
-        container_dir = os.path.join(container_root, 'tenants', tenant, project)
-        opts.append('--volume={}:{}'.format(host_dir, container_dir))
-
-        for shared_dir in _CLAUDE_TENANT_SHARED_DIRS:
-            host_shared = os.path.join(host_root, 'shared', shared_dir)
-            container_shared = os.path.join(container_dir, shared_dir)
-            opts.append('--volume={}:{}'.format(host_shared, container_shared))
+    # Decision B2: mounted straight from the host's own ~/.claude rather than
+    # copied into a shared/ tree, so there is one source of truth and no seeding
+    # step. Nested inside the tree mount above — Docker orders mounts by
+    # destination depth, so the deeper paths land after it.
+    #
+    # Skipped when absent rather than letting Docker create them: a host with no
+    # commands of its own should not acquire an empty ~/.claude/commands as a side
+    # effect of running a container.
+    for shared_dir in _CLAUDE_HOST_SHARED_DIRS:
+        host_shared = os.path.expanduser(os.path.join('~/.claude', shared_dir))
+        if not os.path.isdir(host_shared):
+            continue
+        opts.append('--volume={}:{}'.format(
+            host_shared, os.path.join(cfg_dir, shared_dir)))
 
     return opts
 
@@ -301,11 +331,16 @@ def _add_feature(feature, config):
     return fn(config)
 
 
+def _feature_names():
+    """Every feature a config may name, from the feature_* functions themselves."""
+    return {name[len('feature_'):] for name in globals()
+            if name.startswith('feature_')}
+
+
 def _print_features():
     dax_print("[!] available features:")
-    for name in sorted(globals()):
-        if name.startswith('feature_'):
-            dax_print("\t{}".format(name[len('feature_'):]))
+    for name in sorted(_feature_names()):
+        dax_print("\t{}".format(name))
 
 
 def _get_version():
@@ -531,6 +566,22 @@ def cmd_run(args):
         # Nothing needs persisting, so `dax run` stays a non-writer.
         for _name, _cdef in project_creds.items():
             dax_config.setdefault('credentials', {}).setdefault(_name, _cdef)
+        # Decision A: a declared grouping label on the env's entry. This is what
+        # feature_claude_tenant_state builds the state-tree path from — no
+        # `.dax-tenant` file, no cwd resolution.
+        config['tenant'] = project.get('tenant')
+
+        # Per-env feature opt-in, which was never actually wired up: features came
+        # only from the global `features:` list, a `.dax.yaml` in cwd, and `-f`.
+        # The design doc, CLAUDE.md, and feature_claude_tenant_state's own
+        # docstring all describe adding a feature to an env's own `features:` list
+        # — and doing so did nothing at all. Without this there is no per-env
+        # opt-in, so `claude_tenant_state` could only be switched on for every env
+        # at once or passed by hand on every launch.
+        for feature in project.get('features') or []:
+            if feature not in config['features']:
+                config['features'].append(feature)
+
         config['multi_tenant'] = bool(project.get('multi_tenant'))
         config['tenant_subdir'] = project.get('tenant_subdir', '')
 
@@ -568,14 +619,20 @@ def cmd_run(args):
         if 'ports' not in features:
             features.append('ports')
 
-    if 'claude_tenant_state' in features:
-        # Gate A, before mounts are computed: interactively fill in anything
-        # undeclared (silent no-op if everything already is) - this is what
-        # makes dax_creds/tenant.py's "no unattributed fallback, refuse
-        # instead" rule not just friction. Safe to prompt here specifically
-        # because nothing has launched yet; see _ensure_tenants_classified's
-        # own docstring for why the same isn't true mid-session.
-        _ensure_tenants_classified(config)
+    if 'claude_tenant_state' in features and 'claude' in features:
+        # Both mount ~/.claude, so Docker would fail on a duplicate mount point
+        # with a message that says nothing about which feature to remove. The
+        # tenant-state tree is the *replacement* for the shared mount, not an
+        # addition to it (decision B).
+        dax_print('[!] features `claude` and `claude_tenant_state` both mount '
+                  '~/.claude — pick one.')
+        dax_print('    claude_tenant_state replaces the shared mount with this '
+                  'env\'s own state tree.')
+        dax_print('    `claude` is probably in the global features list: remove it '
+                  'there and add it')
+        dax_print('    to the envs that still want the shared mount, or drop '
+                  'claude_tenant_state here.')
+        sys.exit(1)
 
     for feature in features:
         cmd.extend(_add_feature(feature, config))
@@ -1010,7 +1067,8 @@ def cmd_env(args):
         if args.env_command == 'show':
             run_env_show(config, name)
         elif args.env_command == 'set':
-            run_env_set(config, name, args.field, args.value)
+            run_env_set(config, name, args.field, args.value,
+                        valid_features=_feature_names())
     except (KeyError, ValueError) as e:
         dax_print('[!] {}'.format(e.args[0] if e.args else e))
         sys.exit(1)

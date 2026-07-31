@@ -13,7 +13,6 @@ from dax import (
     feature_ovpn,
     feature_X11,
     feature_webpreview,
-    feature_claude_tenant_state,
     _find_preview_port,
     _format_docker_cmd,
 )
@@ -171,127 +170,13 @@ def test_find_preview_port_different_dirs_differ():
         dax._is_port_free = orig
 
 
-# --- feature_claude_tenant_state --------------------------------------------
-#
-# Unlike every other feature_* function above, this one genuinely needs a real
-# directory tree (it calls dax_creds.tenant.all_tenant_projects, which scans
-# for .dax-tenant files) - synthetic in-memory config dicts alone aren't
-# enough, hence tmp_path here where the rest of this file doesn't need it.
-# The resolution logic itself is fully covered in tests/test_dax_creds_tenant.py;
-# these tests are about the argv/env-var construction on top of it.
-
-def _declare_tenant(path, tenant):
-    path.mkdir(parents=True, exist_ok=True)
-    (path / '.dax-tenant').write_text(tenant)
-
-
-def test_feature_claude_tenant_state_single_tenant_undeclared_mounts_nothing(
-        tmp_path, monkeypatch):
-    # No automatic unattributed/<reponame> fallback (dropped 2026-07-28) -
-    # dax run's classification step should always resolve this before mounts
-    # are computed, so an undeclared repo reaching here mounts nothing at
-    # all rather than a default location.
-    monkeypatch.setenv('HOME', str(tmp_path / 'realhome'))
-    repo = tmp_path / 'doot'
-    repo.mkdir()
-    config = {
-        'cwd': str(repo),
-        'workdir_name': 'doot',
-        '_container_home': '/home/dfarrow',
-    }
-
-    opts = feature_claude_tenant_state(config)
-
-    assert 'DAX_TENANT_STATE=1' in opts
-    assert 'DAX_PROJECT_NAME=doot' in opts
-    assert not any(o.startswith('DAX_MULTI_TENANT') for o in opts)
-    assert not any(o.startswith('--volume=') for o in opts)
-
-
-def test_feature_claude_tenant_state_single_tenant_declared(tmp_path, monkeypatch):
-    monkeypatch.setenv('HOME', str(tmp_path / 'realhome'))
-    repo = tmp_path / 'fabric'
-    _declare_tenant(repo, 'personal')
-    config = {
-        'cwd': str(repo),
-        'workdir_name': 'fabric',
-        '_container_home': '/home/dfarrow',
-    }
-
-    opts = feature_claude_tenant_state(config)
-
-    host_dir = tmp_path / 'realhome' / '.local' / 'state' / 'dax' / 'tenants' / 'personal' / 'fabric'
-    container_dir = '/home/dfarrow/.local/state/dax/tenants/personal/fabric'
-    assert '--volume={}:{}'.format(host_dir, container_dir) in opts
-
-
-def test_feature_claude_tenant_state_multi_tenant_mounts_each_mapped_child(tmp_path, monkeypatch):
-    monkeypatch.setenv('HOME', str(tmp_path / 'realhome'))
-    repo = tmp_path / 'discernment'
-    _declare_tenant(repo / 'project_ysecurity_comp_model', 'ysecurity')
-    _declare_tenant(repo / 'project_augment', 'augment')
-    config = {
-        'cwd': str(repo),
-        'workdir_name': 'discernment',
-        '_container_home': '/home/dfarrow',
-        'multi_tenant': True,
-    }
-
-    opts = feature_claude_tenant_state(config)
-
-    assert 'DAX_MULTI_TENANT=1' in opts
-    for tenant, project in [('ysecurity', 'project_ysecurity_comp_model'),
-                            ('augment', 'project_augment')]:
-        host_dir = (tmp_path / 'realhome' / '.local' / 'state' / 'dax' / 'tenants'
-                    / tenant / project)
-        container_dir = '/home/dfarrow/.local/state/dax/tenants/{}/{}'.format(tenant, project)
-        assert '--volume={}:{}'.format(host_dir, container_dir) in opts
-
-
-def test_feature_claude_tenant_state_multi_tenant_with_tenant_subdir(tmp_path, monkeypatch):
-    # discernment's actual tenant subdirectories sit under processes/, not
-    # directly under the repo root - config['tenant_subdir'] is how that
-    # reaches all_tenant_projects(), and DAX_TENANT_SUBDIR is how it reaches
-    # the wrapper/CLI in the container.
-    monkeypatch.setenv('HOME', str(tmp_path / 'realhome'))
-    repo = tmp_path / 'discernment'
-    _declare_tenant(repo / 'processes' / 'project_ysecurity_comp_model', 'ysecurity')
-    _declare_tenant(repo / 'project_at_root_should_be_ignored', 'should-not-count')
-    config = {
-        'cwd': str(repo),
-        'workdir_name': 'discernment',
-        '_container_home': '/home/dfarrow',
-        'multi_tenant': True,
-        'tenant_subdir': 'processes',
-    }
-
-    opts = feature_claude_tenant_state(config)
-
-    assert 'DAX_MULTI_TENANT=1' in opts
-    assert 'DAX_TENANT_SUBDIR=processes' in opts
-    host_dir = (tmp_path / 'realhome' / '.local' / 'state' / 'dax' / 'tenants'
-                / 'ysecurity' / 'project_ysecurity_comp_model')
-    container_dir = '/home/dfarrow/.local/state/dax/tenants/ysecurity/project_ysecurity_comp_model'
-    assert '--volume={}:{}'.format(host_dir, container_dir) in opts
-    assert not any('should-not-count' in o for o in opts)
-
-
-def test_feature_claude_tenant_state_multi_tenant_no_mounts_when_nothing_labeled(
-        tmp_path, monkeypatch):
-    monkeypatch.setenv('HOME', str(tmp_path / 'realhome'))
-    repo = tmp_path / 'discernment'
-    (repo / 'project_new').mkdir(parents=True)
-    config = {
-        'cwd': str(repo),
-        'workdir_name': 'discernment',
-        '_container_home': '/home/dfarrow',
-        'multi_tenant': True,
-    }
-
-    opts = feature_claude_tenant_state(config)
-
-    assert not any(o.startswith('--volume=') for o in opts)
-    assert 'DAX_TENANT_STATE=1' in opts
+# feature_claude_tenant_state moved to
+# tests/test_dax_claude_tenant_state_mount.py when decision B changed what it
+# builds. The five tests that lived here covered the multi-tenant shape: a
+# directory scan for `.dax-tenant` files, one mount per (tenant, project) pair
+# found, and the DAX_MULTI_TENANT/DAX_TENANT_SUBDIR env vars. None of that
+# survives — each env is single-tenant, the tenant is a declared label on the
+# env's ~/.dax.yaml entry, and the tree mounts at ~/.claude itself.
 
 
 def test_find_preview_port_skips_busy_ports(monkeypatch):

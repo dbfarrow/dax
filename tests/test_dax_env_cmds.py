@@ -180,3 +180,56 @@ def test_field_help_documents_every_settable_field():
     text = env_field_help()
     for field, description in ENV_FIELDS.items():
         assert field in text and description in text
+
+
+# --- env set features -------------------------------------------------------
+#
+# Added once per-env features became load-bearing: `claude_tenant_state` is opted
+# into per env, and switching it on means moving `claude` off the global list and
+# onto the envs that still want the shared mount — four edits, which is YAML
+# surgery without this.
+
+def test_env_set_features_replaces_the_list(home):
+    config = {'projects': {'fabric': {'dir': '/repos/fabric'}}}
+
+    run_env_set(config, 'fabric', 'features', 'claude_tenant_state',
+                valid_features={'claude', 'claude_tenant_state', 'ssh'})
+
+    assert config['projects']['fabric']['features'] == ['claude_tenant_state']
+
+
+def test_env_set_features_accepts_a_comma_separated_list(home):
+    config = {'projects': {'fabric': {'dir': '/repos/fabric'}}}
+
+    run_env_set(config, 'fabric', 'features', 'claude, ssh',
+                valid_features={'claude', 'claude_tenant_state', 'ssh'})
+
+    assert config['projects']['fabric']['features'] == ['claude', 'ssh']
+
+
+def test_env_set_features_rejects_a_misspelled_feature(home):
+    """A misspelled feature in a config is silently ignored at launch — the same
+    failure mode a typo'd credential name had, where `claud-fre` sat unused for
+    weeks."""
+    config = {'projects': {'fabric': {'dir': '/repos/fabric'}}}
+
+    with pytest.raises(ValueError) as excinfo:
+        run_env_set(config, 'fabric', 'features', 'claude_tenant_stat',
+                    valid_features={'claude', 'claude_tenant_state'})
+
+    assert 'not a dax feature' in excinfo.value.args[0]
+    assert 'features' not in config['projects']['fabric']
+
+
+def test_env_set_features_validation_is_skipped_without_a_list(home):
+    """The valid set comes from dax.py, so callers that have none still work."""
+    config = {'projects': {'fabric': {'dir': '/repos/fabric'}}}
+
+    run_env_set(config, 'fabric', 'features', 'anything')
+
+    assert config['projects']['fabric']['features'] == ['anything']
+
+
+def test_features_is_a_documented_field():
+    assert 'features' in ENV_FIELDS
+    assert 'features' in env_field_help()

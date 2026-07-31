@@ -730,6 +730,12 @@ def run_env_show(config, name):
     print(f'  image    {proj.get("image", "?")}')
     print(f'  creds    {", ".join(creds) or "(none)"}')
 
+    # Shown even when empty: whether this env opted into claude_tenant_state is
+    # the difference between its Claude state being its own and being shared with
+    # every other env, and nothing else in this output would reveal it.
+    env_features = proj.get('features') or []
+    print(f'  features {", ".join(env_features) or "(none beyond the global list)"}')
+
     # A bare provider token in `creds:` is a request for a per-env credential
     # whose name dax derives. Showing the resolved name keeps the convention
     # visible rather than magic — and surfaces the "no tenant" error here,
@@ -767,8 +773,14 @@ def run_env_show(config, name):
     print()
 
 
-def run_env_set(config, name, field, value):
-    """Set a single field on one env's registry entry. Returns the new value."""
+def run_env_set(config, name, field, value, valid_features=None):
+    """Set a single field on one env's registry entry. Returns the new value.
+
+    `valid_features` is passed in by the caller rather than imported: the feature
+    functions live in dax.py, which imports this module, and validating against
+    them matters — a per-env feature list is silently ignored when misspelled,
+    the same failure mode a typo'd credential name had.
+    """
     projects = config.get('projects', {})
     if name not in projects:
         known = ', '.join(sorted(projects)) or '(none registered)'
@@ -777,7 +789,15 @@ def run_env_set(config, name, field, value):
         raise ValueError(
             f'unknown field {field!r}.\n' + env_field_help())
 
-    if field == 'creds':
+    if field == 'features':
+        new = [f.strip() for f in value.split(',') if f.strip()]
+        if valid_features is not None:
+            unknown = [f for f in new if f not in valid_features]
+            if unknown:
+                raise ValueError(
+                    'not a dax feature: {} (see `dax features`)'.format(
+                        ', '.join(unknown)))
+    elif field == 'creds':
         new = [c.strip() for c in value.split(',') if c.strip()]
         # A bare provider name is not a credential in the registry — it asks
         # dax to derive one per tenant/project (see BARE_PROVIDER_CREDS).

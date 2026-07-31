@@ -1611,6 +1611,76 @@ Steps 5–8 not run: step 5 is moot (step 3 found no sharing to repair, and step
 effectively re-minted fabric), step 6 is pending, and steps 7–8 are gated on
 decision B, without which per-env credentials remain inert at runtime.
 
+### Confirmed 2026-07-31 — decision B steps 1-3 live on `fabric`
+
+Built and verified against the real env, in this order: the feature rewritten to
+mount at `~/.claude`, Gate B stripped from the wrapper, and `claude` /
+`claude_tenant_state` made mutually exclusive. Deletions (E) deliberately left
+until after this ran.
+
+`dax -t run` from `~/fatsec/fabric` emitted exactly the shape B specifies —
+`adding claude_tenant_state` rather than `adding claude`,
+`CLAUDE_CONFIG_DIR=/home/dfarrow/.claude`, the tree at
+`~/.local/state/dax/tenants/personal/fabric` mounted **at** `~/.claude`, the two
+host directories nested inside it, no wholesale `~/.claude` mount, and none of
+`DAX_TENANT_STATE`/`DAX_PROJECT_NAME`/`DAX_MULTI_TENANT`.
+
+**No image rebuild was needed, by design.** The image still carried a wrapper
+containing Gate B, which is gated on `DAX_TENANT_STATE` — so `dax run` not
+setting that variable leaves the old gate dormant and the handed-down
+`CLAUDE_CONFIG_DIR` honoured. Confirmed live: the credential landed in the tree,
+not at a `~/.local/state/dax/...` path computed in-container.
+
+**Persistence across teardown confirmed.** The container was destroyed and
+recreated and the session history survived — which is the whole point of B, and
+closes the regression it records: `.claude.json` had been discarded on every
+teardown since the step-2 diagnostic removed it from `dotfiles.rw` on 2026-07-27.
+
+Two things found on the way:
+
+- **The per-env feature opt-in was never wired up.** Features came only from the
+  global `features:` list, a `.dax.yaml` in cwd, and `-f`. An env's own
+  `features:` list — named by this doc, CLAUDE.md, and the feature's own docstring
+  as *the* way to switch `claude_tenant_state` on for one project — was read by
+  nothing. Fixed, with dedupe, since a duplicate emits the same mount twice and
+  Docker rejects it. `features` also became a `dax env set` field, validated
+  against the real feature list because a misspelled feature is silently ignored
+  at launch — the same failure mode a typo'd credential name had.
+- **Per-env features are additive only**, so an env cannot decline a globally
+  inherited feature. Switching one env therefore takes four writes. Deferred
+  fit-and-polish: let `claude_tenant_state` *supersede* an inherited `claude`
+  with a printed note, while still refusing when both are listed explicitly on
+  the same env. See CLAUDE.md Backlog.
+
+### An orphan grant was sitting in the state tree
+
+Found while pre-flighting the above, and it is the reason to keep the pre-flight
+step. `~/.local/state/dax/tenants/personal/fabric/.credentials.json` existed with
+an mtime of 2026-07-28, left by the multi-tenant testing. Its grant —
+`4e6854d7062f` — matched **none** of the four credentials in Keychain.
+
+Access token three days expired, refresh token valid until 2026-08-24. So
+inject-if-absent would have left it in place (correctly, by its own rule: the
+file was non-empty), Claude Code would have refreshed it, and `fabric` would have
+run indefinitely on a live OAuth grant that:
+
+- no Keychain entry backs, so nothing could re-bootstrap it if the file were lost
+- `DAX_CREDS_CLAUDE` does not name
+- `tests/manual/check_claude_grants.py` cannot see
+
+Removed; the wrapper then injected `56b0ef07fcbe` from Keychain, verified
+byte-identical to `dax-creds get claude-personal-fabric` inside the container.
+
+**Consequence — the grant audit has a blind spot.** `check_claude_grants.py`
+enumerates names derivable from `~/.dax.yaml` and reads Keychain. It never looks
+in the state trees, which under B is exactly where every env's working credential
+now lives. Two trees could hold the same grant, or an orphan grant could persist
+for months, and it would still report PASS. It should also scan
+`~/.local/state/dax/tenants/*/*/.credentials.json`, report each tree's grant, and
+flag any that match no Keychain entry or that duplicate another tree's — the same
+one-grant-per-name invariant (C6), applied where the credentials actually live.
+Not yet built.
+
 ## Deferred
 
 - **Migrating the existing pile** — 27 memory files and 31 transcripts to correct
