@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 import yaml
 
@@ -46,6 +47,96 @@ def state_trees():
         for tenant_dir in sorted(root.iterdir()) if tenant_dir.is_dir()
         for project_dir in sorted(tenant_dir.iterdir()) if project_dir.is_dir()
     }
+
+
+# User-level files a `claude_tenant_state` tree mount replaces wholesale, taking
+# your global CLAUDE.md/settings with it. A nested read-only *file* bind mount
+# was tried first (2026-07-31) and abandoned within hours: unlike a nested
+# directory mount, it didn't deliver the host's content at all — the container
+# saw an empty file. This copies them in instead, at `dax run` time.
+CLAUDE_SHARED_FILES = ('CLAUDE.md', 'settings.json', 'settings.local.json')
+
+
+def _shared_files_manifest_path(tenant, project):
+    # A sibling of the tree, not inside it — anything under state_tree_path()
+    # is mounted straight into the container's ~/.claude, and this bookkeeping
+    # has no business showing up there.
+    return state_root() / tenant / '{}.shared-files.json'.format(project)
+
+
+def _load_shared_files_manifest(tenant, project):
+    path = _shared_files_manifest_path(tenant, project)
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_shared_files_manifest(tenant, project, manifest):
+    path = _shared_files_manifest_path(tenant, project)
+    path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+
+
+def _sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def sync_claude_shared_files(tenant, project, force=False):
+    """Copy the host's CLAUDE_SHARED_FILES into <tenant>/<project>'s state tree.
+
+    Three-way comparison against a small manifest (filename -> sha256 of what
+    was last synced in), because a plain host-vs-tree diff can't tell "host
+    moved on since last sync" (safe to overwrite) apart from "something changed
+    the tree's copy independently" (a container editing it directly, now that
+    it's a plain file and not a mount — exactly what should not be clobbered
+    silently). force=True (the `accept-shared-files` escape hatch) skips that
+    distinction and always takes the host's version.
+
+    Returns the list of filenames left alone because they'd drifted and
+    force was False — the caller's cue to warn.
+    """
+    host_claude = Path.home() / '.claude'
+    tree = state_tree_path(tenant, project)
+    manifest = _load_shared_files_manifest(tenant, project)
+    warnings = []
+    changed = False
+
+    for filename in CLAUDE_SHARED_FILES:
+        host_file = host_claude / filename
+        if not host_file.is_file():
+            continue
+        host_bytes = host_file.read_bytes()
+        host_hash = _sha256_bytes(host_bytes)
+        tree_file = tree / filename
+
+        if not tree_file.is_file():
+            tree.mkdir(parents=True, exist_ok=True)
+            tree_file.write_bytes(host_bytes)
+            manifest[filename] = host_hash
+            changed = True
+            continue
+
+        tree_bytes = tree_file.read_bytes()
+        tree_hash = _sha256_bytes(tree_bytes)
+        if tree_hash == host_hash:
+            if manifest.get(filename) != tree_hash:
+                manifest[filename] = tree_hash
+                changed = True
+            continue
+
+        if force or manifest.get(filename) == tree_hash:
+            tree_file.write_bytes(host_bytes)
+            manifest[filename] = host_hash
+            changed = True
+        else:
+            warnings.append(filename)
+
+    if changed:
+        _save_shared_files_manifest(tenant, project, manifest)
+
+    return warnings
 
 
 def env_field_help():

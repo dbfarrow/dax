@@ -6,8 +6,11 @@ just to edit a single string.
 """
 import pytest
 
-from dax_creds.config import ENV_FIELDS, env_field_help, load_dax_config
-from dax_creds.init import run_env_set, run_env_show
+from dax_creds.config import (
+    ENV_FIELDS, env_field_help, load_dax_config, state_tree_path,
+    sync_claude_shared_files,
+)
+from dax_creds.init import run_env_accept_shared_files, run_env_set, run_env_show
 
 
 CONFIG = """\
@@ -233,3 +236,33 @@ def test_env_set_features_validation_is_skipped_without_a_list(home):
 def test_features_is_a_documented_field():
     assert 'features' in ENV_FIELDS
     assert 'features' in env_field_help()
+
+
+# --- env accept-shared-files -------------------------------------------------
+#
+# The escape hatch for the drift warning `sync_claude_shared_files` prints at
+# `dax run` time: resolving it is always an explicit act, never automatic.
+
+def test_accept_shared_files_requires_a_tenant(home):
+    with pytest.raises(ValueError, match='no tenant'):
+        run_env_accept_shared_files(load_dax_config(), 'fabric')
+
+
+def test_accept_shared_files_unknown_env_raises(home):
+    with pytest.raises(KeyError, match='fabric'):
+        run_env_accept_shared_files(load_dax_config(), 'nope')
+
+
+def test_accept_shared_files_adopts_the_host_version_over_drift(home):
+    run_env_set(load_dax_config(), 'fabric', 'tenant', 'personal')
+    (home / '.claude').mkdir()
+    (home / '.claude' / 'CLAUDE.md').write_text('v1')
+    sync_claude_shared_files('personal', 'fabric')
+
+    tree_file = state_tree_path('personal', 'fabric') / 'CLAUDE.md'
+    tree_file.write_text('edited independently in a container')
+    (home / '.claude' / 'CLAUDE.md').write_text('v2')
+
+    run_env_accept_shared_files(load_dax_config(), 'fabric')
+
+    assert tree_file.read_text() == 'v2'

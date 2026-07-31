@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 import yaml
 
+from dax_creds.config import CLAUDE_SHARED_FILES, sync_claude_shared_files
+
 
 def dax_print(msg):
     msg = msg.replace("[+]", '\033[92m' + "[+]" + '\033[0m')
@@ -144,14 +146,19 @@ _CLAUDE_HOST_SHARED_DIRS = ('commands', 'plugins')
 # been running without them: no error, just absent — which is the worst shape a
 # loss can take.
 #
-# Mounted read-only, unlike the directories above. Claude Code rewrites
-# settings.json when `/config` changes it, and a *writable* single-file bind mount
-# is precisely where write-temp-plus-rename breaks on grpcfuse (see the design
-# doc's Concurrency section) — the rename replaces the mount with a regular file
-# and the write silently stops reaching the host. Read-only makes that failure
-# explicit instead: `/config` edits inside a container don't persist, so make them
-# on the host.
-_CLAUDE_HOST_SHARED_FILES = ('CLAUDE.md', 'settings.json', 'settings.local.json')
+# Attempted fix, same day: mount these read-only, nested inside the tree mount,
+# the same way `_CLAUDE_HOST_SHARED_DIRS` nests `commands`/`plugins`. Abandoned
+# within hours — unlike the directories, a single-*file* bind mount nested inside
+# the tree mount did not deliver the host's content at all: the container saw an
+# empty file, not the host's real `CLAUDE.md`. (Separately, a writable version of
+# this would have hit the write-temp-plus-rename failure described in the design
+# doc's Concurrency section; moot, since the read side never worked.)
+#
+# Replaced with a plain copy at `dax run` time — see
+# `dax_creds.config.sync_claude_shared_files`. `_CLAUDE_HOST_SHARED_FILES` is
+# `dax_creds.config.CLAUDE_SHARED_FILES`, imported at the top of this file;
+# kept under this name here for the existing tests that import it from `dax`.
+_CLAUDE_HOST_SHARED_FILES = CLAUDE_SHARED_FILES
 
 
 def feature_claude_tenant_state(config):
@@ -220,12 +227,14 @@ def feature_claude_tenant_state(config):
         opts.append('--volume={}:{}'.format(
             host_shared, os.path.join(cfg_dir, shared_dir)))
 
-    for shared_file in _CLAUDE_HOST_SHARED_FILES:
-        host_file = os.path.expanduser(os.path.join('~/.claude', shared_file))
-        if not os.path.isfile(host_file):
-            continue
-        opts.append('--volume={}:{}:ro'.format(
-            host_file, os.path.join(cfg_dir, shared_file)))
+    # Copied in rather than mounted (see the comment on _CLAUDE_HOST_SHARED_FILES
+    # above) — a plain file write into the tree, picked up by the volume mount
+    # already assembled for `host_tree` further up.
+    for drifted in sync_claude_shared_files(tenant, project_name):
+        dax_print('[!] {}: {} in state tree differs from both host and '
+                  'last-synced copy — leaving it alone.'.format(project_name, drifted))
+        dax_print('    Run `dax env accept-shared-files {}` to adopt the host '
+                  'version, or inspect the diff yourself.'.format(project_name))
 
     return opts
 
@@ -1075,7 +1084,7 @@ def _resolve_env_name(config, explicit):
 
 def cmd_env(args):
     from dax_creds.config import load_dax_config
-    from dax_creds.init import run_env_set, run_env_show
+    from dax_creds.init import run_env_accept_shared_files, run_env_set, run_env_show
 
     try:
         config = load_dax_config()
@@ -1090,6 +1099,8 @@ def cmd_env(args):
         elif args.env_command == 'set':
             run_env_set(config, name, args.field, args.value,
                         valid_features=_feature_names())
+        elif args.env_command == 'accept-shared-files':
+            run_env_accept_shared_files(config, name)
     except (KeyError, ValueError) as e:
         dax_print('[!] {}'.format(e.args[0] if e.args else e))
         sys.exit(1)
@@ -1413,6 +1424,12 @@ def main():
     env_set_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
     env_set_p.add_argument('field', choices=sorted(ENV_FIELDS), help='Field to set')
     env_set_p.add_argument('value', help='New value')
+
+    env_accept_p = env_sub.add_parser(
+        'accept-shared-files',
+        help="Force-adopt the host's CLAUDE.md/settings.json/settings.local.json "
+             "into this env's state tree, resolving a drift warning from `dax run`")
+    env_accept_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
 
     tenant_p = subparsers.add_parser('tenant', help='Manage tenant declarations')
     tenant_sub = tenant_p.add_subparsers(dest='tenant_command', required=True)

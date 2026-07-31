@@ -167,39 +167,81 @@ def test_a_different_tenant_changes_the_path(config):
 # Found 2026-07-31, after `fabric` had run for a day without them: a tree mount
 # replaces ~/.claude wholesale, so the global CLAUDE.md and settings.json simply
 # vanished. Silently — no error, just absent instructions.
+#
+# First fix attempt was a nested read-only *file* bind mount, abandoned within
+# hours: unlike a nested directory mount, it never delivered the host's content
+# at all — the container saw an empty file. These files are now copied into the
+# tree at `dax run` time instead (`dax_creds.config.sync_claude_shared_files`).
 
-def test_global_claude_md_and_settings_are_mounted(config, tmp_path):
+def _tree_dir(tmp_path):
+    return tmp_path / '.local' / 'state' / 'dax' / 'tenants' / 'personal' / 'fabric'
+
+
+def test_global_claude_md_and_settings_are_copied_into_the_tree(config, tmp_path):
     for f in _CLAUDE_HOST_SHARED_FILES:
         (tmp_path / '.claude').mkdir(exist_ok=True)
-        (tmp_path / '.claude' / f).write_text('x')
+        (tmp_path / '.claude' / f).write_text(f'host {f}')
 
-    vols = volumes(feature_claude_tenant_state(config))
+    feature_claude_tenant_state(config)
 
-    assert f'{tmp_path}/.claude/CLAUDE.md:/home/dfarrow/.claude/CLAUDE.md:ro' in vols
-    assert f'{tmp_path}/.claude/settings.json:/home/dfarrow/.claude/settings.json:ro' in vols
+    tree = _tree_dir(tmp_path)
+    for f in _CLAUDE_HOST_SHARED_FILES:
+        assert (tree / f).read_text() == f'host {f}'
 
 
-def test_those_files_are_read_only(config, tmp_path):
-    """A writable single-file bind mount is where write-temp-plus-rename breaks on
-    grpcfuse: the rename replaces the mount with a regular file and the write stops
-    reaching the host silently. Read-only fails loudly instead."""
+def test_copied_files_are_not_mounted(config, tmp_path):
+    """These are plain writes into the tree, picked up by the tree's own volume
+    mount — not a separate bind mount, and definitely not a read-only one (the
+    first fix attempt, which never worked)."""
     (tmp_path / '.claude').mkdir()
     (tmp_path / '.claude' / 'settings.json').write_text('{}')
 
     vols = volumes(feature_claude_tenant_state(config))
 
-    settings = [v for v in vols if v.endswith('/settings.json:ro')]
-    assert settings, vols
+    assert not any('settings.json' in v for v in vols)
+    assert len(vols) == 1
 
 
 def test_absent_user_files_are_skipped(config, tmp_path):
     (tmp_path / '.claude').mkdir()
     (tmp_path / '.claude' / 'CLAUDE.md').write_text('x')
 
-    vols = volumes(feature_claude_tenant_state(config))
+    feature_claude_tenant_state(config)
 
-    assert not any('settings.json' in v for v in vols)
-    assert any('CLAUDE.md' in v for v in vols)
+    tree = _tree_dir(tmp_path)
+    assert (tree / 'CLAUDE.md').read_text() == 'x'
+    assert not (tree / 'settings.json').exists()
+
+
+def test_a_host_update_is_picked_up_on_the_next_run(config, tmp_path):
+    """The common case: host content moves on, and the tree — untouched since
+    dax last synced it — should just follow along."""
+    (tmp_path / '.claude').mkdir()
+    (tmp_path / '.claude' / 'CLAUDE.md').write_text('v1')
+    feature_claude_tenant_state(config)
+
+    (tmp_path / '.claude' / 'CLAUDE.md').write_text('v2')
+    feature_claude_tenant_state(config)
+
+    assert (_tree_dir(tmp_path) / 'CLAUDE.md').read_text() == 'v2'
+
+
+def test_a_tree_copy_touched_independently_of_dax_is_left_alone(config, tmp_path, capsys):
+    """A container can edit this file directly now that it's a plain copy, not a
+    mount. That's exactly the drift a blind overwrite would destroy, so dax must
+    not clobber it — even though the host has since moved on too."""
+    (tmp_path / '.claude').mkdir()
+    (tmp_path / '.claude' / 'CLAUDE.md').write_text('v1')
+    feature_claude_tenant_state(config)
+
+    (_tree_dir(tmp_path) / 'CLAUDE.md').write_text('edited independently in a container')
+    (tmp_path / '.claude' / 'CLAUDE.md').write_text('v2')
+    feature_claude_tenant_state(config)
+
+    assert (_tree_dir(tmp_path) / 'CLAUDE.md').read_text() == 'edited independently in a container'
+    out = capsys.readouterr().out
+    assert 'CLAUDE.md' in out
+    assert 'dax env accept-shared-files fabric' in out
 
 
 def test_directories_stay_writable(config, tmp_path):

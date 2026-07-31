@@ -134,6 +134,52 @@ functions in `dax.py`.
   the resulting token to Keychain the way the github/auggie branches already
   did. Confirmed working.
 
+## Where this stands — 2026-07-31
+
+Nine commits on `feature/tenant-isolation` since `4c8fb6c`, plus uncommitted
+work from today (shared-files sync + locale fix, below). **423 tests passing.**
+Read this block first; the sections below are the detail.
+
+**Done and verified live:** per-env Claude credentials (C2-C8, all four grants
+independent and audited), decision B steps 1-3 — an env's state tree now mounts
+at `~/.claude` with `CLAUDE_CONFIG_DIR` a constant — and the shared-files sync
+(`sync_claude_shared_files`) that replaced the abandoned nested-mount attempt.
+`fabric` is running on all of it, with state confirmed surviving a full
+container destroy/recreate and its `CLAUDE.md`/`settings.json` confirmed
+byte-identical to host. `dax`, `discernment`, and `ys-augmentcode` are still on
+the shared mount, which is the intended fallback.
+
+**Immediate next actions, in order:**
+
+1. **Finish migrating `dax`** — `tools/migrate_env_state.py dax` (dry run, then
+   `--apply`), then `dax env set dax features claude_tenant_state`. The
+   `.claude.json` to seed its tree with is already on the host at
+   `~/fatsec/dax/doot` (34 keys, scoped to `/home/dfarrow/dax`, and it carries
+   `oauthAccount`/`userID`, so it also covers the wrapper's un-built account
+   seeding for this env). **Do not commit that file** — it holds account identity.
+   Copy it to `~/.local/state/dax/tenants/personal/dax/.claude.json`, then delete
+   it and the scratch `doit.txt` from the repo.
+2. ~~Restart `fabric`~~ — **done and verified 2026-07-31.** `sync_claude_shared_files`
+   correctly flagged fabric's leftover 0-byte `CLAUDE.md` as drift on first run;
+   `dax env accept-shared-files fabric` resolved it, and `wc` confirmed a
+   byte-perfect match between host and container.
+3. **Rebuild the image and restart running containers** (`dax build`, then
+   `dax run` for `fabric`/`dax`/whatever else is up) to pick up the
+   `LANG`/`LC_ALL` fix found while chasing a `less` false alarm during step 2 —
+   the image generated `en_US.UTF-8` but never activated it, so every shell
+   defaulted to POSIX/C. Not urgent, but do it opportunistically rather than
+   let it linger.
+4. **Delete the credential in `hci/hydraulic-controls-it`'s tree** — a live grant,
+   valid to 2026-08-24, for an engagement that ended and an env that no longer
+   exists. Then decide about the 393K of transcripts beside it.
+5. **`dax creds remove claude-fre`** if it is genuinely dead — registered, used by
+   nothing, and holding a fourth live grant.
+6. **Step 7 of the cred test sequence**: relaunch `claude` in a migrated env and
+   confirm `.credentials.json`'s mtime does not change. Cheap, and now meaningful.
+7. **Roll `discernment` over** once `dax` has a few days behind it.
+8. **Step 5 of decision B — the E deletions.** Still the largest item, still pure
+   deletion, and still reading as current code to anyone who looks.
+
 ## In progress
 
 - **Tenant isolation for Claude Code state** — design and status in
@@ -297,7 +343,89 @@ functions in `dax.py`.
   write-temp-plus-rename breaks on grpcfuse, and a silent write failure is worse
   than `/config` visibly not persisting inside a container.
 
-  **Migration runbook: `docs/testing/2026-07-31-migrate-env-to-state-tree.md`** —
+  **Correction, same day: the `ro` mount doesn't fail loudly.** The comment above
+  assumed a write attempt would error and make the loss visible. Tested from
+  inside a `claude_tenant_state` container: a plain `touch` + append against the
+  mounted `CLAUDE.md` returned no error at all. The write landed in a
+  container-local copy that silently detached from the host-mounted file — host
+  untouched, but the container's own view of the file is now wrong with nothing
+  to signal it. Quieter than assumed, not louder. Practical upshot for anyone
+  (Claude included) working inside one of these containers: never edit
+  `CLAUDE.md`/`settings.json`/`settings.local.json` in place, even to test. Draft
+  the intended change in conversation and have the user apply it on the host —
+  a successful-looking in-container write is not evidence the host file changed.
+
+  **Superseded, same day: the read side was broken too — mounting abandoned in
+  favor of a copy.** Confirmed live: mounting these three files read-only,
+  nested inside the tree mount, doesn't deliver the host's content at all — the
+  container sees an empty file, not the real `CLAUDE.md`. Unlike
+  `_CLAUDE_HOST_SHARED_DIRS` (`commands`/`plugins`), which nests fine, a
+  single-*file* bind mount nested inside another mount didn't take.
+
+  **`--mount` is not a fix — tested and ruled out, 2026-07-31.** A stripped-down
+  `docker run --mount type=bind,source=~/.claude/CLAUDE.md,target=...` (no
+  `dax`, no `--volume`, run straight from a Mac terminal to rule out every other
+  variable) reproduced the identical empty-file result: 54 lines on the host,
+  0 bytes in the container. `-v`/`--mount` are two CLI spellings of the same OCI
+  bind-mount spec, so this was never a `--volume`-syntax quirk — nesting a
+  single-file bind mount inside a directory that's also a bind mount doesn't
+  work under either flag. Don't revisit `--mount` for this.
+
+  **Built, same day: `sync_claude_shared_files` (`dax_creds/config.py`) copies
+  these three files into the tree at `dax run` time, with drift detection.** A
+  plain host-vs-tree diff can't tell "host moved on since last sync" (safe to
+  overwrite) apart from "something changed the tree's copy independently" (a
+  container editing it directly, now that it's a plain file, not a mount —
+  the exact risk of dropping the mount). A small manifest beside the tree
+  (`<tenant>/<project>.shared-files.json`, deliberately *not* inside the tree
+  itself, so it never shows up in the container's `~/.claude`) records the
+  hash of what was last synced in per file:
+
+  - tree copy missing → copy host, record hash (first-run seed)
+  - tree hash matches host → no-op
+  - tree hash matches the manifest but not host → host moved on → copy, update
+  - tree hash matches neither → drift → **warn and skip**, never silently
+    overwrite (`dax run` prints the file/env and the command to resolve it)
+
+  **Confirmed live against `fabric`, 2026-07-31.** `dax run` correctly flagged
+  drift on the first run — fabric's tree already held a 0-byte `CLAUDE.md`, a
+  leftover of the `--mount` repro above having targeted the same tree path —
+  and `dax env accept-shared-files fabric` resolved it.
+  `wc ~/.claude/CLAUDE.md` matched exactly (54 lines / 442 words / 2921 bytes)
+  on the host and inside the container. (A `hexdump`-without-`-C` byte-swap and
+  a locale-driven `less` "binary file" warning both looked alarming and were
+  both false alarms — the content is plain UTF-8 text.)
+
+  **Found chasing that `less` warning: the image never activates its own
+  locale.** `Dockerfile.tmpl` runs `locale-gen` for `en_US.UTF-8` but never
+  sets `LANG`/`LC_ALL`, so every shell in the container defaults to POSIX/C —
+  confirmed via `locale` inside `fabric`. `less` treats a `CLAUDE.md` full of
+  ordinary em-dashes as binary under that default. Fixed by adding
+  `ENV LANG=en_US.UTF-8` / `ENV LANGUAGE=en_US:en` / `ENV LC_ALL=en_US.UTF-8`
+  right after the `locale-gen` step. One new test
+  (`test_render_dockerfile_activates_the_generated_locale`), suite at **423**.
+  **Needs an image rebuild** (`dax build`) — unlike the sync fix above, this is
+  baked in at build time, not computed per `dax run`.
+
+  `dax env accept-shared-files <name>` force-adopts the host version and resets
+  the manifest — resolving drift is always an explicit act, never automatic.
+  `_CLAUDE_HOST_SHARED_FILES` in `dax.py` is now just
+  `dax_creds.config.CLAUDE_SHARED_FILES` re-exported for the existing tests.
+  15 new tests (`test_dax_creds_shared_files_sync.py`, the rewritten
+  "user-level files" section of `test_dax_claude_tenant_state_mount.py`, and
+  `env accept-shared-files` cases in `test_dax_env_cmds.py`); suite at **422**.
+  Manual pass, since none of this is reachable from unit tests (real
+  `~/.claude`, real state trees, a real container):
+  `docs/testing/2026-07-31-shared-files-sync-test.md`. No image rebuild
+  needed — the sync runs host-side while `dax run` assembles the docker
+  command.
+
+  **Migration: `tools/migrate_env_state.py <env>`** (dry run by default) does the
+  transcript copy, the history filter, and the credential/`.claude.json` checks.
+  It deliberately does **not** write `~/.dax.yaml` — switching the env over stays a
+  manual `dax env set` — and does not handle `.claude.json`, which has to be copied
+  out of the env's running container before shutdown since it dies with it. Runbook
+  with the reasoning: `docs/testing/2026-07-31-migrate-env-to-state-tree.md` —
   how to move an env's accumulated state into its tree rather than starting empty.
   The separability was checked, not assumed: `projects/<mangled-cwd>/` is keyed by
   container cwd so it is already per-env (transcripts + auto-memory);

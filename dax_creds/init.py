@@ -7,6 +7,7 @@ from dax_creds.config import (
     BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
     credential_users, daemon_socket_path, derived_credentials, env_field_help,
     resolve_credential_names, state_tree_path, state_trees,
+    sync_claude_shared_files,
 )
 from dax_creds.providers.ssh import SshProvider
 
@@ -820,6 +821,30 @@ def run_env_set(config, name, field, value, valid_features=None):
     shown_new = ', '.join(new) if isinstance(new, list) else new
     print(f'  [{name}] {field}: {shown_old if old is not None else "(unset)"} -> {shown_new}')
     return new
+
+
+def run_env_accept_shared_files(config, name):
+    """Force-adopt the host's CLAUDE.md/settings.json/settings.local.json into
+    one env's state tree, resolving a `dax run`-time drift warning.
+
+    The deliberate escape hatch for `sync_claude_shared_files`'s drift check:
+    that check refuses to guess whether a tree's copy diverged because it's
+    stale or because something meant to change it, so resolving it is always
+    an explicit act, never automatic.
+    """
+    projects = config.get('projects', {})
+    if name not in projects:
+        known = ', '.join(sorted(projects)) or '(none registered)'
+        raise KeyError(f'no env named {name!r}. Known envs: {known}')
+
+    tenant = projects[name].get('tenant')
+    if not tenant:
+        raise ValueError(
+            f'{name!r} has no tenant declared, so it has no state tree — '
+            f'set one with `dax env set {name} tenant <name>`')
+
+    sync_claude_shared_files(tenant, name, force=True)
+    print(f'  [{name}] CLAUDE.md/settings.json/settings.local.json now match the host.')
 
 
 def run_envs_list(config):

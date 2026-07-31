@@ -445,6 +445,13 @@ RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
 	&& echo %%USER%%:%%PASSWD%% | chpasswd \
 	&& echo "done setting up user"
 
+# locale-gen above only builds the locale data — nothing selected it, so every
+# shell defaulted to POSIX/C. Found 2026-07-31: `less` flagged a plain-text
+# CLAUDE.md (containing ordinary em-dashes) as binary under that default.
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+
 USER %%USER%%
 
 WORKDIR /home/%%USER%%
