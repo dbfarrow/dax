@@ -9,6 +9,7 @@ from dax import (
     feature_ssh,
     feature_dotfiles,
     feature_ports,
+    feature_mounts,
     feature_msf,
     feature_ovpn,
     feature_X11,
@@ -97,6 +98,40 @@ def test_feature_ports_returns_port_flags():
     assert '-p' in opts
     assert '8080:80' in opts
     assert '8443:443' in opts
+
+
+def test_feature_mounts_mounts_each_path_as_a_home_sibling(monkeypatch):
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {
+        'mounts': ['~/discernment', '/Users/dfarrow/fatsec/some-process'],
+        '_container_home': '/home/dfarrow',
+    }
+    opts = feature_mounts(config)
+    assert '--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment' in opts
+    assert '--volume=/Users/dfarrow/fatsec/some-process:/home/dfarrow/some-process' in opts
+
+
+def test_feature_mounts_not_nested_under_the_workdir_mount(monkeypatch):
+    """The whole point: a sibling under $HOME, never a path inside another
+    mount — that nesting is the class of bug sync_claude_shared_files exists
+    to route around."""
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'mounts': ['~/discernment'], '_container_home': '/home/dfarrow'}
+    opts = feature_mounts(config)
+    assert opts == ['--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment']
+
+
+def test_feature_mounts_is_not_fooled_by_a_trailing_slash(monkeypatch):
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'mounts': ['~/discernment/'], '_container_home': '/home/dfarrow'}
+    opts = feature_mounts(config)
+    assert '--volume=/Users/dfarrow/discernment/:/home/dfarrow/discernment' in opts
+
+
+def test_feature_mounts_warns_if_none_defined(capsys):
+    opts = feature_mounts({})
+    assert opts == []
+    assert 'no mounts defined' in capsys.readouterr().out
 
 
 def test_feature_ssh_returns_agent_forwarding(tmp_path, monkeypatch):

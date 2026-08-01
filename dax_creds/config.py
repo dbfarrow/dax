@@ -20,6 +20,8 @@ ENV_FIELDS = {
     'image': 'docker image to run for this env',
     'creds': 'comma-separated credential names (replaces the whole list)',
     'features': 'comma-separated features for this env, on top of the global list',
+    'mounts': 'comma-separated host paths, each mounted read-write at $HOME/<name> '
+              'in the container (needs "mounts" in features too)',
 }
 
 

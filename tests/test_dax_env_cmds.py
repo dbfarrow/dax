@@ -238,6 +238,61 @@ def test_features_is_a_documented_field():
     assert 'features' in env_field_help()
 
 
+# --- env set mounts ----------------------------------------------------------
+#
+# For migrating discernment's processes: each process becomes its own env, and
+# needs the discernment sidecar repo mounted alongside its own — as a sibling
+# under $HOME (feature_mounts), not nested inside another mount.
+
+def test_env_set_mounts_splits_a_comma_list(home):
+    run_env_set(load_dax_config(), 'fabric', 'mounts', '~/discernment, ~/other')
+
+    assert load_dax_config()['projects']['fabric']['mounts'] == ['~/discernment', '~/other']
+
+
+def test_mounts_is_a_documented_field():
+    assert 'mounts' in ENV_FIELDS
+    assert 'mounts' in env_field_help()
+
+
+def test_show_lists_mounts_when_set(home, capsys):
+    run_env_set(load_dax_config(), 'fabric', 'mounts', '~/discernment')
+    capsys.readouterr()
+
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert '~/discernment' in out
+
+
+def test_show_omits_mounts_line_when_unset(home, capsys):
+    run_env_show(load_dax_config(), 'fabric')
+
+    assert 'mounts' not in capsys.readouterr().out
+
+
+def test_show_flags_mounts_set_without_the_feature_active(home, capsys):
+    run_env_set(load_dax_config(), 'fabric', 'mounts', '~/discernment')
+    capsys.readouterr()
+
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'inactive' in out
+
+
+def test_show_does_not_flag_mounts_when_the_feature_is_active(home, capsys):
+    config = load_dax_config()
+    run_env_set(config, 'fabric', 'mounts', '~/discernment')
+    run_env_set(config, 'fabric', 'features', 'claude,mounts')
+    capsys.readouterr()
+
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'inactive' not in out
+
+
 # --- env accept-shared-files -------------------------------------------------
 #
 # The escape hatch for the drift warning `sync_claude_shared_files` prints at

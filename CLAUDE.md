@@ -211,6 +211,35 @@ the shared mount, which is the intended fallback.
   `~/.claude/skills/` because Claude Code only discovers skills in the
   directories it scans; a CLAUDE.md pointer registers nothing.
 
+  **Generalized and built, 2026-07-31 (stage 1 of 2): `feature_mounts`.**
+  Rather than a discernment-specific sidecar mount, any env can now list extra
+  host paths in a `mounts:` field (`dax env set <name> mounts <path>[,<path>...]`,
+  comma-split the same way `creds`/`features` are), opted into via
+  `features: [mounts]` — the same "list the data, then opt in" shape as the
+  existing `feature_ports`. Each path mounts read-write as a **sibling under
+  $HOME**, named by `dir_basename`, deliberately *not* nested inside the
+  project's own workdir mount: nesting a mount inside a mount is exactly the
+  class of bug that broke the CLAUDE.md/settings.json file mounts (see
+  `sync_claude_shared_files` above), and siblings under $HOME sidestep it
+  rather than leaning on directory-nesting (which does work) staying that way.
+  `dax env show` lists configured mounts and flags them if `mounts` isn't in
+  that env's active features. Deliberately does not yet cover the `skills/`
+  second-mount or a common process-init script — **stage 2**, backlogged
+  below, since these processes share a common initiation sequence worth
+  scripting once stage 1 is in use.
+
+  **Found live testing this against a real migrated process, same day:**
+  `dax env show`/`dax env set` worked — they read `mounts` straight off the
+  project dict — but `dax run` printed "no mounts defined" and mounted
+  nothing. `cmd_run` promotes `project['tenant']` and `project['features']`
+  into the flat `config` dict feature functions read, but `mounts` was never
+  added to that promotion, so `feature_mounts` saw an empty list regardless of
+  what was configured. One-line fix (`config['mounts'] = project.get('mounts')
+  or []`), plus an integration test *through `cmd_run`* — the earlier
+  unit tests of `feature_mounts` alone couldn't have caught this, since the
+  bug was entirely in the wiring between the two. 12 new tests total, suite at
+  **435**.
+
   `claude_tenant_state` stays opt-in for now — the 2026-07-28/29 outage forced
   a fallback to the old shared-mount model, and that escape hatch is worth
   keeping. Still outstanding: the shared `plugins`/`commands`/`cache`
@@ -498,6 +527,15 @@ the shared mount, which is the intended fallback.
   less* container write access than today's wholesale rw `~/.claude`.
 
 ## Backlog
+
+- **Discernment process migration, stage 2: a helper script for the common
+  process-init sequence.** Stage 1 (`feature_mounts`, above) is the mechanism;
+  every migrated process still needs `dax init`/`dax env set ... mounts
+  ~/discernment`/`dax env set ... features claude,mounts` by hand, and that
+  sequence is identical across processes. Worth scripting once a few processes
+  have gone through it manually. Also not yet built: mounting discernment's
+  `skills/` a second time at `~/.claude/skills/` (original decision D scope) —
+  `feature_mounts` only covers the top-level sidecar mount so far.
 
 - **Per-env features are additive only — no way to opt *out*.** Features
   accumulate from four sources (global `features:`, the env entry, a `.dax.yaml`

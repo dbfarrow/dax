@@ -737,6 +737,12 @@ def run_env_show(config, name):
     env_features = proj.get('features') or []
     print(f'  features {", ".join(env_features) or "(none beyond the global list)"}')
 
+    env_mounts = proj.get('mounts') or []
+    if env_mounts:
+        print(f'  mounts   {", ".join(env_mounts)}')
+        if 'mounts' not in env_features:
+            print('           note: "mounts" feature not in features list above — inactive')
+
     # A bare provider token in `creds:` is a request for a per-env credential
     # whose name dax derives. Showing the resolved name keeps the convention
     # visible rather than magic — and surfaces the "no tenant" error here,
@@ -810,6 +816,8 @@ def run_env_set(config, name, field, value, valid_features=None):
                 'not defined in ~/.dax.yaml credentials: {} (or use a bare provider '
                 'name for a per-env credential: {})'.format(
                     ', '.join(unknown), ', '.join(BARE_PROVIDER_CREDS)))
+    elif field == 'mounts':
+        new = [m.strip() for m in value.split(',') if m.strip()]
     else:
         new = value
 

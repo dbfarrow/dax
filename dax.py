@@ -10,7 +10,7 @@ import subprocess
 from pathlib import Path
 import yaml
 
-from dax_creds.config import CLAUDE_SHARED_FILES, sync_claude_shared_files
+from dax_creds.config import CLAUDE_SHARED_FILES, dir_basename, sync_claude_shared_files
 
 
 def dax_print(msg):
@@ -350,6 +350,34 @@ def feature_ports(config):
     return opts
 
 
+def feature_mounts(config):
+    """Extra host directories mounted read-write as siblings under $HOME, on
+    top of the project's own workdir mount — e.g. a migrated discernment
+    process's own repo plus the discernment sidecar repo alongside it.
+
+    Deliberately siblings under $HOME rather than nested inside another mount:
+    nesting is exactly the class of bug that broke the CLAUDE.md/settings.json
+    file mounts (see sync_claude_shared_files and the design doc's decision
+    B2) — this sidesteps it rather than relying on directory nesting (which
+    does work) staying that way.
+
+    Named `mounts` on the project entry, comma-split by `dax env set` the same
+    way `creds`/`features` are. Opt-in per env via `features: [mounts]`, same
+    shape as `feature_ports`.
+    """
+    opts = []
+    mounts = config.get('mounts', [])
+    if not mounts:
+        dax_print("[!] no mounts defined for this env")
+        return opts
+    container_home = _container_home(config)
+    for host_path in mounts:
+        host = os.path.expanduser(host_path)
+        container = os.path.join(container_home, dir_basename(host))
+        opts.append('--volume={}:{}'.format(host, container))
+    return opts
+
+
 def _add_feature(feature, config):
     fn_name = 'feature_{}'.format(feature)
     fn = globals().get(fn_name)
@@ -614,6 +642,11 @@ def cmd_run(args):
 
         config['multi_tenant'] = bool(project.get('multi_tenant'))
         config['tenant_subdir'] = project.get('tenant_subdir', '')
+
+        # feature_mounts reads this the same way feature_claude_tenant_state
+        # reads config['tenant'] above — project entries aren't otherwise
+        # promoted into the flat config feature functions see.
+        config['mounts'] = project.get('mounts') or []
 
         ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
         if ssh_creds:
