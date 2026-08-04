@@ -134,6 +134,28 @@ def test_feature_mounts_warns_if_none_defined(capsys):
     assert 'no mounts defined' in capsys.readouterr().out
 
 
+def test_feature_mounts_supports_an_explicit_container_name(monkeypatch):
+    """host:container_name — the escape hatch for mounting a host directory
+    under a name other than its own basename, e.g. the host's real ~/.claude
+    mounted alongside (not instead of) an env's claude_tenant_state tree,
+    which already owns ~/.claude itself."""
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'mounts': ['~/.claude:host-claude'], '_container_home': '/home/dfarrow'}
+    opts = feature_mounts(config)
+    assert opts == ['--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude']
+
+
+def test_feature_mounts_explicit_name_does_not_affect_other_entries(monkeypatch):
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {
+        'mounts': ['~/.claude:host-claude', '~/discernment'],
+        '_container_home': '/home/dfarrow',
+    }
+    opts = feature_mounts(config)
+    assert '--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude' in opts
+    assert '--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment' in opts
+
+
 def test_feature_ssh_returns_agent_forwarding(tmp_path, monkeypatch):
     sock = tmp_path / 'ssh-auth.sock'
     sock.touch()

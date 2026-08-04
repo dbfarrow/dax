@@ -362,8 +362,15 @@ def feature_mounts(config):
     does work) staying that way.
 
     Named `mounts` on the project entry, comma-split by `dax env set` the same
-    way `creds`/`features` are. Opt-in per env via `features: [mounts]`, same
-    shape as `feature_ports`.
+    way `creds`/`features` are. Opt-in via `features: [mounts]`, same shape as
+    `feature_ports`.
+
+    Each entry is `<host_path>` or `<host_path>:<container_name>` — the name
+    defaults to `dir_basename(host_path)`, but an explicit one is what lets a
+    host directory be mounted under a name other than its own basename,
+    e.g. the host's own `~/.claude` mounted as `~/host-claude` to inspect its
+    real content from inside a container without colliding with whatever
+    `claude_tenant_state` already mounted at `~/.claude` itself.
     """
     opts = []
     mounts = config.get('mounts', [])
@@ -371,9 +378,10 @@ def feature_mounts(config):
         dax_print("[!] no mounts defined for this env")
         return opts
     container_home = _container_home(config)
-    for host_path in mounts:
+    for entry in mounts:
+        host_path, _sep, container_name = entry.partition(':')
         host = os.path.expanduser(host_path)
-        container = os.path.join(container_home, dir_basename(host))
+        container = os.path.join(container_home, container_name or dir_basename(host))
         opts.append('--volume={}:{}'.format(host, container))
     return opts
 

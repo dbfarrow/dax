@@ -21,7 +21,9 @@ ENV_FIELDS = {
     'creds': 'comma-separated credential names (replaces the whole list)',
     'features': 'comma-separated features for this env, on top of the global list',
     'mounts': 'comma-separated host paths, each mounted read-write at $HOME/<name> '
-              'in the container (needs "mounts" in features too)',
+              'in the container (needs "mounts" in features too). A path may be '
+              '<host>:<container_name> to mount under a name other than its own '
+              'basename, e.g. ~/.claude:host-claude',
 }
 
 
