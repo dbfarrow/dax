@@ -835,27 +835,18 @@ the shared mount, which is the intended fallback.
 - **Retire `dax tenants` and `dax tenant classify`** — superseded by the merged
   `dax envs list`.
 
-- **`claude` wrapper doesn't seed `oauthAccount`/`userID`** — cosmetic only
-  (omitting it just costs a profile-fetch round trip and the org name in the
-  first banner, per `docs/design/2026-07-27-tenant-isolation.md`'s seed-key
-  table), but seeding it correctly needs real account data (`emailAddress`,
-  `organizationName`, `accountUuid`), and nothing in `dax_creds/` currently
-  sources or relays that from the host into a container. Would need a new
-  daemon action (or a new credential-envelope field) reading it out of the
-  host's own `~/.claude.json`. Not attempted as part of the tenant-isolation
-  seed-template work — out of scope for a wrapper-only change.
+- **~~Container shell lands in `$HOME`, not the project mount~~ — resolved
+  2026-08-04.** `cmd_run` now passes `-w <container_home>/<workdir_name>` —
+  exactly where `feature_workdir` mounts the project, computed the same way,
+  safe unconditionally since `workdir` is one of the always-on baseline
+  features now (see "Baseline features" above) and so is always mounted
+  there. `-w` added to `_DOCKER_TWO_TOKEN_FLAGS` too, so dry-run output pairs
+  it with its path instead of splitting it across lines.
 
-- **Container shell lands in `$HOME`, not the project mount** — every dax
-  session starts the user at `$HOME`, requiring a manual `cd <project>`
-  before anything useful (including `claude`, once tenant isolation refuses
-  to start there anyway). No `-w`/`--workdir` docker flag exists in `dax.py`
-  today — `Dockerfile.tmpl`'s static `WORKDIR` can't know a per-project mount
-  name at build time. Fix would be a small `cmd_run()` addition using stage
-  3's already-computed `workdir_name`. Landing the shell at the mount root
-  is a strict improvement in both single- and multi-tenant cases (see
-  discussion in `docs/design/2026-07-27-tenant-isolation.md`'s history) but
-  is an ergonomic change orthogonal to the tenant-isolation bug fix itself —
-  deferred, not part of any current stage.
+  (The `claude` wrapper's missing `oauthAccount`/`userID` seeding, previously
+  listed here too, will never be fixed — decided 2026-08-04. Cosmetic only,
+  and correctly seeding it would need new plumbing to source real account
+  data from the host that doesn't exist yet; not worth building.)
 
 ## Notes
 

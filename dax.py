@@ -600,7 +600,7 @@ def _wait_for_tcp(host, port, timeout=5.0):
     return False
 
 
-_DOCKER_TWO_TOKEN_FLAGS = {'--name', '-h', '-v', '--volume', '-e', '-p', '--group-add', '-c'}
+_DOCKER_TWO_TOKEN_FLAGS = {'--name', '-h', '-v', '--volume', '-e', '-p', '-w', '--group-add', '-c'}
 
 
 def _format_docker_cmd(cmd):
@@ -629,11 +629,16 @@ def cmd_run(args):
     config['_container_home'] = '/home/{}'.format(username)
 
     name = config['envname']
+    # Lands the shell at the project mount instead of $HOME — workdir is one
+    # of the always-on baseline features, so this path is exactly where
+    # feature_workdir mounts it, every time.
+    workdir = os.path.join(_container_home(config), config['workdir_name'])
     cmd = [
         'docker', 'run', '-it', '--rm',
         '--platform=linux/amd64',
         '--name', name,
         '-h', '{}.fatsec.docker'.format(name),
+        '-w', workdir,
     ]
 
     daemon_proc = None
