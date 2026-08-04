@@ -1,13 +1,16 @@
 image: dax:latest
 
-features:
-  - workdir
-  - dotfiles
-  - claude
-  - auggie
-  - github
-  - ssh
-  - webpreview
+# workdir, dotfiles, and webpreview are always on — no top-level features:
+# list needed for them. Everything else (claude, claude_tenant_state, auggie,
+# github, ssh, mounts, substrate, ...) is opt-in per project: add it to that
+# project's own `features:` list, a cwd-local .dax.yaml, or pass -f. e.g.:
+#
+# projects:
+#   myproject:
+#     dir: /Users/you/code/myproject
+#     features:
+#       - claude
+#       - ssh
 
 claudedir:
   mount: ~/.claude

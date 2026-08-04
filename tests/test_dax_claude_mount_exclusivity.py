@@ -2,9 +2,13 @@
 
 Decision B makes the state tree the *replacement* for `feature_claude`'s wholesale
 mount, not an addition to it. Left to Docker the collision is still caught — it
-rejects a duplicate mount point — but the message names neither feature, and
-`claude` is normally inherited from the global `features:` list rather than written
-on the env, so "remove one of them" is not obvious advice.
+rejects a duplicate mount point — but the message names neither feature.
+
+`~/.dax.yaml`'s top-level `features:` key was removed 2026-08 (workdir/dotfiles/
+webpreview are now an always-on baseline in code); `claude`/`claude_tenant_state`
+are opt-in only per env now, via the project's own `features:` list or `-f` — so
+every fixture here puts them there instead of a global list that no longer
+carries anything optional.
 """
 import argparse
 
@@ -18,7 +22,7 @@ def _args():
     return argparse.Namespace(features=None, ports=None, test_only=True)
 
 
-def _setup(tmp_path, monkeypatch, features, project_extra=None):
+def _setup(tmp_path, monkeypatch, project_extra=None):
     home = tmp_path / 'home'
     home.mkdir(exist_ok=True)
     repo = home / 'fabric'
@@ -28,7 +32,7 @@ def _setup(tmp_path, monkeypatch, features, project_extra=None):
     project.update(project_extra or {})
 
     with open(home / '.dax.yaml', 'w') as f:
-        yaml.dump({'image': 'test/dax:latest', 'features': features,
+        yaml.dump({'image': 'test/dax:latest',
                    'claudedir': {'mount': '~/.claude'},
                    'projects': {'fabric': project}}, f)
 
@@ -38,7 +42,7 @@ def _setup(tmp_path, monkeypatch, features, project_extra=None):
 
 
 def test_both_features_together_is_refused(tmp_path, monkeypatch, capsys):
-    _setup(tmp_path, monkeypatch, ['claude', 'claude_tenant_state'])
+    _setup(tmp_path, monkeypatch, project_extra={'features': ['claude', 'claude_tenant_state']})
 
     with pytest.raises(SystemExit) as excinfo:
         cmd_run(_args())
@@ -46,13 +50,11 @@ def test_both_features_together_is_refused(tmp_path, monkeypatch, capsys):
     assert excinfo.value.code == 1
     out = capsys.readouterr().out
     assert 'both mount ~/.claude' in out
-    # The advice has to mention where `claude` actually comes from, or the user
-    # looks at the env entry, finds nothing, and is stuck.
-    assert 'global features list' in out
+    assert "this env's own" in out
 
 
 def test_the_tenant_state_tree_alone_is_fine(tmp_path, monkeypatch, capsys):
-    _setup(tmp_path, monkeypatch, ['claude_tenant_state'])
+    _setup(tmp_path, monkeypatch, project_extra={'features': ['claude_tenant_state']})
 
     cmd_run(_args())
 
@@ -62,7 +64,7 @@ def test_the_tenant_state_tree_alone_is_fine(tmp_path, monkeypatch, capsys):
 
 def test_the_shared_mount_alone_is_still_fine(tmp_path, monkeypatch, capsys):
     """Every env works this way today; opting in is per env and reversible."""
-    _setup(tmp_path, monkeypatch, ['claude'])
+    _setup(tmp_path, monkeypatch, project_extra={'features': ['claude']})
 
     cmd_run(_args())
 
@@ -70,9 +72,9 @@ def test_the_shared_mount_alone_is_still_fine(tmp_path, monkeypatch, capsys):
 
 
 def test_a_command_line_feature_can_collide_too(tmp_path, monkeypatch, capsys):
-    """`-f claude_tenant_state` on an env that inherits `claude` globally is the
+    """`-f claude_tenant_state` on an env whose own features: has `claude` is the
     most likely way to hit this, so the check must run after argv is merged."""
-    _setup(tmp_path, monkeypatch, ['claude'])
+    _setup(tmp_path, monkeypatch, project_extra={'features': ['claude']})
     args = _args()
     args.features = 'claude_tenant_state'
 
@@ -91,31 +93,38 @@ def test_a_command_line_feature_can_collide_too(tmp_path, monkeypatch, capsys):
 # env was impossible.
 
 def test_an_envs_own_features_list_is_honoured(tmp_path, monkeypatch, capsys):
-    _setup(tmp_path, monkeypatch, [],
-           project_extra={'features': ['claude_tenant_state']})
+    _setup(tmp_path, monkeypatch, project_extra={'features': ['claude_tenant_state']})
 
     cmd_run(_args())
 
     assert 'adding claude_tenant_state' in capsys.readouterr().out
 
 
-def test_opting_in_per_env_collides_with_a_globally_inherited_claude(
+def test_opting_in_per_env_collides_with_a_command_line_feature(
         tmp_path, monkeypatch, capsys):
-    """The realistic collision, and the reason the check has to run after the
-    per-env merge rather than on the global list alone."""
-    _setup(tmp_path, monkeypatch, ['claude'],
-           project_extra={'features': ['claude_tenant_state']})
+    """The realistic collision now that there's no global list to inherit
+    `claude` from: an env's own features: opts into claude_tenant_state, and
+    `-f claude` collides with it at launch time."""
+    _setup(tmp_path, monkeypatch, project_extra={'features': ['claude_tenant_state']})
+    args = _args()
+    args.features = 'claude'
 
     with pytest.raises(SystemExit):
-        cmd_run(_args())
+        cmd_run(args)
 
     assert 'both mount ~/.claude' in capsys.readouterr().out
 
 
-def test_a_feature_already_global_is_not_added_twice(tmp_path, monkeypatch, capsys):
-    """A duplicate would emit the same mount twice and Docker would reject it."""
-    _setup(tmp_path, monkeypatch, ['claude_tenant_state'],
-           project_extra={'features': ['claude_tenant_state']})
+def test_a_feature_from_two_sources_is_not_added_twice(tmp_path, monkeypatch, capsys):
+    """A duplicate would emit the same mount twice and Docker would reject it.
+
+    A cwd-local .dax.yaml and the project's own features: are two independent
+    sources that both land in config['features'] — the realistic way to get a
+    duplicate now that there's no global list to double up against."""
+    home, repo = _setup(tmp_path, monkeypatch,
+                         project_extra={'features': ['claude_tenant_state']})
+    with open(repo / '.dax.yaml', 'w') as f:
+        yaml.dump({'features': ['claude_tenant_state']}, f)
 
     cmd_run(_args())
 
@@ -127,8 +136,8 @@ def test_an_env_without_a_tenant_is_refused_before_launch(tmp_path, monkeypatch,
     """The refusal moved here from the container-side wrapper: with Gate B gone
     there is nothing left to resolve at launch, so this is the only place it can
     be caught — and catching it before the container starts is better anyway."""
-    _setup(tmp_path, monkeypatch, ['claude_tenant_state'],
-           project_extra={'tenant': None})
+    _setup(tmp_path, monkeypatch,
+           project_extra={'features': ['claude_tenant_state'], 'tenant': None})
 
     with pytest.raises(SystemExit) as excinfo:
         cmd_run(_args())

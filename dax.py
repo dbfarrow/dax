@@ -49,6 +49,17 @@ def _get_ca_cert_path():
         return None
 
 
+# Every env wants these, unconditionally — mounting the project itself,
+# dotfiles, and the webpreview server are not optional per-project choices.
+# Baked in here rather than sourced from ~/.dax.yaml's top-level `features:`
+# key (removed 2026-08) because that list was the actual cause of the
+# additive-only, no-opt-out problem: an env could never decline something
+# every other env also got by default. Per-env `features:` (on the project
+# entry, a cwd-local .dax.yaml, or `-f`) remain purely opt-in, which is fine —
+# nobody was ever trying to opt *out* of those.
+_ALWAYS_ON_FEATURES = ('workdir', 'dotfiles', 'webpreview')
+
+
 def load_config():
     home = os.environ['HOME']
     cwd = os.getcwd()
@@ -79,9 +90,18 @@ def load_config():
     from dax_creds.config import dir_basename
     defaults['workdir_name'] = dir_basename(cwd)
 
+    # Never silently dropped: a leftover top-level `features:` key still gets
+    # read here, just to flag it rather than let it quietly stop mattering.
+    legacy_features = defaults.get('features') or []
+    if legacy_features:
+        dax_print("[!] ~/.dax.yaml's top-level `features:` ({}) is no longer read — "
+                  "{} are always on; move anything else to a project's own "
+                  "features:, a cwd-local .dax.yaml, or -f".format(
+                      ', '.join(legacy_features), ', '.join(_ALWAYS_ON_FEATURES)))
+
     local_features = local.pop('features', [])
     defaults.update(local)
-    defaults['features'].extend(local_features)
+    defaults['features'] = list(_ALWAYS_ON_FEATURES) + local_features
 
     return defaults
 
@@ -580,7 +600,7 @@ def _wait_for_tcp(host, port, timeout=5.0):
     return False
 
 
-_DOCKER_TWO_TOKEN_FLAGS = {'--name', '-h', '-v', '--volume', '-e', '-p', '--group-add', '-c'}
+_DOCKER_TWO_TOKEN_FLAGS = {'--name', '-h', '-v', '--volume', '-e', '-p', '-w', '--group-add', '-c'}
 
 
 def _format_docker_cmd(cmd):
@@ -609,11 +629,16 @@ def cmd_run(args):
     config['_container_home'] = '/home/{}'.format(username)
 
     name = config['envname']
+    # Lands the shell at the project mount instead of $HOME — workdir is one
+    # of the always-on baseline features, so this path is exactly where
+    # feature_workdir mounts it, every time.
+    workdir = os.path.join(_container_home(config), config['workdir_name'])
     cmd = [
         'docker', 'run', '-it', '--rm',
         '--platform=linux/amd64',
         '--name', name,
         '-h', '{}.fatsec.docker'.format(name),
+        '-w', workdir,
     ]
 
     daemon_proc = None
@@ -730,10 +755,8 @@ def cmd_run(args):
                   '~/.claude — pick one.')
         dax_print('    claude_tenant_state replaces the shared mount with this '
                   'env\'s own state tree.')
-        dax_print('    `claude` is probably in the global features list: remove it '
-                  'there and add it')
-        dax_print('    to the envs that still want the shared mount, or drop '
-                  'claude_tenant_state here.')
+        dax_print('    Check this env\'s own `features:` list (and any -f flag) '
+                  'and drop one of the two.')
         sys.exit(1)
 
     for feature in features:

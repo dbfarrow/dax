@@ -297,6 +297,11 @@ def test_format_docker_cmd_pairs_bare_volume_flag_with_its_value():
     assert lines == ['--volume /a:/b', '-v /c:/d']
 
 
+def test_format_docker_cmd_pairs_workdir_flag_with_its_path():
+    lines = _format_docker_cmd(['-w', '/home/dfarrow/fabric', 'dax:latest']).split('\n  ')
+    assert lines == ['-w /home/dfarrow/fabric', 'dax:latest']
+
+
 def test_format_docker_cmd_realistic_mixed_command():
     cmd = [
         'docker', 'run', '-it', '--rm', '--platform=linux/amd64',
