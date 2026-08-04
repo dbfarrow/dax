@@ -35,6 +35,52 @@ hand before shutdown — see the runbook. Without it the wrapper seeds
 `{"hasCompletedOnboarding": true}`, which costs re-consent and replayed tips and
 nothing else.
 
+## State strewn across more than one key
+
+The simple case — this env has *always* run in a dax container — has exactly one
+`projects/` key: `-<home>-<user>-<env_name>`, because `workdir_name` (dax's mount
+basename) never changes. `project_key()` below builds exactly that.
+
+That assumption breaks for state accumulated **before** containerization, i.e. a
+directory that used to be a plain nested subdirectory of a larger host tree and
+is only now becoming its own registered env (checked against the real
+`~/.claude/projects/` on 2026-08-01 while planning discernment's per-process
+repo split — see `docs/design/2026-07-27-tenant-isolation.md`). Concretely, for a
+process that used to live at `~/work/processes/<name>`:
+
+  * its own sessions were recorded under the *literal nested path's* key,
+    `-home-<user>-work-processes-<name>` — not the flat key this script assumes.
+  * sessions run with cwd at an ancestor of that path (`~/work/processes`,
+    `~/work` itself — before the user `cd`'d into the specific process
+    directory, or during general non-process-specific work) recorded under
+    *those* keys instead, and those directories are shared across every process
+    that was ever a child of them. There is no reliable way to attribute one
+    line of that data to a single process without reading its content, so this
+    script never tries — it only ever copies data whose key already names, in
+    full, a directory the caller identifies as this process's own.
+
+`--legacy-cwd PATH` (repeatable) is how the caller supplies those exact
+historical paths — this script cannot infer them, since a rename or restructure
+is exactly what makes the nested path different from the new one. Each legacy
+cwd's `projects/<key>/` copies into the tree as its own directory, same as the
+canonical key, and its own `history.jsonl` lines are filtered in by exact match
+on the literal path. It is a straight copy, not a merge into the canonical
+key's directory: Claude Code's `/resume` is scoped to the container's *current*
+cwd, so a legacy directory won't show up there regardless — flattening it in
+would misrepresent old sessions as having happened at the new cwd for no
+resumability gain, while a separate directory keeps the provenance honest and
+still gets the data off the machine's one shared `~/.claude` and into the tree
+before the source is deleted.
+
+Every run also prints a **discovery report** (no flag needed — it costs one
+directory listing and one `history.jsonl` scan): any other `projects/` key that
+ends with this env's name but wasn't passed via `--legacy-cwd` (a candidate the
+caller may have forgotten), and any ancestor key of a key actually being
+migrated (a real `projects/` directory that is itself a dash-prefix of a
+migrated key — i.e., it holds sessions from a shared parent cwd). Ancestor data
+is reported, never copied: it is the commingled case above. The report exists
+so silence never gets mistaken for "nothing else was there."
+
 Full runbook: docs/testing/2026-07-31-migrate-env-to-state-tree.md
 """
 import argparse
@@ -43,6 +89,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 CONTAINER_HOME = '/home'  # container-side $HOME parent; cwd keys are built from it
@@ -81,6 +128,17 @@ def container_name_for(dir_path):
     return str(dir_path).replace(home, '').lstrip('/').replace('/', '-')
 
 
+def path_to_key(path):
+    """Claude Code's `projects/` directory-key mangling for an absolute cwd.
+
+    Ambiguous to reverse (a literal dash in a directory name is indistinguishable
+    from a mangled slash), which is exactly why ancestor/leaf detection below
+    only ever compares against keys that actually exist on disk, never tries to
+    decode one back into a hypothetical path.
+    """
+    return '-' + str(path).strip('/').replace('/', '-')
+
+
 def is_running(name):
     try:
         out = subprocess.run(
@@ -91,13 +149,80 @@ def is_running(name):
         return False
 
 
-def project_key(user, env_name):
-    """Claude Code's `projects/` directory name for this env's container cwd.
+def all_project_keys():
+    d = Path.home() / '.claude' / 'projects'
+    if not d.is_dir():
+        return []
+    return sorted(p.name for p in d.iterdir() if p.is_dir())
 
-    Stable across the migration: `workdir_name` does not change, so the container
-    cwd stays $HOME/<env> and Claude Code keeps using the same key.
+
+def history_project_paths():
+    """Map every `projects/` key seen in history.jsonl back to its literal cwd(s).
+
+    Built from real recorded data rather than guessed, since key mangling can't
+    be reversed reliably — this is how the discovery report can show an actual
+    path for an ancestor key instead of just the opaque dashed name.
     """
-    return f'-{CONTAINER_HOME.strip("/")}-{user}-{env_name}'
+    src = Path.home() / '.claude' / 'history.jsonl'
+    paths = defaultdict(set)
+    counts = defaultdict(int)
+    if not src.exists():
+        return paths, counts
+    for line in src.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            project = json.loads(line).get('project')
+        except ValueError:
+            continue
+        if not project:
+            continue
+        key = path_to_key(project)
+        paths[key].add(project)
+        counts[key] += 1
+    return paths, counts
+
+
+def discover(env_name, source_keys):
+    """Other keys worth the caller's attention: forgotten leaves, commingled ancestors."""
+    keys = all_project_keys()
+    source_set = set(source_keys)
+    suffix = '-' + env_name.replace('/', '-')
+    leaf_others = [k for k in keys if k not in source_set and k.endswith(suffix)]
+
+    ancestors = {}
+    for k in source_keys:
+        anc = [o for o in keys if o != k and k.startswith(o + '-')]
+        for o in anc:
+            ancestors.setdefault(o, set()).add(k)
+
+    return leaf_others, ancestors
+
+
+def print_discovery_report(env_name, source_keys):
+    leaf_others, ancestors = discover(env_name, source_keys)
+    paths, counts = history_project_paths()
+
+    if leaf_others:
+        print("  [?] other projects/ keys end with this env's name but were not")
+        print('      requested — pass --legacy-cwd <path> to include them:')
+        for k in leaf_others:
+            known = ', '.join(sorted(paths.get(k, ()))) or '(no history.jsonl lines — path unknown)'
+            print(f'      {k}   {known}')
+
+    if ancestors:
+        print('  [?] ancestor directories exist — sessions recorded at a shared')
+        print('      parent cwd, commingled across whatever else lived under it.')
+        print('      NOT migrated automatically; read them before deciding:')
+        for anc_key, children in sorted(ancestors.items()):
+            known = ', '.join(sorted(paths.get(anc_key, ()))) or '(path unknown)'
+            n = counts.get(anc_key, 0)
+            for_ = ', '.join(sorted(children))
+            print(f'      {anc_key}   {known}  ({n} history.jsonl lines, parent of {for_})')
+
+    if leaf_others or ancestors:
+        print()
 
 
 def plan(env_name, args):
@@ -119,17 +244,32 @@ def plan(env_name, args):
              f'copied\n      mid-session is torn.')
 
     user = args.user or container_user()
-    key = project_key(user, env_name)
-    src_projects = Path.home() / '.claude' / 'projects' / key
+    canonical_cwd = f'{CONTAINER_HOME}/{user}/{env_name}'
+
+    legacy_cwds = list(args.legacy_cwd or [])
+    cwds = [canonical_cwd] + legacy_cwds
+    pairs = [(c, path_to_key(c)) for c in cwds]
+
+    seen = set()
+    keys = []
+    for _, k in pairs:
+        if k not in seen:
+            seen.add(k)
+            keys.append(k)
+
     tree = Path.home() / '.local' / 'state' / 'dax' / 'tenants' / tenant / env_name
 
     print(f'\n  env        {env_name}  (tenant: {tenant})')
     print(f'  container  {container}  [stopped]')
-    print(f'  cwd key    {key}')
     print(f'  tree       {tree}')
+    for c, k in pairs:
+        tag = 'canonical' if c == canonical_cwd else 'legacy'
+        print(f'  {tag:9}  {c}  ({k})')
     print()
 
-    return config, project, tree, src_projects, key
+    print_discovery_report(env_name, keys)
+
+    return config, project, tree, cwds, keys
 
 
 def check_credential(tree, apply_it, clear):
@@ -152,49 +292,56 @@ def check_credential(tree, apply_it, clear):
         print('       would delete.')
 
 
-def copy_projects(src, tree, apply_it, force):
-    dst = tree / 'projects' / src.name
-    if not src.exists():
-        print(f'  [--] no transcripts at {src} — nothing to copy')
-        return
-    size = sum(f.stat().st_size for f in src.rglob('*') if f.is_file())
-    sessions = len(list(src.glob('*.jsonl')))
-    memory = (src / 'memory').is_dir()
-    print(f'  [->] {src.name}: {sessions} session(s), '
-          f'{size / 1e6:.1f}MB{", memory/" if memory else ""}')
-    print(f'       -> {dst}')
-    if dst.exists() and not force:
-        print('  [!!] destination already exists. Re-run with --force to overwrite,')
-        print('       or move it aside — merging two transcript sets is not safe.')
-        return
-    if not apply_it:
-        return
-    if dst.exists():
-        shutil.rmtree(dst)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dst, symlinks=True)
-    print('       copied.')
+def copy_projects(keys, tree, apply_it, force):
+    src_root = Path.home() / '.claude' / 'projects'
+    for key in keys:
+        src = src_root / key
+        dst = tree / 'projects' / key
+        if not src.exists():
+            print(f'  [--] no transcripts at {src} — nothing to copy')
+            continue
+        size = sum(f.stat().st_size for f in src.rglob('*') if f.is_file())
+        sessions = len(list(src.glob('*.jsonl')))
+        memory = (src / 'memory').is_dir()
+        print(f'  [->] {key}: {sessions} session(s), '
+              f'{size / 1e6:.1f}MB{", memory/" if memory else ""}')
+        print(f'       -> {dst}')
+        if dst.exists() and not force:
+            print('  [!!] destination already exists. Re-run with --force to overwrite,')
+            print('       or move it aside — merging two transcript sets is not safe.')
+            continue
+        if not apply_it:
+            continue
+        if dst.exists():
+            shutil.rmtree(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dst, symlinks=True)
+        print('       copied.')
 
 
-def filter_history(env_name, user, tree, apply_it):
+def filter_history(cwds, tree, apply_it):
     src = Path.home() / '.claude' / 'history.jsonl'
     dst = tree / 'history.jsonl'
     if not src.exists():
         print('  [--] no shared history.jsonl')
         return
-    env_cwd = f'{CONTAINER_HOME}/{user}/{env_name}'
+    cwd_set = set(cwds)
     kept, total = [], 0
+    per_cwd = defaultdict(int)
     for line in src.read_text().splitlines():
         if not line.strip():
             continue
         total += 1
         try:
-            if json.loads(line).get('project') == env_cwd:
-                kept.append(line)
+            project = json.loads(line).get('project')
         except ValueError:
             continue
-    print(f'  [->] history.jsonl: {len(kept)} of {total} lines are {env_cwd}')
-    print(f'       -> {dst}')
+        if project in cwd_set:
+            kept.append(line)
+            per_cwd[project] += 1
+    for c in cwds:
+        print(f'  [->] history.jsonl: {per_cwd.get(c, 0)} lines are {c}')
+    print(f'       {len(kept)} of {total} total -> {dst}')
     if dst.exists():
         print(f'  [!!] {dst} already exists and would be replaced.')
     if apply_it:
@@ -238,17 +385,26 @@ def main():
     ap.add_argument('--clear-credential', action='store_true',
                     help='delete a credentials file found in the tree')
     ap.add_argument('--user', help='container username (default: host username)')
+    ap.add_argument('--legacy-cwd', action='append', metavar='PATH',
+                    help='an additional historical absolute cwd this env used '
+                         'before it had its own container (repeatable) — e.g. a '
+                         'nested path from before a directory split. Its '
+                         'projects/ key and matching history.jsonl lines are '
+                         'copied alongside the canonical key, kept in its own '
+                         "directory rather than merged (Claude Code's /resume "
+                         'is scoped to the current cwd, so merging would not '
+                         'make it resumable anyway).')
     args = ap.parse_args()
 
-    config, project, tree, src_projects, key = plan(args.env, args)
+    config, project, tree, cwds, keys = plan(args.env, args)
     user = args.user or container_user()
 
     if not args.apply:
         print('  DRY RUN — nothing will be written. Re-run with --apply.\n')
 
-    copy_projects(src_projects, tree, args.apply, args.force)
+    copy_projects(keys, tree, args.apply, args.force)
     print()
-    filter_history(args.env, user, tree, args.apply)
+    filter_history(cwds, tree, args.apply)
     print()
     check_credential(tree, args.apply, args.clear_credential)
     print()
@@ -258,12 +414,13 @@ def main():
     print(f'    dax env set {args.env} features claude_tenant_state')
     print(f'    cd {project.get("dir", "<env dir>")} && dax -t run')
     print(f'  Then inside the container:')
-    print(f'    ls ~/.claude/projects/   # only {key}')
+    print(f'    ls ~/.claude/projects/   # {", ".join(keys)}')
     print(f'    ls ~/.claude.json        # must NOT exist')
     print(f'    claude                   # /resume lists the migrated sessions')
     print(f'\n  The source is left in place. Remove it only after a successful '
           f'session\n  and a container restart:')
-    print(f'    rm -rf ~/.claude/projects/{key}')
+    for key in keys:
+        print(f'    rm -rf ~/.claude/projects/{key}')
     return 0
 
 

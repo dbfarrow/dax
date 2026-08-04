@@ -25,6 +25,54 @@ what it does and why, and for the steps it leaves to you.
 
 ---
 
+## When the env predates its container: `--legacy-cwd`
+
+Everything above assumes the env has always run inside a dax container, so it
+has exactly one `projects/` key — the flat one `workdir_name` produces. That
+assumption breaks for a directory being migrated *out of* a larger host tree it
+used to be a plain subdirectory of (discernment's per-process repo split is the
+case that surfaced this, 2026-08-01, once the real host `~/.claude/projects/`
+was visible from inside a container via `mounts: ['~/.claude:host-claude']`).
+
+Checked against real data for the `self-employment-setup` process, which used to
+live at `~/work/processes/self-employment-setup`:
+
+| key | what it is | migrate? |
+| --- | --- | --- |
+| `-home-dfarrow-work-processes-self-employment-setup` | this process's own nested-path key — 1 session, 30MB, 21 `history.jsonl` lines | yes, via `--legacy-cwd` |
+| `-home-dfarrow-work-processes` | sessions recorded with cwd at the parent, before/without `cd`-ing into the process dir — 155 `history.jsonl` lines, shared across every process ever nested there | **no** — no reliable way to attribute one line to one process without reading it |
+| `-home-dfarrow-work` | same problem one level further up — 1858 `history.jsonl` lines | **no** |
+
+Pass every historical cwd explicitly — the tool cannot infer them, since a
+rename or restructure is exactly what makes the old path differ from the new
+one:
+
+```bash
+python3 tools/migrate_env_state.py self-employment-setup \
+  --legacy-cwd /home/dfarrow/work/processes/self-employment-setup
+```
+
+`--legacy-cwd` is repeatable, for a process that moved more than once. Each
+legacy cwd's `projects/<key>/` copies into the tree as **its own directory**,
+not merged into the canonical key's — Claude Code's `/resume` is scoped to the
+container's current cwd, so merging wouldn't make old sessions resumable
+anyway, while keeping them separate keeps provenance honest. Its
+`history.jsonl` lines are filtered in by exact match on the literal legacy path
+alongside the canonical one.
+
+Every run — with or without `--legacy-cwd` — prints a **discovery report**
+first: any other `projects/` key ending in this env's name that wasn't passed
+(a legacy cwd you forgot), and any ancestor key of one being migrated (a real
+`projects/` directory that is itself a dash-prefix of a migrated key, i.e. the
+commingled-parent case above), each with its real path and `history.jsonl` line
+count pulled from actual recorded data — never a guess, since the dash-mangled
+key can't be reversed reliably on its own. Ancestor lines are reported, never
+copied. Read them before deciding whether anything in there is worth hand-
+copying; the tool won't do it for you because it can't tell whose session was
+whose.
+
+---
+
 ## What is actually per-env, and how it separates
 
 Checked against the real shared directory rather than assumed. The good news is
