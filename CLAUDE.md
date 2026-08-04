@@ -821,17 +821,19 @@ the shared mount, which is the intended fallback.
   dotfiles/webpreview baked in as a baseline instead), every remaining feature
   is purely per-env opt-in, so there is nothing left to opt *out* of.
 
-- **`dax init` should prompt for `tenant`** at registration time — editing an
-  existing env is now covered by `dax env set`.
+- **~~`dax init` should prompt for `tenant`~~ / ~~`_run_init` matches projects
+  by exact `dir == cwd`~~ — both resolved 2026-08-04, same pass.** `_run_init`
+  now prompts for an optional tenant (blank leaves it unset, same as before)
+  and writes it via `run_env_set` after registering. It also calls
+  `find_enclosing_project` before falling through to registration, refusing
+  with the enclosing project's name/root instead of silently registering a
+  duplicate — the exact blind spot `find_enclosing_project`/Gate 0 already
+  closed for `cmd_run`. 4 new tests (`tests/test_dax_run_init.py`), following
+  `test_dax_creds_add_flow.py`'s scripted-`Answers` pattern rather than
+  mocking questionary directly.
 
 - **Retire `dax tenants` and `dax tenant classify`** — superseded by the merged
   `dax envs list`.
-
-- **`_run_init` matches projects by exact `dir == cwd`** (`dax_creds/init.py`)
-  — the same blind spot `find_enclosing_project` closed for `cmd_run`, so
-  `dax init` from inside a registered project's subdirectory still registers a
-  duplicate project. Worth fixing in the same pass as wiring `tenant` into
-  init.
 
 - **`claude` wrapper doesn't seed `oauthAccount`/`userID`** — cosmetic only
   (omitting it just costs a profile-fetch round trip and the org name in the

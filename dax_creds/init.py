@@ -302,6 +302,7 @@ def run_init(config, cwd):
 
 def _run_init(config, cwd):
     import questionary
+    from dax_creds.config import find_enclosing_project
 
     existing_project_name = next(
         (name for name, p in config.get('projects', {}).items()
@@ -315,9 +316,25 @@ def _run_init(config, cwd):
         if not _q_confirm('Update it?', default=False):
             print('Nothing changed.')
             return config
+    else:
+        # The same blind spot `find_enclosing_project`/Gate 0 closed for
+        # `dax run`: an exact-match lookup alone finds nothing for a
+        # subdirectory of an already-registered project and falls straight
+        # through to registering a duplicate rooted there.
+        enclosing = find_enclosing_project(config, cwd)
+        if enclosing is not None:
+            enclosing_name, enclosing_project = enclosing
+            enclosing_dir = Path(enclosing_project['dir']).expanduser()
+            print(f'  {cwd} is inside already-registered project "{enclosing_name}" '
+                  f'at {enclosing_dir}, not its root.')
+            print(f'  Run `dax init` from {enclosing_dir} instead.')
+            return config
 
     default_image = existing_project.get('image') or config.get('defaults', {}).get('image', 'dax-base')
     image = _prompt('Image', default=default_image)
+
+    tenant = _prompt('Tenant (optional grouping label for state-tree paths and '
+                     'credential names)', default=existing_project.get('tenant'))
 
     existing_creds = list(config.get('credentials', {}).keys())
     already_selected = set(existing_project.get('creds', []))
@@ -365,6 +382,8 @@ def _run_init(config, cwd):
     register_project(config, name=project_name, project_dir=cwd,
                      image=image, creds=selected_creds)
     save_config(config)
+    if tenant:
+        run_env_set(config, project_name, 'tenant', tenant)
     print(f'\nRegistered {project_name}. Run `dax run` to launch.')
     return config
 
