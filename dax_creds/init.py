@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dax_creds.config import (
     BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
-    credential_users, daemon_socket_path, derived_credentials, env_field_help,
+    credential_users, derived_credentials, env_field_help,
     resolve_credential_names, state_tree_path, state_trees,
     sync_claude_shared_files,
 )

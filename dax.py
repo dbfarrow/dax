@@ -515,14 +515,27 @@ def cmd_build(args):
     dax_print("[+] Commence to take over the world...")
 
 
-def _start_creds_daemon(credentials, socket_path):
+def _start_creds_daemon(credentials, port):
+    """TCP, not a bind-mounted Unix socket — Docker Desktop's Mac-VM file
+    sharing does not reliably forward a live macOS-native Unix socket's
+    connect/accept semantics into a container (regular-file bind mounts
+    mostly work; a socket crossing that same boundary is much shakier).
+    `dax creds login`'s daemon (`_start_login_daemon`) already hit this and
+    switched to `tcp:host.docker.internal:<port>`; found 2026-08 that
+    `cmd_run`'s persistent per-project daemon never got the same fix, so two
+    or more projects running concurrently would each start their own daemon
+    fine, but only the most recently started container's socket-forwarding
+    actually worked — every other one saw ECONNREFUSED from `dax-creds list`
+    despite its daemon process being alive and well on the host.
+    """
     import json
     cmd = [
         sys.executable, '-m', 'dax_creds.daemon',
-        '--socket', str(socket_path),
+        '--tcp-port', str(port),
         '--credentials', json.dumps(credentials),
     ]
-    log_path = socket_path.with_suffix('.log')
+    log_path = Path.home() / '.dax' / f'creds-{port}.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, 'a')
     dax_print("[+] starting credential daemon (log: {})".format(log_path))
     return subprocess.Popen(cmd, cwd=str(Path(__file__).parent),
@@ -551,16 +564,6 @@ def _find_free_port():
     with _sock.socket() as s:
         s.bind(('', 0))
         return s.getsockname()[1]
-
-
-def _wait_for_socket(path, timeout=5.0):
-    import time
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.exists():
-            return True
-        time.sleep(0.05)
-    return False
 
 
 def _wait_for_tcp(host, port, timeout=5.0):
@@ -618,7 +621,7 @@ def cmd_run(args):
     try:
         from dax_creds.config import (
             load_dax_config, find_named_project_by_dir, find_enclosing_project,
-            get_project_credentials, daemon_socket_path,
+            get_project_credentials,
         )
         from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
         dax_config = load_dax_config()
@@ -738,14 +741,11 @@ def cmd_run(args):
 
     try:
         if project_creds:
-            from dax_creds.config import daemon_socket_path
-            sock_path = daemon_socket_path(Path.cwd())
-            daemon_proc = _start_creds_daemon(project_creds, sock_path)
-            if _wait_for_socket(sock_path):
-                container_sock = '/run/dax-creds.sock'
-                cmd += ['-v', '{}:{}'.format(sock_path, container_sock)]
-                cmd += ['-v', '{}:/run/dax-state:ro'.format(sock_path.parent)]
-                cmd += ['-e', 'DAX_CREDS_SOCK={}'.format(container_sock)]
+            port = _find_free_port()
+            daemon_proc = _start_creds_daemon(project_creds, port)
+            if _wait_for_tcp('127.0.0.1', port):
+                cmd += ['--add-host=host.docker.internal:host-gateway']
+                cmd += ['-e', 'DAX_CREDS_SOCK=tcp:host.docker.internal:{}'.format(port)]
                 cmd += ['-e', 'DAX_CREDS_NAMES={}'.format(','.join(project_creds.keys()))]
                 seen_providers = set()
                 for cred_name, cred_def in project_creds.items():
@@ -755,7 +755,7 @@ def cmd_run(args):
                         seen_providers.add(provider)
                 dax_print("[-]   credentials: {}".format(list(project_creds.keys())))
             else:
-                dax_print("[!] credential daemon socket did not appear — skipping")
+                dax_print("[!] credential daemon did not start — skipping")
                 daemon_proc.terminate()
                 daemon_proc = None
     except Exception as e:

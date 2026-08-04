@@ -364,11 +364,6 @@ def get_project_credentials(config, project, project_name=None):
     return creds
 
 
-def daemon_socket_path(workdir):
-    digest = hashlib.sha256(str(workdir).encode()).hexdigest()[:12]
-    return Path.home() / '.dax' / f'creds-{digest}.sock'
-
-
 def dir_basename(path):
     """Final path component, robust to a trailing slash.
 
