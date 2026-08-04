@@ -5,6 +5,117 @@ dax is a Docker-based development environment manager. It reads `~/.dax.yaml`
 features (volume mounts, port mappings, etc.) assembled from named feature
 functions in `dax.py`.
 
+## Legacy Claude state: migrate the process now, recover history on demand
+
+**Settled 2026-08-02, closing out the `migrate_env_state.py` redesign thread.**
+**Still nothing committed** — this branch has been accumulating uncommitted
+work across several sessions (see `git status`). **505 tests passing** (up
+from 493): `tests/test_dax_migrate_env_state.py` is new (12 tests), plus the
+`tools/migrate_env_state.py` rewrite itself and a doc update. Full detail on
+everything else already built is in "In progress" below; this block covers
+just this session.
+
+**The decision:** don't build further auto-detection into
+`migrate_env_state.py` (no cwd-based env resolution, no auto-including
+discovered legacy keys). When a discernment process is split into its own repo
+and registered as its own env, migrate the process's *files* — the code,
+`context.md`/`inbox.md`, whatever `dax process new`/`new-process.sh` scaffold
+— right away, and **don't fret about pulling its old Claude session state
+along with it at the same time.** If, later, work resumes on that process and
+it's worth asking whether relevant history got left behind, the recovery path
+is: mount the real host `~/.claude` into that env (`dax env set <name> mounts
+'~/.claude:host-claude'`, the `host:container_name` syntax built for exactly
+this), restart, and have a live Claude session crawl `~/host-claude/projects/`
+and `history.jsonl` at that point. A live session can *read content* and use
+judgment about what's actually relevant to the process at hand — which is
+precisely what `migrate_env_state.py` cannot do and deliberately refuses to
+guess at (the ancestor/commingled-parent case below). That makes it strictly
+better than any heuristic bolted onto the script for the one case that
+actually needs a decision, and it defers the work to exactly when it's
+valuable instead of speculatively building it now for processes that may never
+need their old state resurrected. **Condition for this to keep working: don't
+delete `~/.claude/projects/<key>/` or `history.jsonl` entries on the host in
+the meantime** — they're the substrate this on-demand recovery depends on;
+that discipline was already the existing runbook caution, just now load-
+bearing for a second reason.
+
+`migrate_env_state.py` itself stays exactly as built below — explicit
+`--legacy-cwd`, discovery report, no auto-inclusion — since it's still the
+right tool for the unambiguous case (an env that already knows its own
+handful of historical cwds and just wants them copied in mechanically).
+
+**The mounts reconfig from the prior pause landed and worked**:
+`~/host-claude/projects/` is visible and confirmed to be the real host
+`~/.claude`, not a guess.
+
+**What the real data showed** — checked before designing anything, per the
+prior session's own instruction: a discernment sub-process's history is
+genuinely strewn across more than one `projects/` key, and not just by rename.
+For `self-employment-setup` (historically `~/work/processes/self-employment-setup`,
+before dax existed):
+
+- its own nested-path key, `-home-dfarrow-work-processes-self-employment-setup`
+  — 1 session, 30MB, 21 `history.jsonl` lines — is unambiguously this
+  process's.
+- `-home-dfarrow-work-processes` (155 lines) and `-home-dfarrow-work` (1858
+  lines) are **ancestor** keys — sessions recorded with cwd at a shared parent,
+  before/without `cd`-ing into the specific process directory. These commingle
+  every process ever nested under them and cannot be attributed to one process
+  by directory alone; reading content would be required, which the tool
+  deliberately does not attempt.
+
+**`tools/migrate_env_state.py` rewritten accordingly** (not yet run for real —
+this session's testing was read-only dry runs against the mounted
+`~/host-claude` via a scratch `HOME`, never against this container's own live
+`~/.claude`):
+- `--legacy-cwd PATH` (repeatable) supplies historical absolute cwds the tool
+  cannot infer on its own (a rename/restructure is exactly what makes the old
+  path differ from the new one). Each legacy cwd's `projects/<key>/` copies
+  into the tree as **its own directory**, never merged into the canonical
+  key's — `/resume` is scoped to the container's current cwd, so merging
+  wouldn't make old sessions resumable anyway, while separate directories keep
+  provenance honest.
+- Every run — with or without `--legacy-cwd` — now prints a **discovery
+  report** first: other `projects/` keys ending in the env's name that weren't
+  passed (a forgotten legacy cwd), and ancestor keys of anything being
+  migrated (the commingled-parent case above), each with a real path and
+  `history.jsonl` line count pulled from actual recorded data (`path_to_key`
+  can't be reversed reliably on its own — a literal dash in a directory name
+  is indistinguishable from a mangled slash — so paths are cross-referenced
+  from `history.jsonl`'s own `project` field instead of guessed). Ancestor data
+  is reported, never copied.
+- Verified against the real `~/host-claude` data via a scratch `~/.dax.yaml` +
+  `HOME` override (dry run only, no writes): the discovery report's line counts
+  (57 / 1858 / 155) matched the manual `history.jsonl` scan exactly, both with
+  and without `--legacy-cwd` supplied.
+- `docs/testing/2026-07-31-migrate-env-to-state-tree.md` gained a
+  `--legacy-cwd` section with this same worked example.
+
+**Deliberately not done, and not blocking anything — per the decision above.**
+This session only dry-run-verified the tool against real data; it hasn't been
+run with `--apply`, and `self-employment-setup` / `a-priest-and-an-imam` /
+`augmentcode` aren't yet registered as their own dax envs (the real
+`~/.dax.yaml` shown earlier in this project's history only has `dax`,
+`discernment`, `fabric`, `ys-augmentcode`, `a-priest-and-an-imam`,
+`symlink-disclosure`). Registering each as its own env (via `dax process new`)
+migrates the process itself; running `migrate_env_state.py --apply
+--legacy-cwd ...` against it — or skipping straight to the on-demand mount-
+and-crawl recovery — is a later, optional step whenever that process is
+actually revisited, not a prerequisite to registering it.
+
+**Separate open thread, not yet started:** `new-process.sh`'s scaffolding is
+too destructive for migrating a directory that already has its own
+`context.md`/`inbox.md` (refuses on `context.md`, but silently overwrites
+`CLAUDE.md`/`inbox.md` with no check at all if `context.md` happens to be
+absent). Sketched a non-destructive redesign in conversation (merge
+frontmatter into `context.md` rather than refuse; treat `inbox.md`/`CLAUDE.md`
+like `.gitignore` — write only if absent) but **this is a change to
+`new-process.sh` itself, which lives in the virgil/discernment repo, not
+dax** — `docs/design/scripts/new-process.sh` here is only an untracked
+reference copy. Offered to draft the patch against that local copy for the
+user to port over; not done because the user hadn't confirmed they wanted
+that when the mounts question came up instead.
+
 ## Completed
 
 - **Auto port assignment for webpreview**: `_find_preview_port(cwd)` hashes the
@@ -248,6 +359,118 @@ the shared mount, which is the intended fallback.
   re-test of the real fabric/discernment containers — which needs an image
   rebuild (`dax_creds` is a frozen, non-editable install) plus a fresh manual
   pass.
+
+  **Discernment (renaming to "virgil") authored its own dax contract,
+  2026-08-01: `docs/design/VALIDATION.md`** — dropped in-repo, untracked
+  (`docs/design/scripts/` is gitignored and holds `new-process.sh`, `wire.sh`,
+  `process-types.tsv`; never check those in). The user manually validated the
+  substrate's own parts (mounts, wiring, the settings fragment, the
+  PreToolUse guard, the feedback path) against a real process directory
+  before any of this was built — teardown (`destroy-process`) is deferred to
+  a later phase. **Parts 1–5 of the contract are now built and unit-tested**
+  (469 tests, up from 435), superseding stage 2 of the `feature_mounts` note
+  above and the matching backlog item:
+
+  - **`feature_substrate`** (`dax.py`) — a new single-path project field
+    `substrate` (distinct from the generic `mounts:` list: dax needs to know
+    specifically which mount holds `shared/wire.sh`), mounted rw as a sibling
+    under `$HOME` the same way `feature_mounts` does, plus
+    `-e SUBSTRATE_ROOT=<container-path>` — the value both the substrate's own
+    hooks and the `claude` wrapper's gate read. `cmd_run` promotes
+    `project['substrate']` into `config['substrate']` right alongside the
+    `mounts` promotion, learning from the mounts wiring bug rather than
+    repeating it. `dax env show` displays it with the same "feature not
+    active" warning `mounts` gets.
+  - **`dax_creds/wrappers/entrypoint.sh`** (new) — runs `wire.sh --quiet`
+    once per **container boot** when `SUBSTRATE_ROOT` is set, wired in via a
+    new `Dockerfile.tmpl` `ENTRYPOINT` (the image had none before). This is
+    load-bearing, not stylistic: VALIDATION.md's Part 4 failure-mode tests
+    restart a *Claude session* without restarting the *container* specifically
+    to prove the PreToolUse guard fires on its own — if wire.sh's self-heal
+    ran on every `claude` launch instead, a bare session restart would
+    silently repair the very breakage the test exists to catch. Never exits
+    on failure, so the container shell still starts even when substrate
+    wiring is broken (repair has to be possible from inside it). A complete
+    no-op for every env not opted into `substrate` — needs an image rebuild
+    (`dax build`) to take effect, same as the wrapper change below.
+  - **`dax_creds/wrappers/claude`** gate + settings delivery — right before
+    the existing final exec, if `SUBSTRATE_ROOT` is set, runs
+    `wire.sh --check` **only** (never a bare `wire.sh` — see above) and
+    branches: `0` → prepend `--settings .../substrate-settings.json` (unless
+    the caller already passed one) and proceed; `127` (the script itself is
+    gone — the mount is down) and `1` (mounted but wired wrong) each refuse
+    with a distinct message, matching VALIDATION.md's exit-code table.
+  - **`dax process new <name>`** (`dax.py`, alongside `_prompt_tenant`/
+    `_known_tenant_names` — reused directly, which is why this lives in
+    `dax.py` rather than a new `dax_creds` module and avoid a circular
+    import) — every field (`--dir`/`--tenant`/`--substrate`/`--title`/
+    `--type`/`--git`|`--no-git`) is either given on the command line or
+    interactively prompted, wizard-style like `dax init`; dax never lets
+    `new-process.sh`'s own basic prompting fire, since everything is
+    fully resolved before invoking it. `--type` is validated (or, if
+    omitted, offered as a picklist) against the substrate's own
+    `process-types.tsv` — never hardcoded. Runs `new-process.sh`
+    **host-side**, before any container exists, a deliberate flagged
+    deviation from the script's own "runs inside the container" comment:
+    mechanically safe, since the script never touches `$HOME` or any
+    container-only state (confirmed by reading it), and dax has no
+    docker-exec-into-running-container mechanism worth building for one
+    call. Always registers `creds: [claude]` and, unconditionally,
+    `features: [substrate, claude_tenant_state]` — every substrate-backed
+    process needs both, no conditionality.
+
+  **Not yet done: the manual verification pass** (image rebuild + a real
+  `dax process new` / `dax run` / `claude` session, per the plan's
+  verification section) — this session had no Docker access to run it.
+  Confirmed instead via a scripted dry run against the real dropped scripts
+  (fake substrate + fake `~/.dax.yaml`, `dax process new` end-to-end, then
+  `dax -t run` to confirm the assembled `docker run` command carries both
+  `--volume=.../virgil:/home/dfarrow/virgil` + `SUBSTRATE_ROOT` and the
+  `claude_tenant_state` mount) — real, but short of an actual container.
+
+  **`dax process new` hardened, same day: absolute-path guardrails, a
+  full-path confirmation summary, and `--dry-run`.** Found live-testing the
+  first cut: `--dir`/`--substrate` were never resolved to absolute paths (a
+  relative or unresolved value stored verbatim in `~/.dax.yaml`'s `dir:`
+  would silently break every cwd-based env lookup later), there was no check
+  against nesting inside or colliding with an already-registered project
+  (the same mistake `find_enclosing_project`/Gate 0 catches for `dax run`,
+  just not here), and no check that the directory was even under `$HOME`
+  (where `dax run` would refuse it anyway, just much later). `_run_process_new`
+  now `.resolve()`s both paths immediately, and a new `_check_process_dir`
+  refuses all three before anything is created. Every run also prints a
+  full-absolute-paths summary — directory, substrate, tenant, title,
+  type/skill, git decision, image, creds, features, and the exact Claude
+  state-tree path — before doing anything, gated on typing `Y` (or
+  `--dry-run`, which stops right after the summary). 15 new tests, suite at
+  **478**.
+
+  **`dax process destroy` built, same day — the deferred item 6 of the
+  contract, generalized.** Tears down a registered process's directory,
+  Claude state tree (plus its sibling `sync_claude_shared_files` manifest,
+  which lives *beside* the tree and would otherwise survive as orphaned
+  cruft), any per-env **derived** credential (never an explicitly-named/
+  shared one, just because one env's `creds:` listed it), and the
+  `~/.dax.yaml` entry itself. Deliberately not restricted to
+  substrate-tagged envs — the same cleanup applies to any tenant-isolated
+  project, and narrowing it would only get in the way of burning down other
+  test cruft. `dax process destroy [name ...] [--dry-run]`: named envs, or an
+  interactive `_q_checkbox` picker (same widget `dax init`'s credential
+  selection already uses) over every registered env when none are given,
+  nothing pre-checked. Every candidate is checked *before* any deletion
+  begins — refuses if its container is currently running
+  (`docker stop <name>` first), warns (doesn't block) on uncommitted git
+  changes. The confirmation is a typed literal `DESTROY`, not a Y/n — a
+  deliberately higher bar than creation's, since destroying isn't
+  recoverable the way creating is. Filesystem deletion happens before the
+  `~/.dax.yaml` edit, so a mid-batch crash leaves a stale-but-visible
+  registry entry (`dax envs list`'s existing `!` "directory missing" marker)
+  rather than silent loss. 13 new tests, suite at **491**. Verified live with
+  a scripted fixture (fake project + fake state tree, no real Keychain): dry
+  run touched nothing, then a real run with `DESTROY` removed the directory
+  and state tree and cleared the registry entry, degrading gracefully (a
+  warning, not a crash) on the missing-keyring case this sandbox always
+  hits.
 
 - **Manual credential test sequence** —
   `docs/testing/2026-07-30-cred-management-test-sequence.md`. Follow it after
@@ -526,16 +749,37 @@ the shared mount, which is the intended fallback.
   where a host-authored command is invisible in containers, and are *strictly
   less* container write access than today's wholesale rw `~/.claude`.
 
+  **`feature_mounts` gained an explicit container-name syntax, 2026-08-01:**
+  `host:container_name`, defaulting to `dir_basename(host)` as before when no
+  colon is present — a fully backward-compatible extension, not a format
+  change. Immediate driver: `tools/migrate_env_state.py` needs rethinking
+  (process state can be strewn across more than one `~/.claude/projects/<key>`
+  directory — cwd variations, renames — not just the single top-level key it
+  currently assumes), and designing that properly needs the real host
+  `~/.claude/projects/` visible from inside a container to look at. Mounting
+  the host's actual `~/.claude` a second time under its own basename would
+  collide with whatever `claude_tenant_state` already owns at `~/.claude`
+  itself — the explicit name (e.g. `~/.claude:host-claude`) is what avoids
+  that. 2 new tests, suite at **493**. **Not yet applied**: this needs
+  `dax env set dax mounts '~/.claude:host-claude'` (plus `mounts` added to
+  `dax`'s features) and a container restart to take effect — and since this
+  session runs inside that very container, restarting it will interrupt the
+  session, so it's a deliberate step for the user to take when ready, not
+  something to script automatically.
+
 ## Backlog
 
-- **Discernment process migration, stage 2: a helper script for the common
-  process-init sequence.** Stage 1 (`feature_mounts`, above) is the mechanism;
-  every migrated process still needs `dax init`/`dax env set ... mounts
-  ~/discernment`/`dax env set ... features claude,mounts` by hand, and that
-  sequence is identical across processes. Worth scripting once a few processes
-  have gone through it manually. Also not yet built: mounting discernment's
-  `skills/` a second time at `~/.claude/skills/` (original decision D scope) —
-  `feature_mounts` only covers the top-level sidecar mount so far.
+- **~~Discernment process migration, stage 2: a helper script for the common
+  process-init sequence~~ — superseded 2026-08-01 by `dax process new` and
+  the rest of the virgil substrate contract** (see "In progress" above).
+  `dax process new` is that helper script: it wizards through `--dir`/
+  `--tenant`/`--substrate`/`--title`/`--type`/`--git`, scaffolds via
+  `new-process.sh`, and registers the env with `features: [substrate,
+  claude_tenant_state]` unconditionally, in one command. Mounting the
+  substrate's `skills/` a second time at `~/.claude/skills/` is handled
+  differently than originally scoped here (decision D) — `wire.sh` itself
+  symlinks each skill directory into the state tree at container boot, not a
+  second dax-level mount.
 
 - **Per-env features are additive only — no way to opt *out*.** Features
   accumulate from four sources (global `features:`, the env entry, a `.dax.yaml`
