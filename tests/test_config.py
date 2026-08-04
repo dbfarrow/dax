@@ -20,7 +20,6 @@ def test_load_config_reads_home_defaults(tmp_path, monkeypatch):
     defaults = {
         'image': 'test/dax:latest',
         'features': ['workdir'],
-        'workdir': {'container': '/home/test/work'},
     }
     _write_yaml(home / '.dax.yaml', defaults)
     monkeypatch.setenv('HOME', str(home))
@@ -41,7 +40,6 @@ def test_load_config_merges_local_config(tmp_path, monkeypatch):
     defaults = {
         'image': 'test/dax:latest',
         'features': ['workdir'],
-        'workdir': {'container': '/home/test/work'},
     }
     local = {
         'features': ['aws'],
@@ -71,6 +69,40 @@ def test_load_config_sets_envname(tmp_path, monkeypatch):
     config = load_config()
 
     assert config['envname'] == 'foo-bar'
+
+
+def test_load_config_sets_workdir_name(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    workdir = tmp_path / 'home' / 'foo' / 'bar'
+    workdir.mkdir(parents=True)
+
+    _write_yaml(home / '.dax.yaml', {'image': 'x', 'features': []})
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.chdir(workdir)
+
+    config = load_config()
+
+    # envname is the full path relative to $HOME (used for --name); workdir_name
+    # is just the final component (used for the mount destination) — they
+    # diverge whenever cwd is more than one level deep.
+    assert config['envname'] == 'foo-bar'
+    assert config['workdir_name'] == 'bar'
+
+
+def test_load_config_workdir_name_handles_dotted_and_spaced_dirs(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    home.mkdir()
+    workdir = tmp_path / 'home' / 'my.project (copy)'
+    workdir.mkdir(parents=True)
+
+    _write_yaml(home / '.dax.yaml', {'image': 'x', 'features': []})
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.chdir(workdir)
+
+    config = load_config()
+
+    assert config['workdir_name'] == 'my.project (copy)'
 
 
 def test_load_config_exits_if_outside_home(tmp_path, monkeypatch):

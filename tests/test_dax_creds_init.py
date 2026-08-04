@@ -66,6 +66,38 @@ def test_creds_remove_rejects_unknown_credential():
         run_creds_remove(config, 'no-such-cred')
 
 
+def test_creds_remove_also_drops_the_config_entry(tmp_path, monkeypatch):
+    """Clearing only Keychain left the definition behind, so a fat-fingered
+    name could never actually be removed."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    kr = FakeKeyring({('dax-creds', 'claud-fre'): 'blob'})
+    config = {'credentials': {'claud-fre': {'provider': 'claude'},
+                              'claude-fre': {'provider': 'claude'}},
+              'projects': {}}
+
+    run_creds_remove(config, 'claud-fre', keyring=kr)
+
+    assert 'claud-fre' not in config['credentials']
+    assert 'claude-fre' in config['credentials']
+    assert 'claud-fre' not in (tmp_path / '.dax.yaml').read_text()
+
+
+def test_creds_remove_refuses_when_a_project_still_references_it(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    kr = FakeKeyring({('dax-creds', 'claude-fre'): 'blob'})
+    config = {'credentials': {'claude-fre': {'provider': 'claude'}},
+              'projects': {'fabric': {'creds': ['claude-fre']},
+                           'dax': {'creds': ['claude-fre']}}}
+
+    with pytest.raises(ValueError, match='dax, fabric'):
+        run_creds_remove(config, 'claude-fre', keyring=kr)
+
+    # Refusal must leave both stores untouched, not half-remove it.
+    assert 'claude-fre' in config['credentials']
+    assert kr.get_password('dax-creds', 'claude-fre') == 'blob'
+    assert not (tmp_path / '.dax.yaml').exists()
+
+
 def test_creds_update_rejects_unknown_credential():
     config = {'credentials': {}}
     with pytest.raises(KeyError, match='no-such-cred'):
@@ -216,6 +248,89 @@ def test_setup_claude_skips_when_already_in_keychain(tmp_path, monkeypatch, caps
 
     out = capsys.readouterr().out
     assert 'already in Keychain' in out
+
+
+def test_creds_remove_can_clear_a_derived_credential(tmp_path, monkeypatch, capsys):
+    """A derived credential has no config entry, so `remove` reported it as
+    unknown and there was no way to clear a bad one."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    kr = FakeKeyring({('dax-creds', 'claude-personal-fabric'): 'shared-grant'})
+    config = {'credentials': {},
+              'projects': {'fabric': {'tenant': 'personal', 'creds': ['claude']}}}
+
+    run_creds_remove(config, 'claude-personal-fabric', keyring=kr)
+
+    assert kr.get_password('dax-creds', 'claude-personal-fabric') is None
+    out = capsys.readouterr().out
+    assert 'derived credential' in out
+    assert 'fabric will be offered a fresh login' in out
+
+
+def test_creds_remove_of_a_derived_credential_writes_no_config(tmp_path, monkeypatch):
+    """Nothing to delete from ~/.dax.yaml, so it must not be rewritten."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    kr = FakeKeyring({('dax-creds', 'claude-personal-fabric'): 'shared-grant'})
+    config = {'credentials': {},
+              'projects': {'fabric': {'tenant': 'personal', 'creds': ['claude']}}}
+
+    run_creds_remove(config, 'claude-personal-fabric', keyring=kr)
+
+    assert not (tmp_path / '.dax.yaml').exists()
+
+
+def test_setup_claude_replace_rewrites_the_keychain_secret(tmp_path, monkeypatch):
+    """Confirming "Overwrite it?" used to rewrite only the YAML metadata, so a
+    rotated credential could not be re-imported without `dax creds remove`."""
+    import json
+    monkeypatch.setenv('HOME', str(tmp_path))
+    rotated = {'claudeAiOauth': {'accessToken': 'sk-ant-oat01-new',
+                                 'refreshToken': 'sk-ant-ort01-new'}}
+    claude_dir = tmp_path / '.claude'
+    claude_dir.mkdir()
+    (claude_dir / '.credentials.json').write_text(json.dumps(rotated))
+
+    kr = FakeKeyring({('dax-creds', 'claude-work'): 'stale-token'})
+    import dax_creds.providers.claude as _cm
+    monkeypatch.setattr(_cm, '_keyring', kr)
+
+    _setup_claude_credential('claude-work', {'provider': 'claude'}, replace=True)
+
+    assert json.loads(kr.get_password('dax-creds', 'claude-work')) == rotated
+
+
+def test_setup_claude_replace_reports_when_nothing_replaced_it(tmp_path, monkeypatch, capsys):
+    """The user asked for a replacement and did not get one — say so, rather
+    than leaving them believing the old secret is gone."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    kr = FakeKeyring({('dax-creds', 'claude-work'): 'stale-token'})
+    import dax_creds.providers.claude as _cm
+    monkeypatch.setattr(_cm, '_keyring', kr)
+
+    _setup_claude_credential('claude-work', {'provider': 'claude'}, replace=True)
+
+    out = capsys.readouterr().out
+    assert 'left in place' in out
+    assert 'dax creds remove claude-work' in out
+    assert kr.get_password('dax-creds', 'claude-work') == 'stale-token'
+
+
+def test_setup_claude_without_replace_still_skips(tmp_path, monkeypatch, capsys):
+    """Ordinary setup must stay a no-op when the secret is already there."""
+    import json
+    monkeypatch.setenv('HOME', str(tmp_path))
+    claude_dir = tmp_path / '.claude'
+    claude_dir.mkdir()
+    (claude_dir / '.credentials.json').write_text(json.dumps(
+        {'claudeAiOauth': {'refreshToken': 'sk-ant-ort01-ondisk'}}))
+
+    kr = FakeKeyring({('dax-creds', 'claude-work'): 'existing-token'})
+    import dax_creds.providers.claude as _cm
+    monkeypatch.setattr(_cm, '_keyring', kr)
+
+    _setup_claude_credential('claude-work', {'provider': 'claude'})
+
+    assert kr.get_password('dax-creds', 'claude-work') == 'existing-token'
+    assert 'already in Keychain' in capsys.readouterr().out
 
 
 def test_save_config_writes_yaml(tmp_path, monkeypatch):

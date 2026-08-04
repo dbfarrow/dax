@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -49,9 +50,67 @@ def is_oauth_envelope(value):
     return isinstance(oauth, dict) and bool(oauth.get('refreshToken'))
 
 
+def grant_id(value):
+    """A stable identifier for the OAuth grant a credentials blob belongs to.
+
+    The blob carries no grant ID, so the refresh token stands in for one: two
+    blobs holding the same refresh token are the same grant. Hashed rather than
+    compared directly so callers can log and report it without handling the
+    secret. None when the value isn't a refreshable envelope.
+    """
+    if not is_oauth_envelope(value):
+        return None
+    token = json.loads(value)['claudeAiOauth']['refreshToken']
+    return hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
+def grant_collision_message(credential_name, other_name):
+    """Why an import was refused, as lines a caller prefixes in its own style.
+
+    Shared so `dax creds login` and `dax creds add` explain it identically — the
+    two paths reached this failure by different routes and used to disagree about
+    everything else.
+    """
+    return [
+        f"refusing to import: this token is the same OAuth grant as "
+        f"'{other_name}'.",
+        f"Two names on one grant share a refresh-token chain, so a rotation on "
+        f"either invalidates both — and nothing looks wrong until it does.",
+        f"Run `dax creds login {credential_name}` and complete the browser flow "
+        f"to mint an independent grant.",
+    ]
+
+
 class ClaudeProvider:
     def __init__(self, keyring=None):
         self._keyring = keyring or _keyring
+
+    def grant_collision(self, credential_name, token, candidate_names):
+        """The already-stored credential `token` would share a grant with, if any.
+
+        Per-env credentials only isolate anything when each one is its own OAuth
+        grant: independent grants have independent refresh-token chains, so a
+        rotation in one project cannot invalidate another's. Two names backed by
+        one grant authenticate perfectly and look correct — and a rotation on
+        either kills both. That failure has happened for real (2026-07-30), which
+        is why this is enforced at the moment of storing rather than left to the
+        manual check.
+
+        `credential_name` is skipped, so re-importing a credential's own token
+        under its own name is not a collision — that is a no-op, not sharing.
+        Returns None when the grant cannot be determined, or when there is no
+        Keychain to compare against.
+        """
+        gid = grant_id(token)
+        if gid is None or self._keyring is None:
+            return None
+        for name in sorted(candidate_names):
+            if name == credential_name:
+                continue
+            stored = self._keyring.get_password(_KEYCHAIN_SERVICE, name)
+            if stored and grant_id(stored) == gid:
+                return name
+        return None
 
     def _require_keyring(self):
         if self._keyring is None:

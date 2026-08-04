@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 import yaml
 
+from dax_creds.config import CLAUDE_SHARED_FILES, dir_basename, sync_claude_shared_files
+
 
 def dax_print(msg):
     msg = msg.replace("[+]", '\033[92m' + "[+]" + '\033[0m')
@@ -74,6 +76,9 @@ def load_config():
 
     defaults['envname'] = cwd.replace(home, '').lstrip('/').replace('/', '-')
 
+    from dax_creds.config import dir_basename
+    defaults['workdir_name'] = dir_basename(cwd)
+
     local_features = local.pop('features', [])
     defaults.update(local)
     defaults['features'].extend(local_features)
@@ -103,7 +108,7 @@ def _add_volume(config, feature_key):
 
 
 def feature_workdir(config):
-    container = os.path.join(_container_home(config), config['workdir']['container'])
+    container = os.path.join(_container_home(config), config['workdir_name'])
     return ['--volume={}:{}'.format(config['cwd'], container)]
 
 
@@ -118,6 +123,120 @@ def feature_aws(config):
 
 def feature_claude(config):
     return _add_volume(config, 'claudedir')
+
+
+# Mounted from the host's own ~/.claude into every state tree, nested at their
+# usual CLAUDE_CONFIG_DIR-relative paths (decision B2, which replaced decision
+# 11's four-directory `shared/` tree and its seeding copy).
+#
+# `commands` is the real user state — 11 commands in active use, and lost per
+# project without this. `plugins` earns its place weakly: nothing is installed
+# there, only the marketplace catalog Claude Code auto-installs and refreshes
+# itself, so this avoids N redundant multi-megabyte clones rather than preserving
+# anything.
+#
+# `skills` and `cache` were dropped. Skills arrive from the discernment sidecar
+# (decision D), so a copy here would go stale against the repo. Cache is derived,
+# generic, cheap to refetch, and the only one of the four where fetched content
+# can turn account-specific.
+_CLAUDE_HOST_SHARED_DIRS = ('commands', 'plugins')
+
+# User-level *files* that a tree mount would otherwise replace, taking your global
+# instructions and settings with it. Found 2026-07-31, after `fabric` had already
+# been running without them: no error, just absent — which is the worst shape a
+# loss can take.
+#
+# Attempted fix, same day: mount these read-only, nested inside the tree mount,
+# the same way `_CLAUDE_HOST_SHARED_DIRS` nests `commands`/`plugins`. Abandoned
+# within hours — unlike the directories, a single-*file* bind mount nested inside
+# the tree mount did not deliver the host's content at all: the container saw an
+# empty file, not the host's real `CLAUDE.md`. (Separately, a writable version of
+# this would have hit the write-temp-plus-rename failure described in the design
+# doc's Concurrency section; moot, since the read side never worked.)
+#
+# Replaced with a plain copy at `dax run` time — see
+# `dax_creds.config.sync_claude_shared_files`. `_CLAUDE_HOST_SHARED_FILES` is
+# `dax_creds.config.CLAUDE_SHARED_FILES`, imported at the top of this file;
+# kept under this name here for the existing tests that import it from `dax`.
+_CLAUDE_HOST_SHARED_FILES = CLAUDE_SHARED_FILES
+
+
+def feature_claude_tenant_state(config):
+    """Decision B: this env's state tree mounts at `~/.claude` itself.
+
+    The opt-in replacement for `feature_claude`'s wholesale `~/.claude` mount —
+    the two are mutually exclusive, since both target the same destination, and
+    `cmd_run` refuses rather than letting Docker fail on a duplicate mount point.
+
+    `CLAUDE_CONFIG_DIR` is a **constant**, not a selector: no cwd resolution, no
+    per-session computation. It is set only because it is what relocates
+    `.claude.json` *into* the tree. Unset, Claude Code writes `~/.claude.json` — a
+    sibling of `~/.claude`, so outside the mount, container-local, and discarded
+    on teardown, taking per-project trust and the `projects{}` block with it. The
+    symptom is the first-run wizard reappearing, not an error.
+
+    Deliberately does not set `DAX_TENANT_STATE`. That was Gate B's master switch,
+    telling the wrapper to resolve a tenant from cwd and compute the path itself.
+    The path is now handed down, so a wrapper that still contains Gate B (any
+    image built before this change) simply skips it and honours what is set here —
+    which is what makes this testable without an image rebuild.
+
+    Tenant comes from the env's `~/.dax.yaml` entry (decision A: a declared
+    grouping label), not a `.dax-tenant` file. Without one there is no path to
+    mount, and pooling into a default is the isolation failure this design exists
+    to prevent, so it refuses.
+
+    Host directories may not exist yet for a brand-new env. Verified 2026-07-27:
+    Docker auto-creates missing bind-mount host paths owned by the real host user
+    rather than root, so the container can write into them immediately.
+    """
+    project_name = config['workdir_name']
+    tenant = config.get('tenant')
+    if not tenant:
+        dax_print('[!] claude_tenant_state needs a tenant for {}, and none is '
+                  'declared.'.format(project_name))
+        dax_print('    The state tree lives at '
+                  '~/.local/state/dax/tenants/<tenant>/{}/, so there is nowhere'.format(
+                      project_name))
+        dax_print('    to mount without one. Set it with:')
+        dax_print('      dax env set {} tenant <name>'.format(project_name))
+        sys.exit(1)
+
+    container_home = _container_home(config)
+    cfg_dir = os.path.join(container_home, '.claude')
+    host_tree = os.path.expanduser(
+        os.path.join('~/.local/state/dax/tenants', tenant, project_name))
+
+    opts = [
+        '-e', 'CLAUDE_CONFIG_DIR={}'.format(cfg_dir),
+        '--volume={}:{}'.format(host_tree, cfg_dir),
+    ]
+
+    # Decision B2: mounted straight from the host's own ~/.claude rather than
+    # copied into a shared/ tree, so there is one source of truth and no seeding
+    # step. Nested inside the tree mount above — Docker orders mounts by
+    # destination depth, so the deeper paths land after it.
+    #
+    # Skipped when absent rather than letting Docker create them: a host with no
+    # commands of its own should not acquire an empty ~/.claude/commands as a side
+    # effect of running a container.
+    for shared_dir in _CLAUDE_HOST_SHARED_DIRS:
+        host_shared = os.path.expanduser(os.path.join('~/.claude', shared_dir))
+        if not os.path.isdir(host_shared):
+            continue
+        opts.append('--volume={}:{}'.format(
+            host_shared, os.path.join(cfg_dir, shared_dir)))
+
+    # Copied in rather than mounted (see the comment on _CLAUDE_HOST_SHARED_FILES
+    # above) — a plain file write into the tree, picked up by the volume mount
+    # already assembled for `host_tree` further up.
+    for drifted in sync_claude_shared_files(tenant, project_name):
+        dax_print('[!] {}: {} in state tree differs from both host and '
+                  'last-synced copy — leaving it alone.'.format(project_name, drifted))
+        dax_print('    Run `dax env accept-shared-files {}` to adopt the host '
+                  'version, or inspect the diff yourself.'.format(project_name))
+
+    return opts
 
 
 def feature_auggie(config):
@@ -184,8 +303,7 @@ def feature_webpreview(config):
     port = config.get('webpreview', {}).get('port') or _find_preview_port(config['cwd'])
     shell = os.environ.get('SHELL', '/bin/zsh')
     container_home = _container_home(config)
-    work_subdir = config.get('workdir', {}).get('container', 'work')
-    preview_dir = os.path.join(container_home, work_subdir)
+    preview_dir = os.path.join(container_home, config['workdir_name'])
     dax_print("[-]   webpreview port: {}".format(port))
     config['_shell_cmd'] = 'DAX_PREVIEW_PORT={} DAX_PREVIEW_DIR={} dax-preview & exec {}'.format(
         port, preview_dir, shell)
@@ -232,6 +350,69 @@ def feature_ports(config):
     return opts
 
 
+def feature_mounts(config):
+    """Extra host directories mounted read-write as siblings under $HOME, on
+    top of the project's own workdir mount — e.g. a migrated discernment
+    process's own repo plus the discernment sidecar repo alongside it.
+
+    Deliberately siblings under $HOME rather than nested inside another mount:
+    nesting is exactly the class of bug that broke the CLAUDE.md/settings.json
+    file mounts (see sync_claude_shared_files and the design doc's decision
+    B2) — this sidesteps it rather than relying on directory nesting (which
+    does work) staying that way.
+
+    Named `mounts` on the project entry, comma-split by `dax env set` the same
+    way `creds`/`features` are. Opt-in via `features: [mounts]`, same shape as
+    `feature_ports`.
+
+    Each entry is `<host_path>` or `<host_path>:<container_name>` — the name
+    defaults to `dir_basename(host_path)`, but an explicit one is what lets a
+    host directory be mounted under a name other than its own basename,
+    e.g. the host's own `~/.claude` mounted as `~/host-claude` to inspect its
+    real content from inside a container without colliding with whatever
+    `claude_tenant_state` already mounted at `~/.claude` itself.
+    """
+    opts = []
+    mounts = config.get('mounts', [])
+    if not mounts:
+        dax_print("[!] no mounts defined for this env")
+        return opts
+    container_home = _container_home(config)
+    for entry in mounts:
+        host_path, _sep, container_name = entry.partition(':')
+        host = os.path.expanduser(host_path)
+        container = os.path.join(container_home, container_name or dir_basename(host))
+        opts.append('--volume={}:{}'.format(host, container))
+    return opts
+
+
+def feature_substrate(config):
+    """Mounts a virgil-style substrate repo (rw) and exposes it as
+    $SUBSTRATE_ROOT — the container path both the substrate's own hooks and
+    the `claude` wrapper's gate/settings-delivery logic read (see
+    docs/design/VALIDATION.md's dax contract).
+
+    A single path, unlike the generic `mounts` list feature_mounts handles:
+    dax needs to know specifically which mount holds `shared/wire.sh` and
+    `shared/new-process.sh`, not just that something extra is mounted.
+
+    `wire.sh --quiet` itself runs once per container boot (dax-entrypoint.sh,
+    baked into the image), not here and not on every `claude` launch — see
+    the design doc's Part 4 for why that distinction is load-bearing.
+    """
+    substrate = config.get('substrate')
+    if not substrate:
+        dax_print("[!] no substrate configured for this env "
+                  "(dax env set <name> substrate <path>)")
+        return []
+    host = os.path.expanduser(substrate)
+    container = os.path.join(_container_home(config), dir_basename(host))
+    return [
+        '--volume={}:{}'.format(host, container),
+        '-e', 'SUBSTRATE_ROOT={}'.format(container),
+    ]
+
+
 def _add_feature(feature, config):
     fn_name = 'feature_{}'.format(feature)
     fn = globals().get(fn_name)
@@ -243,11 +424,16 @@ def _add_feature(feature, config):
     return fn(config)
 
 
+def _feature_names():
+    """Every feature a config may name, from the feature_* functions themselves."""
+    return {name[len('feature_'):] for name in globals()
+            if name.startswith('feature_')}
+
+
 def _print_features():
     dax_print("[!] available features:")
-    for name in sorted(globals()):
-        if name.startswith('feature_'):
-            dax_print("\t{}".format(name[len('feature_'):]))
+    for name in sorted(_feature_names()):
+        dax_print("\t{}".format(name))
 
 
 def _get_version():
@@ -329,14 +515,27 @@ def cmd_build(args):
     dax_print("[+] Commence to take over the world...")
 
 
-def _start_creds_daemon(credentials, socket_path):
+def _start_creds_daemon(credentials, port):
+    """TCP, not a bind-mounted Unix socket — Docker Desktop's Mac-VM file
+    sharing does not reliably forward a live macOS-native Unix socket's
+    connect/accept semantics into a container (regular-file bind mounts
+    mostly work; a socket crossing that same boundary is much shakier).
+    `dax creds login`'s daemon (`_start_login_daemon`) already hit this and
+    switched to `tcp:host.docker.internal:<port>`; found 2026-08 that
+    `cmd_run`'s persistent per-project daemon never got the same fix, so two
+    or more projects running concurrently would each start their own daemon
+    fine, but only the most recently started container's socket-forwarding
+    actually worked — every other one saw ECONNREFUSED from `dax-creds list`
+    despite its daemon process being alive and well on the host.
+    """
     import json
     cmd = [
         sys.executable, '-m', 'dax_creds.daemon',
-        '--socket', str(socket_path),
+        '--tcp-port', str(port),
         '--credentials', json.dumps(credentials),
     ]
-    log_path = socket_path.with_suffix('.log')
+    log_path = Path.home() / '.dax' / f'creds-{port}.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, 'a')
     dax_print("[+] starting credential daemon (log: {})".format(log_path))
     return subprocess.Popen(cmd, cwd=str(Path(__file__).parent),
@@ -350,8 +549,14 @@ def _start_login_daemon(credentials, port):
         '--tcp-port', str(port),
         '--credentials', json.dumps(credentials),
     ]
+    log_path = Path.home() / '.dax' / f'login-{port}.log'
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_path, 'a')
     dax_print("[+] starting login credential daemon")
-    return subprocess.Popen(cmd, cwd=str(Path(__file__).parent))
+    proc = subprocess.Popen(cmd, cwd=str(Path(__file__).parent),
+                             stdout=log_file, stderr=log_file)
+    proc._dax_log_path = log_path
+    return proc
 
 
 def _find_free_port():
@@ -359,16 +564,6 @@ def _find_free_port():
     with _sock.socket() as s:
         s.bind(('', 0))
         return s.getsockname()[1]
-
-
-def _wait_for_socket(path, timeout=5.0):
-    import time
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.exists():
-            return True
-        time.sleep(0.05)
-    return False
 
 
 def _wait_for_tcp(host, port, timeout=5.0):
@@ -383,6 +578,29 @@ def _wait_for_tcp(host, port, timeout=5.0):
         except (ConnectionRefusedError, OSError):
             time.sleep(0.05)
     return False
+
+
+_DOCKER_TWO_TOKEN_FLAGS = {'--name', '-h', '-v', '--volume', '-e', '-p', '--group-add', '-c'}
+
+
+def _format_docker_cmd(cmd):
+    """One flag (with its value, if it takes a separate one) per line.
+
+    `cmd` mixes combined single tokens (`--volume=host:container`) and
+    flag/value pairs (`-e`, `KEY=val`) depending on which feature built them;
+    this reads correctly either way rather than assuming one form throughout.
+    """
+    lines = []
+    i = 0
+    while i < len(cmd):
+        token = cmd[i]
+        if token in _DOCKER_TWO_TOKEN_FLAGS and i + 1 < len(cmd):
+            lines.append('{} {}'.format(token, cmd[i + 1]))
+            i += 2
+        else:
+            lines.append(token)
+            i += 1
+    return '\n  '.join(lines)
 
 
 def cmd_run(args):
@@ -401,17 +619,73 @@ def cmd_run(args):
     daemon_proc = None
     project_creds = {}
     try:
-        from dax_creds.config import load_dax_config, find_project_by_dir, get_project_credentials, daemon_socket_path
+        from dax_creds.config import (
+            load_dax_config, find_named_project_by_dir, find_enclosing_project,
+            get_project_credentials,
+        )
         from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
         dax_config = load_dax_config()
         try:
-            project = find_project_by_dir(dax_config, Path.cwd())
+            project_name, project = find_named_project_by_dir(dax_config, Path.cwd())
         except KeyError:
+            enclosing = find_enclosing_project(dax_config, Path.cwd())
+            if enclosing is not None:
+                enclosing_name, enclosing_project = enclosing
+                project_dir = Path(enclosing_project['dir']).expanduser()
+                dax_print(
+                    "[!] {} is inside registered project '{}' at {} but is "
+                    "not its root. Run `dax run` from {}, then cd here "
+                    "inside the container.".format(
+                        Path.cwd(), enclosing_name, project_dir, project_dir))
+                sys.exit(1)
             dax_print("[+] project not registered — starting dax init")
             from dax_creds.init import run_init
             dax_config = run_init(dax_config, Path.cwd())
-            project = find_project_by_dir(dax_config, Path.cwd())
-        project_creds = get_project_credentials(dax_config, project)
+            project_name, project = find_named_project_by_dir(dax_config, Path.cwd())
+        try:
+            project_creds = get_project_credentials(dax_config, project, project_name)
+        except ValueError as e:
+            # A bare provider token with no tenant to derive from. Refusing
+            # beats silently falling back to a shared credential, which is the
+            # exact isolation failure this convention exists to prevent.
+            dax_print(f'[!] {e}')
+            sys.exit(1)
+
+        # Make synthesized definitions for derived names visible to everything
+        # downstream that looks credentials up by name in the config — notably
+        # cmd_creds_login below, which would otherwise raise KeyError on an
+        # env's first run and have it swallowed by this block's except clause,
+        # silently skipping both the login and the daemon.
+        #
+        # In memory only, deliberately: after a successful login the secret is
+        # in Keychain, and the next run re-derives the same name and finds it.
+        # Nothing needs persisting, so `dax run` stays a non-writer.
+        for _name, _cdef in project_creds.items():
+            dax_config.setdefault('credentials', {}).setdefault(_name, _cdef)
+        # Decision A: a declared grouping label on the env's entry. This is what
+        # feature_claude_tenant_state builds the state-tree path from — no
+        # `.dax-tenant` file, no cwd resolution.
+        config['tenant'] = project.get('tenant')
+
+        # Per-env feature opt-in, which was never actually wired up: features came
+        # only from the global `features:` list, a `.dax.yaml` in cwd, and `-f`.
+        # The design doc, CLAUDE.md, and feature_claude_tenant_state's own
+        # docstring all describe adding a feature to an env's own `features:` list
+        # — and doing so did nothing at all. Without this there is no per-env
+        # opt-in, so `claude_tenant_state` could only be switched on for every env
+        # at once or passed by hand on every launch.
+        for feature in project.get('features') or []:
+            if feature not in config['features']:
+                config['features'].append(feature)
+
+        config['multi_tenant'] = bool(project.get('multi_tenant'))
+        config['tenant_subdir'] = project.get('tenant_subdir', '')
+
+        # feature_mounts reads this the same way feature_claude_tenant_state
+        # reads config['tenant'] above — project entries aren't otherwise
+        # promoted into the flat config feature functions see.
+        config['mounts'] = project.get('mounts') or []
+        config['substrate'] = project.get('substrate')
 
         ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
         if ssh_creds:
@@ -447,19 +721,31 @@ def cmd_run(args):
         if 'ports' not in features:
             features.append('ports')
 
+    if 'claude_tenant_state' in features and 'claude' in features:
+        # Both mount ~/.claude, so Docker would fail on a duplicate mount point
+        # with a message that says nothing about which feature to remove. The
+        # tenant-state tree is the *replacement* for the shared mount, not an
+        # addition to it (decision B).
+        dax_print('[!] features `claude` and `claude_tenant_state` both mount '
+                  '~/.claude — pick one.')
+        dax_print('    claude_tenant_state replaces the shared mount with this '
+                  'env\'s own state tree.')
+        dax_print('    `claude` is probably in the global features list: remove it '
+                  'there and add it')
+        dax_print('    to the envs that still want the shared mount, or drop '
+                  'claude_tenant_state here.')
+        sys.exit(1)
+
     for feature in features:
         cmd.extend(_add_feature(feature, config))
 
     try:
         if project_creds:
-            from dax_creds.config import daemon_socket_path
-            sock_path = daemon_socket_path(Path.cwd())
-            daemon_proc = _start_creds_daemon(project_creds, sock_path)
-            if _wait_for_socket(sock_path):
-                container_sock = '/run/dax-creds.sock'
-                cmd += ['-v', '{}:{}'.format(sock_path, container_sock)]
-                cmd += ['-v', '{}:/run/dax-state:ro'.format(sock_path.parent)]
-                cmd += ['-e', 'DAX_CREDS_SOCK={}'.format(container_sock)]
+            port = _find_free_port()
+            daemon_proc = _start_creds_daemon(project_creds, port)
+            if _wait_for_tcp('127.0.0.1', port):
+                cmd += ['--add-host=host.docker.internal:host-gateway']
+                cmd += ['-e', 'DAX_CREDS_SOCK=tcp:host.docker.internal:{}'.format(port)]
                 cmd += ['-e', 'DAX_CREDS_NAMES={}'.format(','.join(project_creds.keys()))]
                 seen_providers = set()
                 for cred_name, cred_def in project_creds.items():
@@ -469,7 +755,7 @@ def cmd_run(args):
                         seen_providers.add(provider)
                 dax_print("[-]   credentials: {}".format(list(project_creds.keys())))
             else:
-                dax_print("[!] credential daemon socket did not appear — skipping")
+                dax_print("[!] credential daemon did not start — skipping")
                 daemon_proc.terminate()
                 daemon_proc = None
     except Exception as e:
@@ -480,7 +766,7 @@ def cmd_run(args):
     if '_shell_cmd' in config:
         cmd += ['/bin/sh', '-c', config['_shell_cmd']]
 
-    dax_print("[+] running: " + ' '.join(cmd))
+    dax_print("[+] running:\n  " + _format_docker_cmd(cmd))
     try:
         if not args.test_only:
             subprocess.run(cmd)
@@ -511,7 +797,7 @@ _LOGIN_PROVIDERS = {
         'auth_command': 'gh auth login --hostname github.com --git-protocol https --web',
     },
     'claude': {
-        'mounts': ['~/.claude'],
+        'mounts': ['~/.claude', '~/.dax-debug'],
         'auth_command': 'claude auth login',
     },
 }
@@ -564,10 +850,39 @@ def _cmd_creds_login_google(cred_name, cred_def, config):
         sys.exit(1)
 
 
-def cmd_creds_login(cred_name, config):
+def _login_credential_def(config, cred_name):
+    """The definition to log in with — registered in `credentials:` or derived.
+
+    A per-env Claude credential normally has *no* registry entry: its name is
+    derived from the env's bare `claude` token (decision C2), and
+    `_post_login_import` stores a Keychain secret without ever writing a
+    `credentials:` block. So resolving against the registry alone refused every
+    derived name, and since `dax creds add`'s claude path is the unguarded
+    copy-from-disk route decision C3 exists to prevent, that left *no* sanctioned
+    way to mint a per-env credential at all. `creds list`, `creds remove`, and
+    `env show` already resolved derived names; login was missed. Found by manual
+    step 4 on 2026-07-30 — see decision C5.
+
+    An explicit registration wins, matching resolution everywhere else. The
+    derived definition arrives via `synthesized_credential()`, so it carries the
+    `credential_defaults` browser/profile settings (C4) rather than falling back
+    to the default browser.
+
+    Raises KeyError for a name that is neither, which `cmd_creds` renders as the
+    "Unknown credential" message.
+    """
+    from dax_creds.config import derived_credentials
+
     cred_def = config.get('credentials', {}).get(cred_name)
     if cred_def is None:
+        cred_def = derived_credentials(config).get(cred_name)
+    if cred_def is None:
         raise KeyError(cred_name)
+    return cred_def
+
+
+def cmd_creds_login(cred_name, config):
+    cred_def = _login_credential_def(config, cred_name)
 
     provider = cred_def.get('provider')
     if provider == 'auggie':
@@ -617,17 +932,71 @@ def cmd_creds_login(cred_name, config):
 
     cmd += [image, '/bin/sh', '-c', provider_cfg['auth_command']]
 
+    # What the provider's on-disk location holds *before* the flow runs. The
+    # import below reads that same location, and cannot otherwise tell a token
+    # the login just wrote from one that was already sitting there — so an
+    # abandoned login silently stored the pre-existing shared credential under
+    # the new name, producing two Keychain entries backed by one OAuth grant.
+    # That is the exact sharing the per-env naming exists to prevent, and it
+    # presented as success. Observed 2026-07-30.
+    before = _disk_token_for(cred_def, provider)
+
     dax_print(f'[+] dax creds login: starting auth flow for {cred_name} ({provider})')
     try:
         subprocess.run(cmd)
     finally:
         daemon_proc.terminate()
+        dax_print(f'[-] login daemon log: {daemon_proc._dax_log_path}')
 
     # Post-login: import token to Keychain
-    _post_login_import(cred_name, cred_def, config, provider)
+    _post_login_import(cred_name, cred_def, config, provider, before=before)
 
 
-def _post_login_import(cred_name, cred_def, config, provider):
+def _disk_token_for(cred_def, provider):
+    """Whatever the provider would import from disk right now, or None."""
+    try:
+        if provider == 'github':
+            from dax_creds.providers.github import GitHubProvider
+            return GitHubProvider().import_from_disk(cred_def)
+        if provider == 'claude':
+            from dax_creds.providers.claude import ClaudeProvider
+            return ClaudeProvider().import_from_disk(cred_def)
+        if provider == 'auggie':
+            from dax_creds.providers.auggie import AuggieProvider
+            return AuggieProvider().import_from_disk(cred_def)
+    except Exception:
+        pass
+    return None
+
+
+def _report_grant_collision(cred_name, other_name):
+    from dax_creds.providers.claude import grant_collision_message
+
+    lines = grant_collision_message(cred_name, other_name)
+    dax_print(f'[!] {cred_name}: {lines[0]}')
+    for line in lines[1:]:
+        dax_print(f'    {line}')
+
+
+def _post_login_import(cred_name, cred_def, config, provider, before=None):
+    """Store whatever the auth flow just wrote to disk into Keychain.
+
+    `before` is what that same on-disk location held beforehand. When the flow
+    leaves it unchanged — the user abandoned the login, closed the browser, or
+    it failed — importing would store a credential the flow did not create. For
+    Claude that means copying an existing grant under a new name, silently
+    defeating per-env isolation, so an unchanged token is refused rather than
+    imported.
+    """
+    if before is not None:
+        after = _disk_token_for(cred_def, provider)
+        if after == before:
+            dax_print(f'[!] {cred_name}: the auth flow did not write a new credential.')
+            dax_print(f'    Nothing was imported — the token already on disk predates this '
+                      f'login and storing it would share an existing grant.')
+            dax_print(f'    Re-run `dax creds login {cred_name}` and complete the browser flow.')
+            return
+
     if provider == 'github':
         from dax_creds.providers.github import GitHubProvider
         provider_obj = GitHubProvider()
@@ -639,7 +1008,24 @@ def _post_login_import(cred_name, cred_def, config, provider):
         else:
             dax_print(f'[!] {cred_name}: no token found after auth flow.')
     elif provider == 'claude':
-        dax_print(f'[+] {cred_name}: auth complete. Run `dax creds add` to store the token if needed.')
+        from dax_creds.config import credential_names_for_provider
+        from dax_creds.providers.claude import ClaudeProvider
+        provider_obj = ClaudeProvider()
+        token = provider_obj.import_from_disk(cred_def)
+        if token:
+            # The `before` comparison above only answers whether the file
+            # changed, not whether the grant did — a Claude Code token refresh
+            # landing inside the login window makes an abandoned login look
+            # successful. Checking the grant itself closes that (decision C6).
+            clash = provider_obj.grant_collision(
+                cred_name, token, credential_names_for_provider(config, 'claude'))
+            if clash:
+                _report_grant_collision(cred_name, clash)
+                return
+            provider_obj.store(cred_name, token)
+            dax_print(f'[+] {cred_name}: token imported to Keychain.')
+        else:
+            dax_print(f'[!] {cred_name}: no token found after auth flow.')
     elif provider == 'auggie':
         from dax_creds.providers.auggie import AuggieProvider
         provider_obj = AuggieProvider()
@@ -696,7 +1082,13 @@ def cmd_creds(args):
     except FileNotFoundError:
         config = {'defaults': {'image': 'dax-base'}, 'credentials': {}, 'projects': {}}
     if args.creds_command == 'add':
-        run_creds_add(config)
+        # A per-env credential's secret is only ever minted by its own login, so
+        # `add` sets up the definition and then hands off rather than copying a
+        # token off disk (decisions C, C6).
+        config, pending_login = run_creds_add(config)
+        if pending_login:
+            print()
+            cmd_creds_login(pending_login, config)
     elif args.creds_command == 'list':
         run_creds_list(config)
     elif args.creds_command == 'remove':
@@ -704,6 +1096,9 @@ def cmd_creds(args):
             run_creds_remove(config, args.name)
         except KeyError:
             print(f"Unknown credential '{args.name}'. Run `dax creds list` to see registered credentials.")
+            sys.exit(1)
+        except ValueError as e:
+            dax_print(f'[!] {e}')
             sys.exit(1)
     elif args.creds_command == 'update':
         try:
@@ -730,8 +1125,628 @@ def cmd_envs(args):
         run_envs_list(config)
 
 
+def _resolve_env_name(config, explicit):
+    """The name given on the command line, or the env that contains cwd.
+
+    Defaulting to cwd is what makes `dax env show` answer "what am I in right
+    now" without having to remember the registered name. Falls back to the
+    *enclosing* project so it also works from a subdirectory, where `dax run`
+    itself refuses (Gate 0).
+    """
+    if explicit:
+        return explicit
+
+    from dax_creds.config import find_enclosing_project
+
+    cwd = Path.cwd()
+    for name, proj in config.get('projects', {}).items():
+        if Path(proj.get('dir', '')).expanduser() == cwd:
+            return name
+
+    enclosing = find_enclosing_project(config, cwd)
+    if enclosing:
+        return enclosing[0]
+
+    dax_print(f'[!] {cwd} is not inside a registered env — pass a name explicitly')
+    sys.exit(1)
+
+
+def cmd_env(args):
+    from dax_creds.config import load_dax_config
+    from dax_creds.init import run_env_accept_shared_files, run_env_set, run_env_show
+
+    try:
+        config = load_dax_config()
+    except FileNotFoundError:
+        dax_print('[!] no ~/.dax.yaml found — run `dax init` first')
+        sys.exit(1)
+
+    name = _resolve_env_name(config, args.name)
+    try:
+        if args.env_command == 'show':
+            run_env_show(config, name)
+        elif args.env_command == 'set':
+            run_env_set(config, name, args.field, args.value,
+                        valid_features=_feature_names())
+        elif args.env_command == 'accept-shared-files':
+            run_env_accept_shared_files(config, name)
+    except (KeyError, ValueError) as e:
+        dax_print('[!] {}'.format(e.args[0] if e.args else e))
+        sys.exit(1)
+
+
 def cmd_features(args):
     _print_features()
+
+
+def _known_tenant_names():
+    """Every tenant name declared anywhere across every registered project on
+    this host - the pick-list for the classification prompt below."""
+    from dax_creds.config import load_dax_config
+    from dax_creds.tenant import all_tenant_projects
+
+    try:
+        dax_config = load_dax_config()
+    except FileNotFoundError:
+        return set()
+
+    names = set()
+    for project_cfg in dax_config.get('projects', {}).values():
+        proj_dir = Path(project_cfg.get('dir', '')).expanduser()
+        if not proj_dir.is_dir():
+            continue
+        multi_tenant = bool(project_cfg.get('multi_tenant'))
+        tenant_subdir = project_cfg.get('tenant_subdir', '')
+        for tenant, _ in all_tenant_projects(proj_dir, multi_tenant, tenant_subdir):
+            names.add(tenant)
+    return names
+
+
+_NEW_TENANT_CHOICE = '(new tenant)'
+
+
+def _q_select_tenant(prompt, choices, default):
+    import questionary
+    return questionary.select(prompt, choices=choices, default=default).ask()
+
+
+def _q_text_tenant(prompt, default):
+    import questionary
+    return questionary.text(prompt, default=default).ask()
+
+
+def _prompt_tenant(subdir, known_tenants, default=None, _select=None, _text=None):
+    """Interactively ask which tenant `subdir` belongs to.
+
+    Offers a pick-list of tenants already known host-wide (reduces typo'd
+    variants like 'Ysecurity' vs 'ysecurity' fragmenting one tenant into
+    two), with an escape hatch to type a new one - falls straight to free
+    text if nothing is known yet. `_select`/`_text` are injectable for
+    testing, matching the `_picker` pattern already used in dax_creds/init.py
+    - real questionary prompts otherwise.
+    """
+    _select = _select or _q_select_tenant
+    _text = _text or _q_text_tenant
+
+    choices = sorted(known_tenants)
+    if choices:
+        picked = _select("Tenant for {}:".format(subdir), choices + [_NEW_TENANT_CHOICE],
+                          default if default in choices else None)
+        if picked is None:
+            raise KeyboardInterrupt
+        if picked != _NEW_TENANT_CHOICE:
+            return picked
+    result = _text("Tenant name for {}:".format(subdir), default or '')
+    if result is None or not result.strip():
+        raise KeyboardInterrupt
+    return result.strip()
+
+
+def _ensure_tenants_classified(config, reclassify_all=False):
+    """Interactively fill in (or, with reclassify_all, revise) tenant
+    assignments for a claude_tenant_state project: the repo root, and every
+    immediate child under tenant_subdir if multi-tenant.
+
+    Runs at `dax run` time (Gate A), before mounts are computed - which is
+    what makes doing this interactively safe here: nothing needs Docker to
+    add a mount to an already-running container after the fact. A brand-new
+    subdirectory discovered *mid-session* still just hard-refuses
+    (dax_creds/tenant.py's resolve_tenant) - this function only ever runs
+    before a container exists at all.
+
+    reclassify_all=False (the automatic dax-run-time check): silently skips
+    anything already declared - zero friction on routine use.
+    reclassify_all=True (`dax tenant classify`): prompts for everything,
+    defaulting to the current value, so pressing Enter keeps it and typing
+    something new changes it.
+    """
+    from dax_creds.tenant import _read_tenant_label, TENANT_FILE, _NOT_A_PROJECT_SUBDIR
+
+    repo_root = Path(config['cwd'])
+    multi_tenant = bool(config.get('multi_tenant'))
+    tenant_subdir = config.get('tenant_subdir', '')
+    known = _known_tenant_names()
+
+    def _classify(subdir):
+        current = _read_tenant_label(subdir / TENANT_FILE)
+        if current and not reclassify_all:
+            return
+        tenant = _prompt_tenant(subdir, known, default=current)
+        (subdir / TENANT_FILE).write_text(tenant)
+        known.add(tenant)
+
+    _classify(repo_root)
+
+    if multi_tenant:
+        tenant_base = (repo_root / tenant_subdir) if tenant_subdir else repo_root
+        if tenant_base.is_dir():
+            for child in sorted(tenant_base.iterdir()):
+                if not child.is_dir() or child.name in _NOT_A_PROJECT_SUBDIR:
+                    continue
+                _classify(child)
+
+
+def cmd_tenant(args):
+    if args.tenant_command == 'set':
+        subdir = Path(args.subdir)
+        if not subdir.is_dir():
+            dax_print("[!] {} is not a directory".format(subdir))
+            sys.exit(1)
+        (subdir / '.dax-tenant').write_text(args.tenant)
+        dax_print("[+] {}/.dax-tenant set to '{}'".format(subdir, args.tenant))
+    elif args.tenant_command == 'classify':
+        from dax_creds.config import load_dax_config, find_project_by_dir
+        dax_config = load_dax_config()
+        try:
+            project = find_project_by_dir(dax_config, Path.cwd())
+        except KeyError:
+            dax_print("[!] {} is not a registered dax project - run `dax init` "
+                      "first".format(Path.cwd()))
+            sys.exit(1)
+        config = {
+            'cwd': str(Path.cwd()),
+            'multi_tenant': bool(project.get('multi_tenant')),
+            'tenant_subdir': project.get('tenant_subdir', ''),
+        }
+        _ensure_tenants_classified(config, reclassify_all=True)
+
+
+def cmd_tenants(args):
+    # Registry- and declaration-driven, not state-tree-driven: this re-derives
+    # the live (tenant, project) set from ~/.dax.yaml's projects plus whatever
+    # .dax-tenant files actually say right now, the same way dax run would -
+    # so every declared tenant shows up immediately, not only ones that have
+    # had a session, and a stale/renamed declaration can never show something
+    # that no longer resolves that way.
+    from dax_creds.config import load_dax_config, dir_basename
+    from dax_creds.tenant import all_tenant_projects
+
+    try:
+        dax_config = load_dax_config()
+    except FileNotFoundError:
+        dax_print("[-] no ~/.dax.yaml found")
+        return
+
+    state_root = Path(os.path.expanduser('~/.local/state/dax/tenants'))
+    rows = []  # (tenant, project, session, path) - matches display column order
+
+    for project_cfg in dax_config.get('projects', {}).values():
+        proj_dir = Path(project_cfg.get('dir', '')).expanduser()
+        if not proj_dir.is_dir():
+            continue
+        multi_tenant = bool(project_cfg.get('multi_tenant'))
+        tenant_subdir = project_cfg.get('tenant_subdir', '')
+        tenant_base = (proj_dir / tenant_subdir) if (multi_tenant and tenant_subdir) else proj_dir
+        reponame = dir_basename(proj_dir)
+
+        for tenant, project in all_tenant_projects(proj_dir, multi_tenant, tenant_subdir):
+            # project == reponame identifies the repo root's own entry (both
+            # single-tenant and, since 2026-07-28, a multi-tenant repo's own
+            # root project) - everything else is a labeled child under
+            # tenant_base.
+            path = proj_dir if project == reponame else (tenant_base / project)
+            state_dir = state_root / tenant / project
+            used = (state_dir / '.claude.json').exists() or (state_dir / '.credentials.json').exists()
+            rows.append((tenant, project, 'yes' if used else 'no', str(path)))
+
+    if not rows:
+        dax_print("[-] no projects resolve to a tenant yet")
+        return
+
+    rows.sort(key=lambda r: (r[0], r[1]))
+
+    headers = ('TENANT', 'PROJECT', 'SESSION', 'PATH')
+    widths = [max(len(headers[i]), max(len(r[i]) for r in rows)) for i in range(4)]
+    fmt = '  '.join('{{:<{}}}'.format(w) for w in widths)
+    print()
+    print(fmt.format(*headers))
+    previous_tenant = None
+    for row in rows:
+        if previous_tenant is not None and row[0] != previous_tenant:
+            print()
+        print(fmt.format(*row))
+        previous_tenant = row[0]
+    print()
+
+
+def _read_process_types(substrate_root):
+    """[(type, skill, description), ...] from the substrate's own registry.
+
+    Never hardcoded here — dax reads whatever the substrate declares, so
+    adding a process type there never needs a dax release (see the "What dax
+    must not do" section of docs/design/VALIDATION.md).
+    """
+    tsv = Path(substrate_root) / 'shared' / 'process-types.tsv'
+    if not tsv.is_file():
+        raise ValueError('no process-types.tsv at {} — is {} a substrate repo?'.format(
+            tsv, substrate_root))
+    types = []
+    for line in tsv.read_text().splitlines():
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 3:
+            types.append((parts[0], parts[1], parts[2]))
+    return types
+
+
+def _check_process_dir(config, process_dir):
+    """Refuse structurally bad choices for a new process directory, before
+    anything is created or registered.
+
+    Two classes of mistake, both cheap to catch here and expensive to
+    unwind later: nesting/colliding with an already-registered project (the
+    same mistake `find_enclosing_project`/Gate 0 catches for `dax run`, just
+    much earlier — before there's anything to untangle), and landing outside
+    $HOME, where `dax run` would refuse to launch it anyway (`load_config`'s
+    "dax must be run from somewhere under your home dir"), just much later.
+    """
+    from dax_creds.config import find_enclosing_project
+
+    home = Path.home().resolve()
+    try:
+        process_dir.relative_to(home)
+    except ValueError:
+        dax_print('[!] {} is not under your home directory ({}) — `dax run` '
+                  'refuses to launch from outside $HOME'.format(process_dir, home))
+        sys.exit(1)
+
+    enclosing = find_enclosing_project(config, process_dir)
+    if enclosing is not None:
+        enclosing_name, enclosing_project = enclosing
+        dax_print('[!] {} is inside already-registered project {!r} at {}'.format(
+            process_dir, enclosing_name, Path(enclosing_project['dir']).expanduser().resolve()))
+        sys.exit(1)
+
+    for other_name, other_project in (config.get('projects') or {}).items():
+        other_dir = other_project.get('dir')
+        if not other_dir:
+            continue
+        other_dir = Path(other_dir).expanduser().resolve()
+        if other_dir == process_dir:
+            dax_print('[!] {} is already registered as project {!r}'.format(
+                process_dir, other_name))
+            sys.exit(1)
+        if process_dir in other_dir.parents:
+            dax_print('[!] {} would enclose already-registered project {!r} at {}'.format(
+                process_dir, other_name, other_dir))
+            sys.exit(1)
+
+
+def _run_process_new(config, args):
+    """Scaffold a new substrate-backed process and register it as a dax env.
+
+    Every field is either given on the command line or interactively
+    prompted — never silently defaulted, and never left to new-process.sh's
+    own basic prompting: dax resolves everything itself first, then invokes
+    the script with a complete, fully-resolved flag set so its own `ask()`
+    prompts never trigger regardless of stdio.
+
+    Directory and substrate paths are resolved to absolute, symlink-free
+    paths (`.resolve()`) as soon as they're known — `register_project`
+    documents `dir` as an absolute host path, a relative or `~`-shorthand
+    value stored verbatim would silently break every cwd-based env lookup,
+    and the confirmation summary below is only trustworthy if the paths in
+    it are the real ones.
+    """
+    from dax_creds.init import _prompt, _q_confirm, _q_select, register_project, run_env_set, save_config
+    from dax_creds.config import state_tree_path
+    import questionary
+
+    name = args.name
+
+    process_dir = args.dir or _prompt('Process directory')
+    if not process_dir:
+        dax_print('[!] a process directory is required')
+        sys.exit(1)
+    process_dir = Path(process_dir).expanduser().resolve()
+
+    _check_process_dir(config, process_dir)
+
+    tenant = args.tenant or _prompt_tenant(process_dir, _known_tenant_names())
+
+    substrate = args.substrate or _prompt('Substrate path', default=config.get('substrate'))
+    if not substrate:
+        dax_print('[!] a substrate path is required (pass --substrate, or set a top-level '
+                  '`substrate:` default in ~/.dax.yaml)')
+        sys.exit(1)
+    substrate_root = Path(substrate).expanduser().resolve()
+
+    title = args.title or _prompt('Process title')
+    if not title:
+        dax_print('[!] a process title is required')
+        sys.exit(1)
+
+    try:
+        types = _read_process_types(substrate_root)
+    except ValueError as e:
+        dax_print('[!] {}'.format(e))
+        sys.exit(1)
+
+    if args.type:
+        process_type = args.type
+        skill = next((s for t, s, _d in types if t == process_type), None)
+        if skill is None:
+            dax_print('[!] unknown type {!r} — see {}/shared/process-types.tsv'.format(
+                process_type, substrate_root))
+            sys.exit(1)
+    else:
+        choices = [questionary.Choice('{} — {}'.format(t, desc), value=(t, skill))
+                   for t, skill, desc in types]
+        process_type, skill = _q_select('Process type:', choices)
+
+    if args.git and args.no_git:
+        dax_print('[!] pass --git or --no-git, not both')
+        sys.exit(1)
+    elif args.git:
+        git_decision = True
+    elif args.no_git:
+        git_decision = False
+    else:
+        print('Keep this process under version control?')
+        print('  git history cannot be selectively scrubbed later — a process that may')
+        print('  need to be destroyed is cleaner without it.')
+        git_decision = _q_confirm('git?', default=False)
+
+    default_image = config.get('defaults', {}).get('image', 'dax-base')
+    state_dir = state_tree_path(tenant, name)
+
+    if process_dir.exists():
+        count = sum(1 for _ in process_dir.iterdir())
+        dir_note = 'already exists, empty' if count == 0 else \
+            'already exists, {} item(s) inside'.format(count)
+    else:
+        dir_note = 'will be created'
+
+    print()
+    print('About to create a new process:')
+    print('  env name    {}'.format(name))
+    print('  directory   {}   [{}]'.format(process_dir, dir_note))
+    print('  substrate   {}'.format(substrate_root))
+    print('  tenant      {}'.format(tenant))
+    print('  title       {}'.format(title))
+    print('  type        {} (skill: {})'.format(process_type, skill))
+    print('  git         {}'.format('yes' if git_decision else 'no'))
+    print('  image       {}'.format(default_image))
+    print('  creds       claude   (derived per-env credential)')
+    print('  features    substrate, claude_tenant_state')
+    print('  state tree  {}'.format(state_dir))
+    print()
+
+    if args.dry_run:
+        dax_print('[-]   dry run — nothing created or registered')
+        return
+
+    if not _q_confirm('Proceed?', default=True):
+        dax_print('[-]   aborted — nothing created or registered')
+        return
+
+    new_process_cmd = [
+        str(substrate_root / 'shared' / 'new-process.sh'),
+        '--dir', str(process_dir),
+        '--title', title,
+        '--type', process_type,
+        '--git' if git_decision else '--no-git',
+    ]
+    result = subprocess.run(new_process_cmd)
+    if result.returncode != 0:
+        dax_print('[!] new-process.sh failed (exit {}) — not registering an env'.format(
+            result.returncode))
+        sys.exit(1)
+
+    register_project(config, name=name, project_dir=process_dir,
+                     image=default_image, creds=['claude'])
+    save_config(config)
+    run_env_set(config, name, 'tenant', tenant)
+    run_env_set(config, name, 'substrate', str(substrate_root))
+    # Always both, unconditionally — every substrate-backed process needs its
+    # own Claude state tree as well as the substrate mount, never just one.
+    run_env_set(config, name, 'features', 'substrate,claude_tenant_state',
+                valid_features=_feature_names())
+
+    dax_print('[+] registered {}. Run `dax run` from {} to launch it.'.format(name, process_dir))
+
+
+def _uncommitted_git_note(dir_path):
+    """A short "N uncommitted change(s)" note, or None if the directory isn't
+    a git repo or has nothing outstanding. Surfaced in the destroy summary
+    rather than silently lost — a `--git` process with no remote means this
+    is the only copy of that work."""
+    if not (dir_path / '.git').is_dir():
+        return None
+    try:
+        result = subprocess.run(['git', '-C', str(dir_path), 'status', '--porcelain'],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    changed = [line for line in result.stdout.splitlines() if line.strip()]
+    if not changed:
+        return None
+    return '! {} uncommitted git change(s)'.format(len(changed))
+
+
+def _derived_creds_for(project, name):
+    """[derived credential name, ...] for one project — never an
+    explicitly-named/shared credential, only ones dax itself derived for
+    this env specifically (see BARE_PROVIDER_CREDS)."""
+    from dax_creds.config import resolve_credential_names
+    try:
+        resolved = resolve_credential_names(project, name)
+    except ValueError:
+        # A bare provider entry with no tenant to derive from — already
+        # broken in a way `dax run`/`env show` would refuse on, and not
+        # this command's job to fix. Nothing resolvable to clean up.
+        return []
+    return [cred_name for cred_name, provider in resolved if provider]
+
+
+def _run_process_destroy(config, args):
+    """Tear down one or more registered processes: directory, Claude state
+    tree (plus its sibling shared-files manifest), any per-env derived
+    credential, and the ~/.dax.yaml entry itself.
+
+    docs/design/VALIDATION.md's `destroy-process` (item 6), generalized past
+    substrate processes specifically — the same cleanup (dir + state tree +
+    credential + registry entry) applies to any tenant-isolated env, and
+    restricting this to substrate-tagged ones would only get in the way of
+    burning down other test cruft.
+    """
+    from dax_creds.config import state_tree_path, _shared_files_manifest_path
+    from dax_creds.init import (
+        _q_checkbox, _container_name_for, _is_container_running,
+        _tree_stats, _human_size, _human_age, run_creds_remove, save_config,
+    )
+    import questionary
+
+    projects = config.get('projects') or {}
+
+    names = list(args.name or [])
+    if not names:
+        if not projects:
+            dax_print('[!] no registered envs to destroy')
+            return
+        choices = []
+        for pname, project in sorted(projects.items()):
+            tenant = project.get('tenant')
+            label = '{}   [{}{}]'.format(
+                pname, project.get('dir', '?'),
+                ', tenant {}'.format(tenant) if tenant else ', no tenant')
+            choices.append(questionary.Choice(label, value=pname))
+        names = _q_checkbox('Select processes to destroy (nothing pre-checked):', choices)
+        if not names:
+            dax_print('[-]   nothing selected')
+            return
+
+    unknown = [n for n in names if n not in projects]
+    if unknown:
+        dax_print('[!] not registered: {}'.format(', '.join(unknown)))
+        sys.exit(1)
+
+    # Guardrails, checked for every candidate before any deletion begins — a
+    # problem with one candidate must never leave the batch half-destroyed.
+    for name in names:
+        dir_path = Path(projects[name].get('dir', '')).expanduser()
+        container = _container_name_for(dir_path)
+        if _is_container_running(container):
+            dax_print('[!] {} is running — stop it first (`docker stop {}`)'.format(
+                name, container))
+            sys.exit(1)
+
+    print()
+    print('About to destroy:')
+    for name in names:
+        project = projects[name]
+        dir_path = Path(project.get('dir', '')).expanduser()
+        tenant = project.get('tenant')
+
+        print()
+        print(name)
+        if dir_path.exists():
+            count = sum(1 for _ in dir_path.iterdir())
+            note = '{} item(s)'.format(count)
+            git_note = _uncommitted_git_note(dir_path)
+            if git_note:
+                note += '; ' + git_note
+            print('  directory   {}   [{}]'.format(dir_path, note))
+        else:
+            print('  directory   {}   [already gone]'.format(dir_path))
+
+        if tenant:
+            state = state_tree_path(tenant, name)
+            if state.exists():
+                size, used = _tree_stats(state)
+                print('  state tree  {}   [{}, used {} ago]'.format(
+                    state, _human_size(size), _human_age(used)))
+            else:
+                print('  state tree  {}   [already gone]'.format(state))
+        else:
+            print('  state tree  (no tenant declared — none)')
+
+        derived = _derived_creds_for(project, name)
+        if derived:
+            print('  credential  {}   (derived — also removed from Keychain)'.format(
+                ', '.join(derived)))
+        else:
+            print('  credential  (none derived)')
+
+        print('  registry    ~/.dax.yaml entry')
+
+    print()
+    print('{} process(es) above will be permanently destroyed. This cannot be undone.'.format(
+        len(names)))
+    print()
+
+    if args.dry_run:
+        dax_print('[-]   dry run — nothing destroyed')
+        return
+
+    typed = input('Type DESTROY to confirm: ')
+    if typed != 'DESTROY':
+        dax_print('[-]   aborted — nothing destroyed')
+        return
+
+    for name in names:
+        project = projects[name]
+        dir_path = Path(project.get('dir', '')).expanduser()
+        tenant = project.get('tenant')
+
+        if dir_path.exists():
+            shutil.rmtree(dir_path)
+            dax_print('[-]   removed {}'.format(dir_path))
+
+        if tenant:
+            state = state_tree_path(tenant, name)
+            if state.exists():
+                shutil.rmtree(state)
+                dax_print('[-]   removed {}'.format(state))
+            manifest = _shared_files_manifest_path(tenant, name)
+            if manifest.exists():
+                manifest.unlink()
+
+        for cred_name in _derived_creds_for(project, name):
+            try:
+                run_creds_remove(config, cred_name)
+            except Exception as e:
+                dax_print('[!] could not remove credential {}: {}'.format(cred_name, e))
+
+        del config['projects'][name]
+        save_config(config)
+        dax_print('[+] destroyed {}'.format(name))
+
+
+def cmd_process(args):
+    from dax_creds.config import load_dax_config
+
+    try:
+        config = load_dax_config()
+    except FileNotFoundError:
+        dax_print('[!] no ~/.dax.yaml found — run `dax init` first')
+        sys.exit(1)
+
+    if args.process_command == 'new':
+        _run_process_new(config, args)
+    elif args.process_command == 'destroy':
+        _run_process_destroy(config, args)
 
 
 def cmd_backup(args):
@@ -840,6 +1855,78 @@ def main():
     envs_sub = envs_p.add_subparsers(dest='envs_command', required=True)
     envs_sub.add_parser('list', help='List registered environments')
 
+    # Singular `env` acts on one environment, plural `envs` lists them — the
+    # same split the existing `tenant`/`tenants` pair uses.
+    from dax_creds.config import ENV_FIELDS, env_field_help
+    env_p = subparsers.add_parser(
+        'env', help='Inspect or edit a single environment',
+        description='Operates on the env for the current directory when no name is given.')
+    env_sub = env_p.add_subparsers(dest='env_command', required=True)
+
+    env_show_p = env_sub.add_parser('show', help="Show one env's configuration")
+    env_show_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
+
+    env_set_p = env_sub.add_parser(
+        'set', help='Set a single field on an env',
+        epilog=env_field_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    env_set_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
+    env_set_p.add_argument('field', choices=sorted(ENV_FIELDS), help='Field to set')
+    env_set_p.add_argument('value', help='New value')
+
+    env_accept_p = env_sub.add_parser(
+        'accept-shared-files',
+        help="Force-adopt the host's CLAUDE.md/settings.json/settings.local.json "
+             "into this env's state tree, resolving a drift warning from `dax run`")
+    env_accept_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
+
+    tenant_p = subparsers.add_parser('tenant', help='Manage tenant declarations')
+    tenant_sub = tenant_p.add_subparsers(dest='tenant_command', required=True)
+    tenant_set_p = tenant_sub.add_parser('set', help='Declare the tenant for a subdirectory')
+    tenant_set_p.add_argument('subdir', help='Directory to declare (writes its .dax-tenant file)')
+    tenant_set_p.add_argument('tenant', help='Tenant name to declare')
+    tenant_sub.add_parser(
+        'classify',
+        help='Walk through every subdirectory needing a tenant (run from the project root); '
+             're-prompts even already-declared ones, defaulting to the current value')
+
+    subparsers.add_parser('tenants', help='List known tenants and their projects')
+
+    process_p = subparsers.add_parser('process', help='Manage virgil-style substrate processes')
+    process_sub = process_p.add_subparsers(dest='process_command', required=True)
+    process_new_p = process_sub.add_parser(
+        'new', help='Scaffold a new substrate-backed process and register it as a dax env')
+    process_new_p.add_argument('name', help='Env name to register')
+    process_new_p.add_argument('--dir', help='Host directory for the new process (prompted if omitted)')
+    process_new_p.add_argument('--tenant', help='Tenant/grouping label (prompted if omitted)')
+    process_new_p.add_argument(
+        '--substrate',
+        help="Path to the substrate repo (prompted if omitted, defaulting to the top-level "
+             "`substrate:` in ~/.dax.yaml if set)")
+    process_new_p.add_argument('--title', help='Process title (prompted if omitted)')
+    process_new_p.add_argument('--type', help='Process type (prompted if omitted)')
+    process_new_git = process_new_p.add_mutually_exclusive_group()
+    process_new_git.add_argument('--git', action='store_true',
+                                 help='Keep the process under version control')
+    process_new_git.add_argument('--no-git', action='store_true',
+                                 help='Do not put the process under version control')
+    process_new_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Resolve every field and print the full-path summary, then exit '
+             'without creating or registering anything')
+
+    process_destroy_p = process_sub.add_parser(
+        'destroy',
+        help='Permanently remove one or more processes: directory, state tree, '
+             'derived credential, and registry entry')
+    process_destroy_p.add_argument(
+        'name', nargs='*',
+        help='Env name(s) to destroy (omit for an interactive picker over every registered env)')
+    process_destroy_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Print the full-path summary of what would be destroyed, then exit '
+             'without changing anything')
+
     args = parser.parse_args()
 
     if args.command == 'build':
@@ -856,6 +1943,14 @@ def main():
         cmd_creds(args)
     elif args.command == 'envs':
         cmd_envs(args)
+    elif args.command == 'env':
+        cmd_env(args)
+    elif args.command == 'tenant':
+        cmd_tenant(args)
+    elif args.command == 'tenants':
+        cmd_tenants(args)
+    elif args.command == 'process':
+        cmd_process(args)
 
 
 if __name__ == '__main__':

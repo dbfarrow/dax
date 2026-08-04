@@ -10,7 +10,11 @@
       "Bash(xargs ls -la)",
       "Bash(sed -n *)",
       "Bash(dax-creds get *)",
-      "Bash(echo \"--- exit: $? ---\")"
+      "Bash(echo \"--- exit: $? ---\")",
+      "Bash(grep -nE ':\\\\s*\\(True|False|Yes|No|on|off\\)\\\\s*$' ~/.dax.yaml)",
+      "Bash(grep -cE ':\\\\s*\\(True|False\\)\\\\s*$' ~/.dax.yaml)",
+      "Bash(grep *)",
+      "Bash(python -m pytest -q)"
     ]
   },
   "disabledMcpjsonServers": [

@@ -5,6 +5,18 @@
 # Failures are reported, never swallowed. A silent failure here went unnoticed
 # for a month because auth was quietly riding a host bind mount instead.
 
+# CLAUDE_CONFIG_DIR is set by `dax run` (decision B of
+# docs/design/2026-07-27-tenant-isolation.md) and simply honoured here. It used to
+# be computed in this script: Gate B resolved cwd -> tenant -> path via
+# `dax-creds resolve-tenant`, gated on DAX_TENANT_STATE. That went with the
+# multi-tenant model — one repo could hold several tenants, so the path depended
+# on where in the tree the user was standing. Each env is single-tenant now, so
+# the path is knowable before launch and belongs to whoever computes the mount.
+#
+# Consequence worth keeping in mind: a refusal can no longer happen here, because
+# there is nothing left to resolve. `dax run` refuses instead, before the
+# container starts, when an env opting into claude_tenant_state has no tenant.
+
 # Claude Code reads its state from CLAUDE_CONFIG_DIR when that is set and from
 # ~/.claude otherwise. The two layouts disagree about .claude.json: it lives
 # *inside* CLAUDE_CONFIG_DIR, but at ~/.claude.json — not ~/.claude/.claude.json
@@ -17,12 +29,31 @@ else
     _dax_state_file="$HOME/.claude.json"
 fi
 
-if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ]; then
+_dax_creds_file="$_dax_cfg_dir/.credentials.json"
+
+# Inject from Keychain only when the state tree has no credential yet. Claude
+# Code owns and refreshes this file from first launch onward; the daemon copy is
+# a *bootstrap*, not the running source of truth.
+#
+# Overwriting on every launch was harmless while ~/.claude was a shared mount
+# that Claude Code refreshed in place — the daemon snapshot and the file stayed
+# in step. Under a persistent per-tenant/project state tree they diverge: the
+# session refreshes the token into its own tree, nothing propagates back to
+# Keychain, and the next launch would clobber the good token with the stale
+# snapshot. If Anthropic rotates refresh tokens on use, that snapshot is already
+# dead, so every project would independently break on its second start.
+#
+# `-s` rather than `-e`: a zero-byte file left by an interrupted write counts as
+# no credential. To force a re-fetch, delete the file and relaunch.
+#
+# Teardown write-back to Keychain is deliberately not built yet — see decision C
+# of docs/design/2026-07-27-tenant-isolation.md.
+if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ] && [ ! -s "$_dax_creds_file" ]; then
     if _creds=$(dax-creds get "$DAX_CREDS_CLAUDE"); then
         case "$_creds" in
             *'"claudeAiOauth"'*)
                 mkdir -p "$_dax_cfg_dir"
-                ( umask 077; printf '%s' "$_creds" > "$_dax_cfg_dir/.credentials.json" )
+                ( umask 077; printf '%s' "$_creds" > "$_dax_creds_file" )
                 ;;
             *)
                 echo "dax: credential '$DAX_CREDS_CLAUDE' is not a Claude credentials blob" >&2
@@ -48,10 +79,54 @@ fi
 #
 # Only the onboarding flag is seeded. Folder trust is deliberately not set here:
 # accepting it silently activates .claude/settings.local.json permissions, which
-# is the user's call to make, not the wrapper's.
+# is the user's call to make, not the wrapper's. `theme` and `oauthAccount`/
+# `userID` (also listed in the design doc's seed-key table) were tried and
+# dropped: probing v2.1.220 showed the onboarding flag alone already reaches a
+# normal prompt with no theme picker, and oauthAccount/userID need real account
+# data nothing currently plumbs from the daemon/host into the wrapper — see
+# CLAUDE.md Backlog.
 if [ ! -e "$_dax_state_file" ]; then
     mkdir -p "$(dirname "$_dax_state_file")"
     ( umask 077; printf '%s' '{"hasCompletedOnboarding": true}' > "$_dax_state_file" )
+fi
+
+# --- substrate gate + settings delivery (docs/design/VALIDATION.md) --------
+#
+# `--check` only, never a bare `wire.sh`: the self-heal already ran once at
+# container boot (dax-entrypoint.sh). Re-running it here would let a `claude`
+# restart silently repair wiring broken mid-session, defeating the Part 4
+# failure-mode tests, which restart a Claude session specifically *without*
+# restarting the container to prove the PreToolUse guard fires on its own.
+#
+# No SUBSTRATE_ROOT means this env never opted into the `substrate` feature —
+# identical behavior to before this gate existed.
+if [ -n "$SUBSTRATE_ROOT" ]; then
+    "$SUBSTRATE_ROOT/shared/wire.sh" --check
+    _substrate_rc=$?
+    case "$_substrate_rc" in
+        0)
+            _substrate_settings="$_dax_cfg_dir/substrate-settings.json"
+            # Never clobber a caller-supplied --settings.
+            case " $* " in
+                *' --settings '*) ;;
+                *)
+                    if [ -f "$_substrate_settings" ]; then
+                        set -- --settings "$_substrate_settings" "$@"
+                    fi
+                    ;;
+            esac
+            ;;
+        127)
+            echo "dax: substrate not mounted at $SUBSTRATE_ROOT — refusing to start claude" >&2
+            echo "dax: check the env's mounts (dax env show), then restart the container" >&2
+            exit 127
+            ;;
+        *)
+            echo "dax: substrate at $SUBSTRATE_ROOT is not correctly wired — refusing to start claude" >&2
+            echo "dax: run \`$SUBSTRATE_ROOT/shared/wire.sh\` from a container shell to repair" >&2
+            exit 1
+            ;;
+    esac
 fi
 
 exec "${DAX_CLAUDE_REAL:-/usr/bin/claude-real}" "$@"
