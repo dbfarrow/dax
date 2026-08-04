@@ -5,6 +5,38 @@ dax is a Docker-based development environment manager. It reads `~/.dax.yaml`
 features (volume mounts, port mappings, etc.) assembled from named feature
 functions in `dax.py`.
 
+## Baseline features replace the top-level `features:` list
+
+**Settled and built 2026-08-04**, on `feature/baseline-features` (branched
+from `master` after PR #5 merged). `~/.dax.yaml`'s top-level `features:` key
+is gone — it was the actual cause of the "additive-only, no opt-out" backlog
+item: every env inherited whatever was in that list with no way to decline
+one. `workdir`, `dotfiles`, and `webpreview` are wanted by literally every
+env, so they're now an unconditional baseline in `dax.py`
+(`_ALWAYS_ON_FEATURES`) rather than something read from that list at all.
+Everything else that used to live there — `ssh` in particular, per the
+decision to move toward `gh`-based GitHub auth instead of ambient
+host-agent-forwarding — is opt-in only now: a project's own `features:`
+list, a cwd-local `.dax.yaml`, or `-f`. Nobody was trying to opt *out* of
+those, so per-env-additive is fine for them; the problem was only ever the
+global list forcing something on every env at once.
+
+A still-present, non-empty top-level `features:` key is never silently
+dropped: `load_config()` prints what it found and that it's no longer read,
+naming the three baseline features so it's clear nothing needs to move there.
+The real `~/.dax.yaml` had exactly `workdir, dotfiles, ssh, webpreview` (plus
+a commented-out `auggie`) — confirms the change covers the actual live
+config with no surprises, and that key has been removed from it directly
+(via the ruamel round-trip save, not a raw pyyaml rewrite, so comments and
+ordering survive). 4 new tests for the baseline/warning behavior, plus a
+rewrite of `test_dax_claude_mount_exclusivity.py`'s fixtures (they used to
+put `claude`/`claude_tenant_state` in the now-gone global list — every case
+moved to a project's own `features:`, since that's the only source left that
+can carry them). Suite at **511** (from 507). `.dax.yaml.example` and this
+file's own decision-3 mention of "four sources" for feature accumulation are
+both updated to match — it's three now (project, cwd-local, `-f`), plus the
+hardcoded baseline that isn't really a "source" in the old sense at all.
+
 ## Legacy Claude state: migrate the process now, recover history on demand
 
 **Settled 2026-08-02, closing out the `migrate_env_state.py` redesign thread.**
@@ -781,22 +813,13 @@ the shared mount, which is the intended fallback.
   symlinks each skill directory into the state tree at container boot, not a
   second dax-level mount.
 
-- **Per-env features are additive only — no way to opt *out*.** Features
-  accumulate from four sources (global `features:`, the env entry, a `.dax.yaml`
-  in cwd, `-f`) and every one only adds. So an env cannot decline a globally
-  inherited feature, which is why switching one env to `claude_tenant_state`
-  takes four writes: a hand-edit to strip `claude` from the global list, plus
-  three `dax env set … features claude` calls to give it back to the envs that
-  still want it.
-
-  Fit-and-polish fix, deferred: make `claude_tenant_state` **supersede an
-  inherited `claude`** (it was designed as the replacement for that mount, not a
-  peer), printing `claude_tenant_state supersedes claude for <env>` so it is
-  never silent — while still *refusing* when both are listed explicitly on the
-  same env, where the intent is genuinely ambiguous. That reduces the four writes
-  to one and leaves the global list alone. The general form — a `-claude` removal
-  syntax any env could use — is a bigger mechanism and not worth building until
-  something needs it.
+- **~~Per-env features are additive only — no way to opt *out*~~ — resolved
+  2026-08-04** by removing the global `features:` list entirely (see "Baseline
+  features" above), rather than the supersede-`claude` fit-and-polish fix
+  originally sketched here. The problem was the global list forcing something
+  on every env with no way to decline it; with that list gone (workdir/
+  dotfiles/webpreview baked in as a baseline instead), every remaining feature
+  is purely per-env opt-in, so there is nothing left to opt *out* of.
 
 - **`dax init` should prompt for `tenant`** at registration time — editing an
   existing env is now covered by `dax env set`.
