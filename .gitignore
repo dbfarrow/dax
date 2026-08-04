@@ -9,3 +9,4 @@ __pycache__/
 dax.egg-info/
 Dockerfile
 *.crt
+docs/design/scripts/

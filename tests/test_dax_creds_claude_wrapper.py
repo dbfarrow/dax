@@ -349,3 +349,147 @@ def test_claude_still_runs(tmp_path):
 
     assert proc.returncode == 0
     assert (tmp_path / 'claude-real-ran').exists()
+
+
+# --- substrate gate + settings delivery (docs/design/VALIDATION.md) ---------
+#
+# `--check` only, never a bare `wire.sh` — the self-heal already ran once at
+# container boot (dax_creds/wrappers/entrypoint.sh). These tests fake
+# `shared/wire.sh` directly rather than the real virgil script, since only
+# its documented `--check` exit-code contract (0 / 1 / the shell's own 127
+# when it's missing) is part of dax's side of the contract.
+
+def _run_with_substrate(tmp_path, substrate_root=None, wire_check_rc=0,
+                        wire_missing=False, extra_argv=None, env=None,
+                        settings_content=None):
+    """Like `_run`, but wires up $SUBSTRATE_ROOT and records claude-real's argv."""
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir(exist_ok=True)
+
+    wrapper = bin_dir / 'claude'
+    wrapper.write_text(WRAPPER.read_text())
+    wrapper.chmod(0o755)
+
+    real = bin_dir / 'claude-real'
+    argv_log = tmp_path / 'claude-real-argv.txt'
+    # Not a bare `printf '%s\n' "$@" > log`: with zero args that still prints
+    # one blank line (the format string runs once regardless), so an empty
+    # argv would misleadingly read back as [''] instead of [].
+    real.write_text(
+        '#!/bin/bash\n: > {log!r}\nfor a in "$@"; do printf \'%s\\n\' "$a" >> {log!r}; done\n'
+        'exit 0\n'.format(log=str(argv_log)))
+    real.chmod(0o755)
+
+    home = tmp_path / 'home'
+    home.mkdir(exist_ok=True)
+
+    if settings_content is not None:
+        settings = home / '.claude' / 'substrate-settings.json'
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(settings_content)
+
+    full_env = {
+        'PATH': f'{bin_dir}:/usr/bin:/bin',
+        'HOME': str(home),
+        'DAX_CLAUDE_REAL': str(real),
+    }
+
+    if substrate_root is None:
+        substrate_root = tmp_path / 'virgil'
+    if not wire_missing:
+        shared = substrate_root / 'shared'
+        shared.mkdir(parents=True, exist_ok=True)
+        wire = shared / 'wire.sh'
+        wire.write_text('#!/bin/sh\nexit {}\n'.format(wire_check_rc))
+        wire.chmod(0o755)
+    full_env['SUBSTRATE_ROOT'] = str(substrate_root)
+
+    if env:
+        full_env.update(env)
+
+    argv = [str(wrapper)] + (extra_argv or [])
+    proc = subprocess.run(argv, env=full_env, capture_output=True, text=True, timeout=30)
+    recorded = argv_log.read_text().splitlines() if argv_log.exists() else None
+    return proc, recorded
+
+
+def test_no_substrate_root_skips_the_gate_entirely(tmp_path):
+    """Identical behavior to before this gate existed."""
+    proc, recorded = _run_with_substrate(tmp_path, wire_missing=True,
+                                         env={'SUBSTRATE_ROOT': ''})
+    assert proc.returncode == 0
+    assert recorded == []
+
+
+def test_wired_correctly_proceeds_and_delivers_settings(tmp_path):
+    home = tmp_path / 'home'
+    settings = home / '.claude' / 'substrate-settings.json'
+    proc, recorded = _run_with_substrate(tmp_path, wire_check_rc=0, settings_content='{}')
+
+    assert proc.returncode == 0
+    assert recorded == ['--settings', str(settings)]
+
+
+def test_wired_correctly_without_a_settings_fragment_still_proceeds(tmp_path):
+    proc, recorded = _run_with_substrate(tmp_path, wire_check_rc=0)
+    assert proc.returncode == 0
+    assert recorded == []
+
+
+def test_does_not_clobber_a_caller_supplied_settings_flag(tmp_path):
+    proc, recorded = _run_with_substrate(
+        tmp_path, wire_check_rc=0, settings_content='{}',
+        extra_argv=['--settings', '/some/other/file.json'])
+
+    assert proc.returncode == 0
+    assert recorded == ['--settings', '/some/other/file.json']
+
+
+def test_wired_wrong_refuses_and_never_execs_claude(tmp_path):
+    proc, recorded = _run_with_substrate(tmp_path, wire_check_rc=1)
+
+    assert proc.returncode == 1
+    assert recorded is None
+    assert 'not correctly wired' in proc.stderr
+    assert 'wire.sh' in proc.stderr
+
+
+def test_substrate_not_mounted_refuses_with_a_distinct_message(tmp_path):
+    proc, recorded = _run_with_substrate(tmp_path, wire_missing=True)
+
+    assert proc.returncode == 127
+    assert recorded is None
+    assert 'not mounted' in proc.stderr
+
+
+def test_never_runs_a_bare_wire_sh(tmp_path):
+    """Only --check — a bare `wire.sh` here would let a `claude` restart
+    silently repair wiring broken mid-session, defeating VALIDATION.md's
+    Part 4 failure-mode tests."""
+    substrate_root = tmp_path / 'virgil'
+    shared = substrate_root / 'shared'
+    shared.mkdir(parents=True)
+    call_log = substrate_root / 'wire-calls.txt'
+    wire = shared / 'wire.sh'
+    wire.write_text(
+        '#!/bin/sh\necho "$@" >> {!r}\n[ "$1" = "--check" ] && exit 0 || exit 1\n'.format(
+            str(call_log)))
+    wire.chmod(0o755)
+
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    wrapper = bin_dir / 'claude'
+    wrapper.write_text(WRAPPER.read_text())
+    wrapper.chmod(0o755)
+    real = bin_dir / 'claude-real'
+    real.write_text('#!/bin/bash\nexit 0\n')
+    real.chmod(0o755)
+    home = tmp_path / 'home'
+    home.mkdir()
+
+    subprocess.run([str(wrapper)], env={
+        'PATH': f'{bin_dir}:/usr/bin:/bin', 'HOME': str(home),
+        'DAX_CLAUDE_REAL': str(real), 'SUBSTRATE_ROOT': str(substrate_root),
+    }, capture_output=True, text=True, timeout=30)
+
+    assert call_log.read_text().splitlines() == ['--check']

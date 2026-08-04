@@ -743,6 +743,12 @@ def run_env_show(config, name):
         if 'mounts' not in env_features:
             print('           note: "mounts" feature not in features list above — inactive')
 
+    substrate = proj.get('substrate')
+    if substrate:
+        print(f'  substrate {substrate}')
+        if 'substrate' not in env_features:
+            print('           note: "substrate" feature not in features list above — inactive')
+
     # A bare provider token in `creds:` is a request for a per-env credential
     # whose name dax derives. Showing the resolved name keeps the convention
     # visible rather than magic — and surfaces the "no tenant" error here,

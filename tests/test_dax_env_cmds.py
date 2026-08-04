@@ -293,6 +293,61 @@ def test_show_does_not_flag_mounts_when_the_feature_is_active(home, capsys):
     assert 'inactive' not in out
 
 
+# --- env set substrate -------------------------------------------------------
+#
+# A single path, unlike the generic `mounts` list: dax needs to know
+# specifically which mount holds shared/wire.sh and shared/new-process.sh, not
+# just that something extra is mounted (docs/design/VALIDATION.md).
+
+def test_env_set_substrate(home):
+    run_env_set(load_dax_config(), 'fabric', 'substrate', '~/virgil')
+
+    assert load_dax_config()['projects']['fabric']['substrate'] == '~/virgil'
+
+
+def test_substrate_is_a_documented_field():
+    assert 'substrate' in ENV_FIELDS
+    assert 'substrate' in env_field_help()
+
+
+def test_show_lists_substrate_when_set(home, capsys):
+    run_env_set(load_dax_config(), 'fabric', 'substrate', '~/virgil')
+    capsys.readouterr()
+
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert '~/virgil' in out
+
+
+def test_show_omits_substrate_line_when_unset(home, capsys):
+    run_env_show(load_dax_config(), 'fabric')
+
+    assert 'substrate' not in capsys.readouterr().out
+
+
+def test_show_flags_substrate_set_without_the_feature_active(home, capsys):
+    run_env_set(load_dax_config(), 'fabric', 'substrate', '~/virgil')
+    capsys.readouterr()
+
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'inactive' in out
+
+
+def test_show_does_not_flag_substrate_when_the_feature_is_active(home, capsys):
+    config = load_dax_config()
+    run_env_set(config, 'fabric', 'substrate', '~/virgil')
+    run_env_set(config, 'fabric', 'features', 'claude,substrate')
+    capsys.readouterr()
+
+    run_env_show(load_dax_config(), 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'inactive' not in out
+
+
 # --- env accept-shared-files -------------------------------------------------
 #
 # The escape hatch for the drift warning `sync_claude_shared_files` prints at

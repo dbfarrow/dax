@@ -90,4 +90,43 @@ if [ ! -e "$_dax_state_file" ]; then
     ( umask 077; printf '%s' '{"hasCompletedOnboarding": true}' > "$_dax_state_file" )
 fi
 
+# --- substrate gate + settings delivery (docs/design/VALIDATION.md) --------
+#
+# `--check` only, never a bare `wire.sh`: the self-heal already ran once at
+# container boot (dax-entrypoint.sh). Re-running it here would let a `claude`
+# restart silently repair wiring broken mid-session, defeating the Part 4
+# failure-mode tests, which restart a Claude session specifically *without*
+# restarting the container to prove the PreToolUse guard fires on its own.
+#
+# No SUBSTRATE_ROOT means this env never opted into the `substrate` feature —
+# identical behavior to before this gate existed.
+if [ -n "$SUBSTRATE_ROOT" ]; then
+    "$SUBSTRATE_ROOT/shared/wire.sh" --check
+    _substrate_rc=$?
+    case "$_substrate_rc" in
+        0)
+            _substrate_settings="$_dax_cfg_dir/substrate-settings.json"
+            # Never clobber a caller-supplied --settings.
+            case " $* " in
+                *' --settings '*) ;;
+                *)
+                    if [ -f "$_substrate_settings" ]; then
+                        set -- --settings "$_substrate_settings" "$@"
+                    fi
+                    ;;
+            esac
+            ;;
+        127)
+            echo "dax: substrate not mounted at $SUBSTRATE_ROOT — refusing to start claude" >&2
+            echo "dax: check the env's mounts (dax env show), then restart the container" >&2
+            exit 127
+            ;;
+        *)
+            echo "dax: substrate at $SUBSTRATE_ROOT is not correctly wired — refusing to start claude" >&2
+            echo "dax: run \`$SUBSTRATE_ROOT/shared/wire.sh\` from a container shell to repair" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 exec "${DAX_CLAUDE_REAL:-/usr/bin/claude-real}" "$@"

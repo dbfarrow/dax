@@ -24,6 +24,8 @@ ENV_FIELDS = {
               'in the container (needs "mounts" in features too). A path may be '
               '<host>:<container_name> to mount under a name other than its own '
               'basename, e.g. ~/.claude:host-claude',
+    'substrate': 'host path to a virgil-style substrate repo, mounted read-write and '
+                 'exposed as $SUBSTRATE_ROOT (needs "substrate" in features too)',
 }
 
 

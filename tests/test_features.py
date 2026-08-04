@@ -10,6 +10,7 @@ from dax import (
     feature_dotfiles,
     feature_ports,
     feature_mounts,
+    feature_substrate,
     feature_msf,
     feature_ovpn,
     feature_X11,
@@ -154,6 +155,28 @@ def test_feature_mounts_explicit_name_does_not_affect_other_entries(monkeypatch)
     opts = feature_mounts(config)
     assert '--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude' in opts
     assert '--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment' in opts
+
+
+def test_feature_substrate_mounts_and_sets_env_var(monkeypatch):
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'substrate': '~/virgil', '_container_home': '/home/dfarrow'}
+    opts = feature_substrate(config)
+    assert '--volume=/Users/dfarrow/virgil:/home/dfarrow/virgil' in opts
+    assert '-e' in opts
+    assert 'SUBSTRATE_ROOT=/home/dfarrow/virgil' in opts
+
+
+def test_feature_substrate_is_not_fooled_by_a_trailing_slash(monkeypatch):
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'substrate': '~/virgil/', '_container_home': '/home/dfarrow'}
+    opts = feature_substrate(config)
+    assert '--volume=/Users/dfarrow/virgil/:/home/dfarrow/virgil' in opts
+
+
+def test_feature_substrate_warns_if_none_configured(capsys):
+    opts = feature_substrate({})
+    assert opts == []
+    assert 'no substrate configured' in capsys.readouterr().out
 
 
 def test_feature_ssh_returns_agent_forwarding(tmp_path, monkeypatch):

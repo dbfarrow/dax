@@ -386,6 +386,33 @@ def feature_mounts(config):
     return opts
 
 
+def feature_substrate(config):
+    """Mounts a virgil-style substrate repo (rw) and exposes it as
+    $SUBSTRATE_ROOT — the container path both the substrate's own hooks and
+    the `claude` wrapper's gate/settings-delivery logic read (see
+    docs/design/VALIDATION.md's dax contract).
+
+    A single path, unlike the generic `mounts` list feature_mounts handles:
+    dax needs to know specifically which mount holds `shared/wire.sh` and
+    `shared/new-process.sh`, not just that something extra is mounted.
+
+    `wire.sh --quiet` itself runs once per container boot (dax-entrypoint.sh,
+    baked into the image), not here and not on every `claude` launch — see
+    the design doc's Part 4 for why that distinction is load-bearing.
+    """
+    substrate = config.get('substrate')
+    if not substrate:
+        dax_print("[!] no substrate configured for this env "
+                  "(dax env set <name> substrate <path>)")
+        return []
+    host = os.path.expanduser(substrate)
+    container = os.path.join(_container_home(config), dir_basename(host))
+    return [
+        '--volume={}:{}'.format(host, container),
+        '-e', 'SUBSTRATE_ROOT={}'.format(container),
+    ]
+
+
 def _add_feature(feature, config):
     fn_name = 'feature_{}'.format(feature)
     fn = globals().get(fn_name)
@@ -655,6 +682,7 @@ def cmd_run(args):
         # reads config['tenant'] above — project entries aren't otherwise
         # promoted into the flat config feature functions see.
         config['mounts'] = project.get('mounts') or []
+        config['substrate'] = project.get('substrate')
 
         ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
         if ssh_creds:
@@ -1341,6 +1369,386 @@ def cmd_tenants(args):
     print()
 
 
+def _read_process_types(substrate_root):
+    """[(type, skill, description), ...] from the substrate's own registry.
+
+    Never hardcoded here — dax reads whatever the substrate declares, so
+    adding a process type there never needs a dax release (see the "What dax
+    must not do" section of docs/design/VALIDATION.md).
+    """
+    tsv = Path(substrate_root) / 'shared' / 'process-types.tsv'
+    if not tsv.is_file():
+        raise ValueError('no process-types.tsv at {} — is {} a substrate repo?'.format(
+            tsv, substrate_root))
+    types = []
+    for line in tsv.read_text().splitlines():
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 3:
+            types.append((parts[0], parts[1], parts[2]))
+    return types
+
+
+def _check_process_dir(config, process_dir):
+    """Refuse structurally bad choices for a new process directory, before
+    anything is created or registered.
+
+    Two classes of mistake, both cheap to catch here and expensive to
+    unwind later: nesting/colliding with an already-registered project (the
+    same mistake `find_enclosing_project`/Gate 0 catches for `dax run`, just
+    much earlier — before there's anything to untangle), and landing outside
+    $HOME, where `dax run` would refuse to launch it anyway (`load_config`'s
+    "dax must be run from somewhere under your home dir"), just much later.
+    """
+    from dax_creds.config import find_enclosing_project
+
+    home = Path.home().resolve()
+    try:
+        process_dir.relative_to(home)
+    except ValueError:
+        dax_print('[!] {} is not under your home directory ({}) — `dax run` '
+                  'refuses to launch from outside $HOME'.format(process_dir, home))
+        sys.exit(1)
+
+    enclosing = find_enclosing_project(config, process_dir)
+    if enclosing is not None:
+        enclosing_name, enclosing_project = enclosing
+        dax_print('[!] {} is inside already-registered project {!r} at {}'.format(
+            process_dir, enclosing_name, Path(enclosing_project['dir']).expanduser().resolve()))
+        sys.exit(1)
+
+    for other_name, other_project in (config.get('projects') or {}).items():
+        other_dir = other_project.get('dir')
+        if not other_dir:
+            continue
+        other_dir = Path(other_dir).expanduser().resolve()
+        if other_dir == process_dir:
+            dax_print('[!] {} is already registered as project {!r}'.format(
+                process_dir, other_name))
+            sys.exit(1)
+        if process_dir in other_dir.parents:
+            dax_print('[!] {} would enclose already-registered project {!r} at {}'.format(
+                process_dir, other_name, other_dir))
+            sys.exit(1)
+
+
+def _run_process_new(config, args):
+    """Scaffold a new substrate-backed process and register it as a dax env.
+
+    Every field is either given on the command line or interactively
+    prompted — never silently defaulted, and never left to new-process.sh's
+    own basic prompting: dax resolves everything itself first, then invokes
+    the script with a complete, fully-resolved flag set so its own `ask()`
+    prompts never trigger regardless of stdio.
+
+    Directory and substrate paths are resolved to absolute, symlink-free
+    paths (`.resolve()`) as soon as they're known — `register_project`
+    documents `dir` as an absolute host path, a relative or `~`-shorthand
+    value stored verbatim would silently break every cwd-based env lookup,
+    and the confirmation summary below is only trustworthy if the paths in
+    it are the real ones.
+    """
+    from dax_creds.init import _prompt, _q_confirm, _q_select, register_project, run_env_set, save_config
+    from dax_creds.config import state_tree_path
+    import questionary
+
+    name = args.name
+
+    process_dir = args.dir or _prompt('Process directory')
+    if not process_dir:
+        dax_print('[!] a process directory is required')
+        sys.exit(1)
+    process_dir = Path(process_dir).expanduser().resolve()
+
+    _check_process_dir(config, process_dir)
+
+    tenant = args.tenant or _prompt_tenant(process_dir, _known_tenant_names())
+
+    substrate = args.substrate or _prompt('Substrate path', default=config.get('substrate'))
+    if not substrate:
+        dax_print('[!] a substrate path is required (pass --substrate, or set a top-level '
+                  '`substrate:` default in ~/.dax.yaml)')
+        sys.exit(1)
+    substrate_root = Path(substrate).expanduser().resolve()
+
+    title = args.title or _prompt('Process title')
+    if not title:
+        dax_print('[!] a process title is required')
+        sys.exit(1)
+
+    try:
+        types = _read_process_types(substrate_root)
+    except ValueError as e:
+        dax_print('[!] {}'.format(e))
+        sys.exit(1)
+
+    if args.type:
+        process_type = args.type
+        skill = next((s for t, s, _d in types if t == process_type), None)
+        if skill is None:
+            dax_print('[!] unknown type {!r} — see {}/shared/process-types.tsv'.format(
+                process_type, substrate_root))
+            sys.exit(1)
+    else:
+        choices = [questionary.Choice('{} — {}'.format(t, desc), value=(t, skill))
+                   for t, skill, desc in types]
+        process_type, skill = _q_select('Process type:', choices)
+
+    if args.git and args.no_git:
+        dax_print('[!] pass --git or --no-git, not both')
+        sys.exit(1)
+    elif args.git:
+        git_decision = True
+    elif args.no_git:
+        git_decision = False
+    else:
+        print('Keep this process under version control?')
+        print('  git history cannot be selectively scrubbed later — a process that may')
+        print('  need to be destroyed is cleaner without it.')
+        git_decision = _q_confirm('git?', default=False)
+
+    default_image = config.get('defaults', {}).get('image', 'dax-base')
+    state_dir = state_tree_path(tenant, name)
+
+    if process_dir.exists():
+        count = sum(1 for _ in process_dir.iterdir())
+        dir_note = 'already exists, empty' if count == 0 else \
+            'already exists, {} item(s) inside'.format(count)
+    else:
+        dir_note = 'will be created'
+
+    print()
+    print('About to create a new process:')
+    print('  env name    {}'.format(name))
+    print('  directory   {}   [{}]'.format(process_dir, dir_note))
+    print('  substrate   {}'.format(substrate_root))
+    print('  tenant      {}'.format(tenant))
+    print('  title       {}'.format(title))
+    print('  type        {} (skill: {})'.format(process_type, skill))
+    print('  git         {}'.format('yes' if git_decision else 'no'))
+    print('  image       {}'.format(default_image))
+    print('  creds       claude   (derived per-env credential)')
+    print('  features    substrate, claude_tenant_state')
+    print('  state tree  {}'.format(state_dir))
+    print()
+
+    if args.dry_run:
+        dax_print('[-]   dry run — nothing created or registered')
+        return
+
+    if not _q_confirm('Proceed?', default=True):
+        dax_print('[-]   aborted — nothing created or registered')
+        return
+
+    new_process_cmd = [
+        str(substrate_root / 'shared' / 'new-process.sh'),
+        '--dir', str(process_dir),
+        '--title', title,
+        '--type', process_type,
+        '--git' if git_decision else '--no-git',
+    ]
+    result = subprocess.run(new_process_cmd)
+    if result.returncode != 0:
+        dax_print('[!] new-process.sh failed (exit {}) — not registering an env'.format(
+            result.returncode))
+        sys.exit(1)
+
+    register_project(config, name=name, project_dir=process_dir,
+                     image=default_image, creds=['claude'])
+    save_config(config)
+    run_env_set(config, name, 'tenant', tenant)
+    run_env_set(config, name, 'substrate', str(substrate_root))
+    # Always both, unconditionally — every substrate-backed process needs its
+    # own Claude state tree as well as the substrate mount, never just one.
+    run_env_set(config, name, 'features', 'substrate,claude_tenant_state',
+                valid_features=_feature_names())
+
+    dax_print('[+] registered {}. Run `dax run` from {} to launch it.'.format(name, process_dir))
+
+
+def _uncommitted_git_note(dir_path):
+    """A short "N uncommitted change(s)" note, or None if the directory isn't
+    a git repo or has nothing outstanding. Surfaced in the destroy summary
+    rather than silently lost — a `--git` process with no remote means this
+    is the only copy of that work."""
+    if not (dir_path / '.git').is_dir():
+        return None
+    try:
+        result = subprocess.run(['git', '-C', str(dir_path), 'status', '--porcelain'],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    changed = [line for line in result.stdout.splitlines() if line.strip()]
+    if not changed:
+        return None
+    return '! {} uncommitted git change(s)'.format(len(changed))
+
+
+def _derived_creds_for(project, name):
+    """[derived credential name, ...] for one project — never an
+    explicitly-named/shared credential, only ones dax itself derived for
+    this env specifically (see BARE_PROVIDER_CREDS)."""
+    from dax_creds.config import resolve_credential_names
+    try:
+        resolved = resolve_credential_names(project, name)
+    except ValueError:
+        # A bare provider entry with no tenant to derive from — already
+        # broken in a way `dax run`/`env show` would refuse on, and not
+        # this command's job to fix. Nothing resolvable to clean up.
+        return []
+    return [cred_name for cred_name, provider in resolved if provider]
+
+
+def _run_process_destroy(config, args):
+    """Tear down one or more registered processes: directory, Claude state
+    tree (plus its sibling shared-files manifest), any per-env derived
+    credential, and the ~/.dax.yaml entry itself.
+
+    docs/design/VALIDATION.md's `destroy-process` (item 6), generalized past
+    substrate processes specifically — the same cleanup (dir + state tree +
+    credential + registry entry) applies to any tenant-isolated env, and
+    restricting this to substrate-tagged ones would only get in the way of
+    burning down other test cruft.
+    """
+    from dax_creds.config import state_tree_path, _shared_files_manifest_path
+    from dax_creds.init import (
+        _q_checkbox, _container_name_for, _is_container_running,
+        _tree_stats, _human_size, _human_age, run_creds_remove, save_config,
+    )
+    import questionary
+
+    projects = config.get('projects') or {}
+
+    names = list(args.name or [])
+    if not names:
+        if not projects:
+            dax_print('[!] no registered envs to destroy')
+            return
+        choices = []
+        for pname, project in sorted(projects.items()):
+            tenant = project.get('tenant')
+            label = '{}   [{}{}]'.format(
+                pname, project.get('dir', '?'),
+                ', tenant {}'.format(tenant) if tenant else ', no tenant')
+            choices.append(questionary.Choice(label, value=pname))
+        names = _q_checkbox('Select processes to destroy (nothing pre-checked):', choices)
+        if not names:
+            dax_print('[-]   nothing selected')
+            return
+
+    unknown = [n for n in names if n not in projects]
+    if unknown:
+        dax_print('[!] not registered: {}'.format(', '.join(unknown)))
+        sys.exit(1)
+
+    # Guardrails, checked for every candidate before any deletion begins — a
+    # problem with one candidate must never leave the batch half-destroyed.
+    for name in names:
+        dir_path = Path(projects[name].get('dir', '')).expanduser()
+        container = _container_name_for(dir_path)
+        if _is_container_running(container):
+            dax_print('[!] {} is running — stop it first (`docker stop {}`)'.format(
+                name, container))
+            sys.exit(1)
+
+    print()
+    print('About to destroy:')
+    for name in names:
+        project = projects[name]
+        dir_path = Path(project.get('dir', '')).expanduser()
+        tenant = project.get('tenant')
+
+        print()
+        print(name)
+        if dir_path.exists():
+            count = sum(1 for _ in dir_path.iterdir())
+            note = '{} item(s)'.format(count)
+            git_note = _uncommitted_git_note(dir_path)
+            if git_note:
+                note += '; ' + git_note
+            print('  directory   {}   [{}]'.format(dir_path, note))
+        else:
+            print('  directory   {}   [already gone]'.format(dir_path))
+
+        if tenant:
+            state = state_tree_path(tenant, name)
+            if state.exists():
+                size, used = _tree_stats(state)
+                print('  state tree  {}   [{}, used {} ago]'.format(
+                    state, _human_size(size), _human_age(used)))
+            else:
+                print('  state tree  {}   [already gone]'.format(state))
+        else:
+            print('  state tree  (no tenant declared — none)')
+
+        derived = _derived_creds_for(project, name)
+        if derived:
+            print('  credential  {}   (derived — also removed from Keychain)'.format(
+                ', '.join(derived)))
+        else:
+            print('  credential  (none derived)')
+
+        print('  registry    ~/.dax.yaml entry')
+
+    print()
+    print('{} process(es) above will be permanently destroyed. This cannot be undone.'.format(
+        len(names)))
+    print()
+
+    if args.dry_run:
+        dax_print('[-]   dry run — nothing destroyed')
+        return
+
+    typed = input('Type DESTROY to confirm: ')
+    if typed != 'DESTROY':
+        dax_print('[-]   aborted — nothing destroyed')
+        return
+
+    for name in names:
+        project = projects[name]
+        dir_path = Path(project.get('dir', '')).expanduser()
+        tenant = project.get('tenant')
+
+        if dir_path.exists():
+            shutil.rmtree(dir_path)
+            dax_print('[-]   removed {}'.format(dir_path))
+
+        if tenant:
+            state = state_tree_path(tenant, name)
+            if state.exists():
+                shutil.rmtree(state)
+                dax_print('[-]   removed {}'.format(state))
+            manifest = _shared_files_manifest_path(tenant, name)
+            if manifest.exists():
+                manifest.unlink()
+
+        for cred_name in _derived_creds_for(project, name):
+            try:
+                run_creds_remove(config, cred_name)
+            except Exception as e:
+                dax_print('[!] could not remove credential {}: {}'.format(cred_name, e))
+
+        del config['projects'][name]
+        save_config(config)
+        dax_print('[+] destroyed {}'.format(name))
+
+
+def cmd_process(args):
+    from dax_creds.config import load_dax_config
+
+    try:
+        config = load_dax_config()
+    except FileNotFoundError:
+        dax_print('[!] no ~/.dax.yaml found — run `dax init` first')
+        sys.exit(1)
+
+    if args.process_command == 'new':
+        _run_process_new(config, args)
+    elif args.process_command == 'destroy':
+        _run_process_destroy(config, args)
+
+
 def cmd_backup(args):
     home = os.path.expanduser('~')
     repo_root = Path(__file__).parent
@@ -1484,6 +1892,41 @@ def main():
 
     subparsers.add_parser('tenants', help='List known tenants and their projects')
 
+    process_p = subparsers.add_parser('process', help='Manage virgil-style substrate processes')
+    process_sub = process_p.add_subparsers(dest='process_command', required=True)
+    process_new_p = process_sub.add_parser(
+        'new', help='Scaffold a new substrate-backed process and register it as a dax env')
+    process_new_p.add_argument('name', help='Env name to register')
+    process_new_p.add_argument('--dir', help='Host directory for the new process (prompted if omitted)')
+    process_new_p.add_argument('--tenant', help='Tenant/grouping label (prompted if omitted)')
+    process_new_p.add_argument(
+        '--substrate',
+        help="Path to the substrate repo (prompted if omitted, defaulting to the top-level "
+             "`substrate:` in ~/.dax.yaml if set)")
+    process_new_p.add_argument('--title', help='Process title (prompted if omitted)')
+    process_new_p.add_argument('--type', help='Process type (prompted if omitted)')
+    process_new_git = process_new_p.add_mutually_exclusive_group()
+    process_new_git.add_argument('--git', action='store_true',
+                                 help='Keep the process under version control')
+    process_new_git.add_argument('--no-git', action='store_true',
+                                 help='Do not put the process under version control')
+    process_new_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Resolve every field and print the full-path summary, then exit '
+             'without creating or registering anything')
+
+    process_destroy_p = process_sub.add_parser(
+        'destroy',
+        help='Permanently remove one or more processes: directory, state tree, '
+             'derived credential, and registry entry')
+    process_destroy_p.add_argument(
+        'name', nargs='*',
+        help='Env name(s) to destroy (omit for an interactive picker over every registered env)')
+    process_destroy_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Print the full-path summary of what would be destroyed, then exit '
+             'without changing anything')
+
     args = parser.parse_args()
 
     if args.command == 'build':
@@ -1506,6 +1949,8 @@ def main():
         cmd_tenant(args)
     elif args.command == 'tenants':
         cmd_tenants(args)
+    elif args.command == 'process':
+        cmd_process(args)
 
 
 if __name__ == '__main__':
