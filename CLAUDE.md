@@ -135,18 +135,23 @@ migrates the process itself; running `migrate_env_state.py --apply
 and-crawl recovery — is a later, optional step whenever that process is
 actually revisited, not a prerequisite to registering it.
 
-**Separate open thread, not yet started:** `new-process.sh`'s scaffolding is
-too destructive for migrating a directory that already has its own
-`context.md`/`inbox.md` (refuses on `context.md`, but silently overwrites
-`CLAUDE.md`/`inbox.md` with no check at all if `context.md` happens to be
-absent). Sketched a non-destructive redesign in conversation (merge
-frontmatter into `context.md` rather than refuse; treat `inbox.md`/`CLAUDE.md`
-like `.gitignore` — write only if absent) but **this is a change to
-`new-process.sh` itself, which lives in the virgil/discernment repo, not
-dax** — `docs/design/scripts/new-process.sh` here is only an untracked
-reference copy. Offered to draft the patch against that local copy for the
-user to port over; not done because the user hadn't confirmed they wanted
-that when the mounts question came up instead.
+**Half fixed, 2026-08-06 — `CLAUDE.md`/`inbox.md` no longer silently
+overwritten.** `new-process.sh`'s scaffolding was too destructive for
+migrating a directory that already has its own `context.md`/`inbox.md`
+(refused on `context.md`, but silently overwrote `CLAUDE.md`/`inbox.md` with
+no check at all if `context.md` happened to be absent). The `inbox.md`/
+`CLAUDE.md`-like-`.gitignore` half of the sketched redesign — write only if
+absent, print a notice and move on rather than overwrite — is now patched
+into `docs/design/scripts/new-process.sh`. **Still needed: the other half**
+(merge frontmatter into `context.md` rather than hard-refusing when it
+already exists) — not done, since it's a real design question (what does
+"merge" mean when the existing file's own content might conflict with the
+template's frontmatter) rather than a mechanical write-if-absent change.
+**And still outstanding regardless: this is a change to `new-process.sh`
+itself, which lives in the virgil/discernment repo, not dax** —
+`docs/design/scripts/new-process.sh` here is only an untracked reference
+copy, gitignored, never picked up by `dax process new` until it's ported over
+by hand to the real script in that repo.
 
 ## Completed
 
