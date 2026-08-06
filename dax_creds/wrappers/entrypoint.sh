@@ -24,4 +24,29 @@ if [ -n "$SUBSTRATE_ROOT" ]; then
     fi
 fi
 
+# --- SSH agent bridge -------------------------------------------------------
+#
+# DAX_SSH_AGENT_TCP_PORT is set by `dax run` (dax.py's feature_ssh) when this
+# env has the `ssh` feature and a host agent socket resolved. It used to be a
+# bind-mounted Unix socket instead — the same class of problem the Claude
+# credential daemon already hit: Docker Desktop's Mac-VM file sharing does
+# not reliably keep a live Unix socket's connect/accept semantics working
+# across a sleep/wake cycle or a VM restart, even when both real endpoints
+# (host agent, container) never went away. TCP over host.docker.internal
+# survives that boundary; a bind-mounted socket does not.
+#
+# ssh/git need a real Unix socket for SSH_AUTH_SOCK, not a TCP address, so
+# this relays: local Unix socket <-> TCP to the host bridge dax run started.
+# socat forwards raw bytes — it has no idea it's carrying the SSH agent
+# protocol, and doesn't need to.
+#
+# Started once per container boot, alongside wire.sh above, not per `claude`
+# launch — the bridge is a property of the container's lifetime, not of any
+# one command run inside it.
+if [ -n "$DAX_SSH_AGENT_TCP_PORT" ]; then
+    socat UNIX-LISTEN:/tmp/ssh-agent.sock,fork,unlink-early \
+          TCP:host.docker.internal:"$DAX_SSH_AGENT_TCP_PORT" &
+    export SSH_AUTH_SOCK=/tmp/ssh-agent.sock
+fi
+
 exec "$@"

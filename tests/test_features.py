@@ -7,6 +7,7 @@ from dax import (
     feature_optdir,
     feature_aws,
     feature_ssh,
+    _resolve_ssh_agent_sock,
     feature_dotfiles,
     feature_ports,
     feature_mounts,
@@ -179,21 +180,51 @@ def test_feature_substrate_warns_if_none_configured(capsys):
     assert 'no substrate configured' in capsys.readouterr().out
 
 
-def test_feature_ssh_returns_agent_forwarding(tmp_path, monkeypatch):
+def test_feature_ssh_returns_tcp_bridge_env_var():
+    # feature_ssh no longer resolves or mounts anything itself — cmd_run
+    # already started the bridge and stashed its port before the feature
+    # loop runs (see test_dax_cmd_run_ssh_bridge.py for that wiring).
+    opts = feature_ssh({'_ssh_bridge_port': 54321})
+    assert opts == ['-e', 'DAX_SSH_AGENT_TCP_PORT=54321']
+    assert not any('ssh-agent' in o for o in opts)
+
+
+def test_feature_ssh_returns_nothing_without_a_bridge_port(capsys):
+    # No _ssh_bridge_port means cmd_run either didn't have the `ssh` feature
+    # active, found no socket, or the bridge failed to start — cmd_run
+    # already reported why in each of those cases, so this stays silent
+    # rather than repeating it.
+    opts = feature_ssh({})
+    assert opts == []
+    assert capsys.readouterr().out == ''
+
+
+def test_resolve_ssh_agent_sock_prefers_ephemeral_agent(tmp_path):
+    ephemeral = tmp_path / 'ephemeral.sock'
+    ephemeral.touch()
+    config = {'_ephemeral_ssh_sock': str(ephemeral)}
+    assert _resolve_ssh_agent_sock(config) == str(ephemeral)
+
+
+def test_resolve_ssh_agent_sock_falls_back_to_env(tmp_path, monkeypatch):
     sock = tmp_path / 'ssh-auth.sock'
     sock.touch()
     monkeypatch.setenv('SSH_AUTH_SOCK', str(sock))
-    opts = feature_ssh({})
-    assert any('ssh-agent' in o for o in opts)
-    assert '-e' in opts
-    assert 'SSH_AUTH_SOCK=/ssh-agent' in opts
+    assert _resolve_ssh_agent_sock({}) == str(sock)
 
 
-def test_feature_ssh_warns_if_no_socket(tmp_path, monkeypatch, capsys):
+def test_resolve_ssh_agent_sock_falls_back_to_docker_desktop_socket(tmp_path, monkeypatch):
+    monkeypatch.delenv('SSH_AUTH_SOCK', raising=False)
+    dd_sock = tmp_path / 'docker-desktop.sock'
+    dd_sock.touch()
+    monkeypatch.setattr('dax._DOCKER_DESKTOP_SSH_SOCK', str(dd_sock))
+    assert _resolve_ssh_agent_sock({}) == str(dd_sock)
+
+
+def test_resolve_ssh_agent_sock_returns_none_when_nothing_found(tmp_path, monkeypatch):
     monkeypatch.delenv('SSH_AUTH_SOCK', raising=False)
     monkeypatch.setattr('dax._DOCKER_DESKTOP_SSH_SOCK', str(tmp_path / 'missing.sock'))
-    opts = feature_ssh({})
-    assert opts == []
+    assert _resolve_ssh_agent_sock({}) is None
 
 
 def test_feature_webpreview_uses_explicit_port(monkeypatch):
