@@ -282,39 +282,17 @@ def feature_ovpn(config):
     ]
 
 
-_DOCKER_DESKTOP_SSH_SOCK = '/run/host-services/ssh-auth.sock'
-
-
-def _resolve_ssh_agent_sock(config):
-    """The host SSH agent socket to bridge into the container, or None.
-
-    Ephemeral per-credential agent (started by `cmd_run` when a project's
-    `creds:` resolves an `ssh` credential) wins over the ambient host agent,
-    which wins over Docker Desktop's own bridge socket - the same fallback
-    order `feature_ssh` always used, just pulled out on its own so `cmd_run`
-    can decide whether to start the TCP bridge (see `feature_ssh`) before the
-    feature loop runs.
-    """
-    sock = config.get('_ephemeral_ssh_sock', '')
-    if not sock or not os.path.exists(sock):
-        sock = os.environ.get('SSH_AUTH_SOCK', '')
-    if not sock or not os.path.exists(sock):
-        sock = _DOCKER_DESKTOP_SSH_SOCK
-    if not sock or not os.path.exists(sock):
-        return None
-    return sock
-
-
 def _start_ssh_agent_bridge(agent_sock, port):
-    """TCP-forward a host SSH agent socket into the container's reach.
+    """TCP-forward this run's ephemeral SSH agent socket into the
+    container's reach.
 
-    Bind-mounting the socket directly (the old `feature_ssh`) doesn't survive
-    a Docker Desktop VM restart or a host sleep/wake cycle even when both real
-    endpoints stay up the whole time - the container keeps the mount, but the
-    live connection across the VM boundary can die. Exactly the class of
-    problem `_start_creds_daemon` already solved for OAuth credentials by
-    using TCP over `host.docker.internal` instead of a bind-mounted socket;
-    this is the same fix applied to agent forwarding.
+    Bind-mounting the socket directly doesn't survive a Docker Desktop VM
+    restart or a host sleep/wake cycle even when both real endpoints stay up
+    the whole time - the container keeps the mount, but the live connection
+    across the VM boundary can die. Exactly the class of problem
+    `_start_creds_daemon` already solved for OAuth credentials by using TCP
+    over `host.docker.internal` instead of a bind-mounted socket; this is the
+    same fix applied to agent forwarding.
 
     Runs `dax_creds.ssh_bridge` (asyncio, in-process) rather than shelling out
     to `socat` on the host - `socat` is guaranteed inside the container image
@@ -337,25 +315,6 @@ def _start_ssh_agent_bridge(agent_sock, port):
     dax_print("[+] starting SSH agent bridge (log: {})".format(log_path))
     return subprocess.Popen(cmd, cwd=str(Path(__file__).parent),
                             stdout=log_file, stderr=log_file)
-
-
-def feature_ssh(config):
-    """Point the container at the TCP bridge `cmd_run` already started.
-
-    `cmd_run` resolves the host agent socket (`_resolve_ssh_agent_sock`) and
-    starts `_start_ssh_agent_bridge` before the feature loop runs, stashing
-    its port at `config['_ssh_bridge_port']` - this function only turns that
-    into the env var `dax-entrypoint.sh` reads to start its own end of the
-    bridge (a local Unix socket relayed over TCP to this port, since `ssh`/
-    `git` need a real Unix socket for `SSH_AUTH_SOCK`, not a TCP address).
-    No bridge port means no socket resolved, no `ssh` feature active, or the
-    bridge failed to start - `cmd_run` already reported why, so this stays
-    silent rather than repeating it.
-    """
-    port = config.get('_ssh_bridge_port')
-    if not port:
-        return []
-    return ['-e', 'DAX_SSH_AGENT_TCP_PORT={}'.format(port)]
 
 
 def _is_port_free(port):
@@ -806,6 +765,29 @@ def cmd_run(args):
                     ssh_provider.setup(cred_def, agent_sock=agent_sock)
                 except RuntimeError as e:
                     dax_print(f"[!] failed to load {cred_name}: {e}")
+
+            # Forwarding into the container turns on purely because an `ssh`
+            # credential is configured — no separate `ssh` feature to also
+            # remember (removed 2026-08; see docs/design/2026-08-04-codebase
+            # -review.md). There is only ever one source now: this run's own
+            # ephemeral agent above. No more ambient SSH_AUTH_SOCK or Docker
+            # Desktop bridge-socket fallback — a project with no ssh
+            # credential gets no forwarding, full stop, matching the same
+            # explicit-over-ambient move already made for GitHub.
+            try:
+                port = _find_free_port()
+                ssh_bridge_proc = _start_ssh_agent_bridge(agent_sock, port)
+                if _wait_for_tcp('127.0.0.1', port):
+                    if '--add-host=host.docker.internal:host-gateway' not in cmd:
+                        cmd += ['--add-host=host.docker.internal:host-gateway']
+                    cmd += ['-e', 'DAX_SSH_AGENT_TCP_PORT={}'.format(port)]
+                else:
+                    dax_print("[!] SSH agent bridge did not start — skipping")
+                    ssh_bridge_proc.terminate()
+                    ssh_bridge_proc = None
+            except Exception as e:
+                dax_print(f"[!] SSH agent bridge error: {e}")
+                ssh_bridge_proc = None
         non_ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') != 'ssh'}
         if non_ssh_creds:
             from dax_creds.init import ensure_project_credentials
@@ -839,30 +821,6 @@ def cmd_run(args):
         dax_print('    Check this env\'s own `features:` list (and any -f flag) '
                   'and drop one of the two.')
         sys.exit(1)
-
-    # Must run before the feature loop: feature_ssh only reads
-    # config['_ssh_bridge_port'], it doesn't resolve or start anything itself.
-    # Wrapped the same way the credential daemon below is - a resolution or
-    # subprocess failure here should be a warning, not a crashed `dax run`.
-    if 'ssh' in features:
-        try:
-            sock = _resolve_ssh_agent_sock(config)
-            if sock:
-                port = _find_free_port()
-                ssh_bridge_proc = _start_ssh_agent_bridge(sock, port)
-                if _wait_for_tcp('127.0.0.1', port):
-                    config['_ssh_bridge_port'] = port
-                    if '--add-host=host.docker.internal:host-gateway' not in cmd:
-                        cmd += ['--add-host=host.docker.internal:host-gateway']
-                else:
-                    dax_print("[!] SSH agent bridge did not start — skipping")
-                    ssh_bridge_proc.terminate()
-                    ssh_bridge_proc = None
-            else:
-                dax_print("[!] No SSH agent socket found. Run ssh-add first.")
-        except Exception as e:
-            dax_print(f"[!] SSH agent bridge error: {e}")
-            ssh_bridge_proc = None
 
     for feature in features:
         cmd.extend(_add_feature(feature, config))
