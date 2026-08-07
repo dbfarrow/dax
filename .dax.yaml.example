@@ -2,7 +2,7 @@ image: dax:latest
 
 # workdir, dotfiles, and webpreview are always on — no top-level features:
 # list needed for them. Everything else (claude, claude_tenant_state, auggie,
-# github, ssh, mounts, substrate, ...) is opt-in per project: add it to that
+# github, mounts, substrate, ...) is opt-in per project: add it to that
 # project's own `features:` list, a cwd-local .dax.yaml, or pass -f. e.g.:
 #
 # projects:
@@ -10,7 +10,11 @@ image: dax:latest
 #     dir: /Users/you/code/myproject
 #     features:
 #       - claude
-#       - ssh
+#
+# SSH agent forwarding is not a feature at all — it turns on purely because a
+# project's `creds:` list resolves to an `ssh`-provider credential (`dax
+# creds add`, provider ssh). No credential, no forwarding; nothing to opt
+# into separately.
 
 claudedir:
   mount: ~/.claude
