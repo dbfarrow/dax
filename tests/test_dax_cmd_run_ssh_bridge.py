@@ -141,6 +141,7 @@ def test_add_host_not_duplicated_when_ssh_and_creds_both_active(tmp_path, monkey
     monkeypatch.setattr(dax, '_find_free_port', lambda: 54321)
     monkeypatch.setattr(dax, '_start_ssh_agent_bridge', _fake_bridge_starter({}))
     monkeypatch.setattr(dax, '_start_creds_daemon', lambda creds, port: _FakeProc())
+    monkeypatch.setattr(dax, '_keyring_importable', lambda: True)
 
     cmd_run(_args())
 

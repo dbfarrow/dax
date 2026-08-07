@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+import dax
 import dax_creds.providers.claude as claude_provider_module
 from dax import _login_credential_def, _post_login_import
 
@@ -85,6 +86,27 @@ def test_login_rejects_a_derived_name_whose_env_has_no_tenant():
 
     with pytest.raises(KeyError):
         _login_credential_def(config, 'claude-personal-fabric')
+
+
+def test_cmd_creds_login_refuses_cleanly_when_keyring_not_importable(monkeypatch, capsys):
+    """Regression test for the 2026-08-06 incident: run from inside a
+    container (or any Python without `keyring`), `dax creds login` spawned a
+    daemon that crashed on an uncaught ImportError, invisible to the caller
+    since stdout/stderr go to a log file — all that surfaced was a silent
+    5-second timeout and "credential daemon did not start", no indication
+    why, and no hint that credential logins are host-only in the first
+    place. This must refuse immediately with both pieces of information
+    instead of ever spawning the daemon.
+    """
+    monkeypatch.setattr(dax, '_keyring_importable', lambda: False)
+    config = {'credentials': {'github-dbfarrow': {'provider': 'github'}}}
+
+    with pytest.raises(SystemExit):
+        dax.cmd_creds_login('github-dbfarrow', config)
+
+    out = capsys.readouterr().out
+    assert 'keyring not importable' in out
+    assert 'host terminal' in out
 
 
 def test_post_login_import_claude_stores_token_from_disk(tmp_path, monkeypatch, capsys):

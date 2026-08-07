@@ -658,6 +658,28 @@ def _wait_for_tcp(host, port, timeout=5.0):
     return False
 
 
+def _keyring_importable():
+    """Whether `sys.executable` - the same interpreter `_start_creds_daemon`/
+    `_start_login_daemon` spawn as a subprocess - can import `keyring`.
+
+    `dax_creds.daemon`'s `__main__` block constructs `KeyringTokenStore()`
+    unconditionally, with no fallback, so a missing `keyring` crashes the
+    daemon subprocess immediately on an ImportError - one that never reaches
+    the caller's terminal (stdout/stderr are redirected to its log file), so
+    it just looks like "credential daemon did not start" after a silent
+    5-second timeout with no indication why. Checking here, before spawning
+    it, turns that into an immediate, actionable message instead. `keyring`
+    is not declared anywhere in pyproject.toml (host or container extras) -
+    it is only ever an out-of-band `pip install keyring`, which is exactly
+    what's missing when this returns False.
+    """
+    try:
+        import keyring  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 _DOCKER_TWO_TOKEN_FLAGS = {'--name', '-h', '-v', '--volume', '-e', '-p', '-w', '--group-add', '-c'}
 
 
@@ -846,7 +868,12 @@ def cmd_run(args):
         cmd.extend(_add_feature(feature, config))
 
     try:
-        if project_creds:
+        if project_creds and not _keyring_importable():
+            dax_print("[!] keyring not importable in this Python environment — "
+                      "skipping the credential daemon and launching without "
+                      "credentials.")
+            dax_print("    pip install keyring on whatever host is running `dax`.")
+        elif project_creds:
             port = _find_free_port()
             daemon_proc = _start_creds_daemon(project_creds, port)
             if _wait_for_tcp('127.0.0.1', port):
@@ -1007,6 +1034,17 @@ def cmd_creds_login(cred_name, config):
     provider_cfg = _LOGIN_PROVIDERS.get(provider)
     if not provider_cfg:
         print(f"dax creds login: no login flow defined for provider '{provider}'")
+        sys.exit(1)
+
+    if not _keyring_importable():
+        dax_print('[!] keyring not importable in this Python environment — the '
+                  'credential daemon needs it to reach Keychain, and crashes '
+                  'immediately without it.')
+        dax_print('    If this is inside a dax container: credential logins are '
+                  'host-only — exit and run `dax creds login` from your host '
+                  'terminal instead.')
+        dax_print('    Otherwise: pip install keyring on whatever host is '
+                  'running `dax`.')
         sys.exit(1)
 
     image = config.get('defaults', {}).get('image', 'dax:latest')

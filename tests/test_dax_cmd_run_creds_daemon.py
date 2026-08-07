@@ -55,6 +55,10 @@ def _setup(tmp_path, monkeypatch):
     # subprocess can't run here — while still recording exactly what
     # cmd_run asked for, and its own terminate()/wait() for the finally block.
     monkeypatch.setattr(dax, '_find_free_port', lambda: 54321)
+    # This sandbox has no `keyring` either — same gap the module docstring
+    # above already documents for the daemon subprocess. cmd_run's own
+    # keyring check runs in-process now, so it needs faking too.
+    monkeypatch.setattr(dax, '_keyring_importable', lambda: True)
 
     class _FakeDaemon:
         def terminate(self):
@@ -87,6 +91,28 @@ def test_creds_daemon_uses_tcp_not_a_bind_mounted_socket(tmp_path, monkeypatch, 
     assert 'DAX_CREDS_GITHUB=test-github' in out
     assert 'dax-creds.sock' not in out
     assert 'dax-state' not in out
+
+
+def test_credential_daemon_skipped_cleanly_when_keyring_not_importable(tmp_path, monkeypatch, capsys):
+    """Regression test for the 2026-08-06 incident: the daemon subprocess
+    crashes on an uncaught ImportError when `keyring` isn't importable in
+    whatever Python spawns it, and that crash was invisible to the caller —
+    stdout/stderr go to a log file, so all `dax run`/`dax creds login` ever
+    showed was a silent 5-second timeout and a generic "did not start". This
+    must be caught before spawning anything, not discovered by a timeout.
+    """
+    home, repo, started = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(dax, '_keyring_importable', lambda: False)
+
+    def _fail_if_called(*a, **k):
+        raise AssertionError('_start_creds_daemon should not be called')
+    monkeypatch.setattr(dax, '_start_creds_daemon', _fail_if_called)
+
+    dax.cmd_run(_args())
+
+    out = capsys.readouterr().out
+    assert 'keyring not importable' in out
+    assert 'DAX_CREDS_SOCK' not in out
 
 
 def test_start_creds_daemon_passes_tcp_port_not_a_socket_path(tmp_path, monkeypatch):
