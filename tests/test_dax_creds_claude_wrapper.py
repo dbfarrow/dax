@@ -18,11 +18,16 @@ ENVELOPE = {'claudeAiOauth': {'accessToken': 'sk-ant-oat01-abc',
 ENVELOPE_JSON = json.dumps(ENVELOPE)
 
 
-def _run(tmp_path, dax_creds_stdout, dax_creds_exit=0, env=None):
+def _run(tmp_path, dax_creds_stdout, dax_creds_exit=0, env=None, cwd=None):
     """Run the wrapper with a stubbed dax-creds and a no-op claude-real.
 
     The wrapper is copied and chmod'd the way Dockerfile.tmpl installs it,
     rather than executed in place — it is mode 644 in the repo.
+
+    A stub `tmux` is always on PATH too, logging its own argv to `tmp_path /
+    'tmux.log'` (one line per invocation) rather than doing anything real —
+    the wrapper only ever calls it when $TMUX is set, so its absence from
+    most tests' env means it's simply never invoked.
     """
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir(exist_ok=True)
@@ -40,6 +45,11 @@ def _run(tmp_path, dax_creds_stdout, dax_creds_exit=0, env=None):
     real.write_text('#!/bin/bash\nexit 0\n')
     real.chmod(0o755)
 
+    tmux_log = tmp_path / 'tmux.log'
+    tmux = bin_dir / 'tmux'
+    tmux.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> {!r}\nexit 0\n'.format(str(tmux_log)))
+    tmux.chmod(0o755)
+
     home = tmp_path / 'home'
     home.mkdir(exist_ok=True)
 
@@ -54,7 +64,7 @@ def _run(tmp_path, dax_creds_stdout, dax_creds_exit=0, env=None):
         full_env.update(env)
 
     proc = subprocess.run([str(wrapper)], env=full_env, capture_output=True,
-                          text=True, timeout=30)
+                          text=True, timeout=30, cwd=cwd)
     return proc, home / '.claude' / '.credentials.json'
 
 
@@ -106,6 +116,29 @@ def test_no_fetch_attempted_without_credential_name(tmp_path):
     proc, creds = _run(tmp_path, ENVELOPE_JSON, env={'DAX_CREDS_CLAUDE': ''})
     assert not creds.exists()
     assert proc.stderr == ''
+
+
+def test_renames_tmux_window_to_the_current_directory_when_inside_tmux(tmp_path):
+    project_dir = tmp_path / 'myproject'
+    project_dir.mkdir()
+
+    proc, _ = _run(tmp_path, ENVELOPE_JSON, env={'TMUX': '/tmp/fake-tmux-socket,0,0'},
+                   cwd=str(project_dir))
+
+    assert proc.returncode == 0
+    assert (tmp_path / 'tmux.log').read_text() == 'rename-window myproject\n'
+
+
+def test_does_not_touch_tmux_when_not_running_inside_it(tmp_path):
+    proc, _ = _run(tmp_path, ENVELOPE_JSON, env={'TMUX': ''})
+    assert proc.returncode == 0
+    assert not (tmp_path / 'tmux.log').exists()
+
+
+def test_still_execs_claude_after_renaming_the_window(tmp_path):
+    # The rename must never block or replace the actual claude launch.
+    proc, _ = _run(tmp_path, ENVELOPE_JSON, env={'TMUX': '/tmp/fake-tmux-socket,0,0'})
+    assert proc.returncode == 0
 
 
 # --- inject-if-absent ------------------------------------------------------

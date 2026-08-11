@@ -129,4 +129,16 @@ if [ -n "$SUBSTRATE_ROOT" ]; then
     esac
 fi
 
+# --- tmux window naming ------------------------------------------------------
+#
+# $TMUX is only set when this process is actually running inside a tmux pane
+# — set by the pane's own environment, regardless of whether that pane was
+# started by hand or by auto_claude below — so this is a no-op everywhere
+# else, nothing to gate behind a feature. Renaming on every claude launch
+# (not just the first) keeps the window's name following wherever you've
+# cd'd if you relaunch claude later in the same window.
+if [ -n "$TMUX" ]; then
+    tmux rename-window "$(basename "$PWD")" 2>/dev/null
+fi
+
 exec "${DAX_CLAUDE_REAL:-/usr/bin/claude-real}" "$@"

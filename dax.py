@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import os
+import shlex
 import shutil
 import sys
 import socket as _socket
@@ -337,14 +338,49 @@ def _find_preview_port(cwd, base=8000, spread=1000):
 
 
 def feature_webpreview(config):
+    """Starts dax-preview in the background, then hands off to whatever the
+    container's foreground process should be.
+
+    Sets `config['_shell_cmd_prefix']` rather than building the whole
+    foreground command itself: webpreview is a baseline feature (always
+    on), so it runs before any opt-in feature that might also want a say in
+    what the foreground process is (see `feature_auto_claude`) - `cmd_run`
+    is what actually decides the final `exec` target, composing whatever
+    prefix this sets with it. Baseline features always run first
+    (`_ALWAYS_ON_FEATURES` is prepended unconditionally in `load_config`),
+    so this ordering is reliable, not incidental.
+    """
     port = config.get('webpreview', {}).get('port') or _find_preview_port(config['cwd'])
-    shell = os.environ.get('SHELL', '/bin/zsh')
     container_home = _container_home(config)
     preview_dir = os.path.join(container_home, config['workdir_name'])
     dax_print("[-]   webpreview port: {}".format(port))
-    config['_shell_cmd'] = 'DAX_PREVIEW_PORT={} DAX_PREVIEW_DIR={} dax-preview & exec {}'.format(
-        port, preview_dir, shell)
+    config['_shell_cmd_prefix'] = 'DAX_PREVIEW_PORT={} DAX_PREVIEW_DIR={} dax-preview & '.format(
+        port, preview_dir)
     return ['-p', '{}:{}'.format(port, port)]
+
+
+def feature_auto_claude(config):
+    """Skip the login shell: start tmux, name its one window after the
+    project, and run `claude` directly as that window's command.
+
+    Sets `config['_final_exec']` rather than building `_shell_cmd` outright,
+    so this composes with `feature_webpreview`'s background dax-preview
+    launcher (see `cmd_run`'s shell_cmd assembly) instead of silently
+    dropping it — webpreview is a baseline feature and always runs, so its
+    background launcher must keep running here too.
+
+    Deliberately runs `claude` as the window's own command, not
+    `claude; exec $SHELL`: exiting claude (`/exit` or otherwise) closes the
+    window, which — since it's the session's only window — ends the tmux
+    session, which ends the container's foreground process, which (`docker
+    run --rm`) tears the container down. No shell left behind to fall into
+    and nothing to reattach to, by design: the container itself is gone
+    with it. `shlex.quote` because `workdir_name` can contain spaces or
+    parens (an already-supported case — see feature_workdir's own tests).
+    """
+    window_name = shlex.quote(config['workdir_name'])
+    config['_final_exec'] = 'tmux new-session -n {} claude'.format(window_name)
+    return []
 
 
 def feature_dotfiles(config):
@@ -855,8 +891,17 @@ def cmd_run(args):
 
     cmd.append(config['image'])
 
-    if '_shell_cmd' in config:
-        cmd += ['/bin/sh', '-c', config['_shell_cmd']]
+    # The composition point for whatever the container's foreground process
+    # should be. `_shell_cmd_prefix` (feature_webpreview's background
+    # dax-preview launcher) and `_final_exec` (feature_auto_claude's tmux+
+    # claude) are independent knobs set by different features that may or
+    # may not both be active - neither overwrites the other outright, so
+    # webpreview's background launcher survives whether or not auto_claude
+    # also wants to replace the login shell with something else.
+    if '_shell_cmd_prefix' in config or '_final_exec' in config:
+        final = config.get('_final_exec') or os.environ.get('SHELL', '/bin/zsh')
+        shell_cmd = config.get('_shell_cmd_prefix', '') + 'exec {}'.format(final)
+        cmd += ['/bin/sh', '-c', shell_cmd]
 
     dax_print("[+] running:\n  " + _format_docker_cmd(cmd))
     try:

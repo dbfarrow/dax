@@ -14,6 +14,7 @@ from dax import (
     feature_ovpn,
     feature_X11,
     feature_webpreview,
+    feature_auto_claude,
     _find_preview_port,
     _format_docker_cmd,
 )
@@ -196,8 +197,13 @@ def test_feature_webpreview_uses_explicit_port(monkeypatch):
     opts = feature_webpreview(config)
     assert '-p' in opts
     assert '9000:9000' in opts
-    assert 'DAX_PREVIEW_PORT=9000' in config['_shell_cmd']
-    assert 'DAX_PREVIEW_DIR=/home/user/project' in config['_shell_cmd']
+    assert 'DAX_PREVIEW_PORT=9000' in config['_shell_cmd_prefix']
+    assert 'DAX_PREVIEW_DIR=/home/user/project' in config['_shell_cmd_prefix']
+    # webpreview no longer decides the foreground process itself — that's
+    # cmd_run's job, composing this prefix with whatever _final_exec is (or
+    # the plain shell, by default).
+    assert '_final_exec' not in config
+    assert 'exec' not in config['_shell_cmd_prefix']
 
 
 def test_feature_webpreview_auto_assigns_port(monkeypatch):
@@ -212,7 +218,32 @@ def test_feature_webpreview_auto_assigns_port(monkeypatch):
     port_mapping = next(o for o in opts if ':' in o and o != '-p')
     host_port = int(port_mapping.split(':')[0])
     assert 8000 <= host_port < 9000
-    assert 'DAX_PREVIEW_DIR=/home/user/project' in config['_shell_cmd']
+    assert 'DAX_PREVIEW_DIR=/home/user/project' in config['_shell_cmd_prefix']
+
+
+def test_feature_auto_claude_sets_final_exec_to_tmux_running_claude():
+    config = {'workdir_name': 'myproject'}
+    opts = feature_auto_claude(config)
+    assert opts == []
+    assert config['_final_exec'] == "tmux new-session -n myproject claude"
+
+
+def test_feature_auto_claude_quotes_a_workdir_name_with_spaces():
+    # workdir_name can contain spaces/parens (see feature_workdir's own
+    # tests) — this has to survive being embedded in a single shell string.
+    config = {'workdir_name': 'my.project (copy)'}
+    opts = feature_auto_claude(config)
+    assert config['_final_exec'] == "tmux new-session -n 'my.project (copy)' claude"
+
+
+def test_feature_auto_claude_does_not_clobber_webpreviews_prefix():
+    """Both features run in the same cmd_run pass — webpreview (baseline)
+    always runs first, so this must add to what it already set, not replace
+    the whole shell-command story wholesale."""
+    config = {'workdir_name': 'myproject', '_shell_cmd_prefix': 'dax-preview & '}
+    feature_auto_claude(config)
+    assert config['_shell_cmd_prefix'] == 'dax-preview & '
+    assert config['_final_exec'] == "tmux new-session -n myproject claude"
 
 
 def test_find_preview_port_is_deterministic():
