@@ -2,8 +2,9 @@ image: dax:latest
 
 # workdir, dotfiles, and webpreview are always on — no top-level features:
 # list needed for them. Everything else (claude, claude_tenant_state, auggie,
-# github, mounts, substrate, ...) is opt-in per project: add it to that
-# project's own `features:` list, a cwd-local .dax.yaml, or pass -f. e.g.:
+# github, mounts, substrate, auto_claude, ...) is opt-in per project: add it
+# to that project's own `features:` list, a cwd-local .dax.yaml, or pass -f.
+# e.g.:
 #
 # projects:
 #   myproject:
@@ -15,6 +16,12 @@ image: dax:latest
 # project's `creds:` list resolves to an `ssh`-provider credential (`dax
 # creds add`, provider ssh). No credential, no forwarding; nothing to opt
 # into separately.
+#
+# `auto_claude`: skip the login shell — start tmux, name its one window after
+# the project, and run `claude` directly as that window's command. Exiting
+# claude closes the window, ends the (only) tmux session, ends the
+# container's foreground process, and (docker run --rm) tears the container
+# down. No shell left behind and nothing to reattach to, by design.
 
 claudedir:
   mount: ~/.claude
