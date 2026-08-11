@@ -1,16 +1,21 @@
-"""`_run_backup` copies configured dotfiles/backup paths into
-~/.local/state/dax/backup/, byte-for-byte comparison so only actually-
-changed files get copied. Shared by `dax backup` (verbose=True, the full
-report) and `cmd_run` (verbose=False - wired in so an ordinary `dax run`
-also catches dotfile drift without being asked, but without spamming
-"unchanged" for every dotfile on every ordinary launch).
+"""`_run_backup` copies configured dotfiles/backup paths into this repo's
+own backup/, byte-for-byte comparison so only actually-changed files get
+copied. Shared by `dax backup` (verbose=True, the full report) and
+`cmd_run` (verbose=False - wired in so an ordinary `dax run` also catches
+dotfile drift without being asked, but without spamming "unchanged" for
+every dotfile on every ordinary launch).
 
-Lives under ~/.local/state/dax/, not inside this repo's own checkout -
-moved there 2026-08 after a real ~/.dax.yaml (real client names, and for
-some providers real OAuth client secrets) landed in a diff about to be
-pushed to this repo's public GitHub remote. `backup_dir` is always passed
-explicitly in the tests below regardless, since even the *real* default
-must never be touched by a test.
+Stays inside the repo checkout, deliberately - moving it to
+~/.local/state/dax/ (tried first, 2026-08, after a real ~/.dax.yaml full of
+real client names landed in a diff about to be pushed) turned out to solve
+the wrong half of the problem: that path isn't bind-mounted into a
+container the way the project's own workdir is, so on dax's own
+self-hosted dev loop it would quietly vanish on every container rebuild.
+What actually closes the leak is .gitignore, not location - backup/ is
+gitignored now, so it can never be `git add`ed regardless of what real
+content lands in it. `backup_dir` is still passed explicitly in every test
+below regardless, since even the *real* default must never be touched by
+a test.
 """
 import argparse
 
@@ -20,16 +25,13 @@ import dax
 from dax import _run_backup, cmd_run
 
 
-def test_default_backup_dir_is_outside_the_repo(tmp_path, monkeypatch):
-    """The whole point of the move: nothing here should ever again resolve
-    to somewhere inside this git checkout."""
-    monkeypatch.setenv('HOME', str(tmp_path))
-    (tmp_path / '.zshrc').write_text('x')
-
-    _run_backup({'dotfiles': {'ro': ['~/.zshrc'], 'rw': []}, 'backup': []})
-
-    expected = tmp_path / '.local' / 'state' / 'dax' / 'backup' / '.zshrc'
-    assert expected.read_text() == 'x'
+def test_default_backup_dir_is_inside_the_repo_checkout():
+    """Confirms the default by reading the source, not by calling it with
+    backup_dir=None - the real default must never actually run in a test,
+    even one with an empty config where it would technically be a no-op."""
+    import inspect
+    source = inspect.getsource(_run_backup)
+    assert "Path(__file__).parent / 'backup'" in source
 
 
 def _config(monkeypatch, home, ro=None, rw=None, backup=None):

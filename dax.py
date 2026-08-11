@@ -1911,30 +1911,36 @@ def cmd_process(args):
 
 
 def _run_backup(config, verbose=True, backup_dir=None):
-    """Copy configured dotfiles/backup paths into ~/.local/state/dax/backup/,
+    """Copy configured dotfiles/backup paths into this repo's own backup/,
     byte-for-byte comparison so only actually-changed files get copied.
     Shared by `dax backup` (verbose=True, the full report) and `cmd_run`
     (verbose=False - a startup banner reporting "unchanged" for every
     dotfile on every ordinary launch is noise, not signal; an actual backup
     is still always reported, regardless of verbose).
 
-    Lives under `~/.local/state/dax/` - the same home `state_tree_path()`
-    (`dax_creds/config.py`) already uses for per-project Claude state - not
-    inside this repo's own checkout. It used to be `backup/` right here, and
-    that put personal backup content (dotfiles, `~/.dax.yaml` - which can
-    carry real project names and, for some providers, OAuth client secrets)
-    directly in this tool's own git-tracked, publicly-hosted source tree.
-    Found live 2026-08 when a real `~/.dax.yaml` full of real client names
-    landed in a diff about to be pushed. Personal state belongs in personal
-    state, same principle as the Claude tree migration - not in the thing
-    that gets published.
+    Stays inside the repo checkout, deliberately - `~/.local/state/dax/`
+    (the state_tree_path() convention `dax_creds/config.py` uses for
+    per-project Claude state) looked like the obvious fix after a real
+    ~/.dax.yaml (real client names, and for some providers real OAuth client
+    secrets) landed in a diff about to be pushed to this repo's public
+    remote, but it was solving the wrong half of the problem: it's not
+    reliably persistent. Only paths a container's own feature functions
+    explicitly bind-mount survive that container's teardown (the project's
+    own workdir, dotfiles, ~/.claude via claude_tenant_state/claude) -
+    ~/.local/state/dax/backup is not one of those, so on dax's own
+    self-hosted dev loop (this repo, developed from inside a dax container)
+    it would quietly vanish on every rebuild. The project's own workdir does
+    survive exactly that, since it IS the bind mount - so backup/ stays
+    right here. What actually closes the leak is .gitignore, not location:
+    a gitignored path can never be `git add`ed regardless of what real
+    content lands in it, on any host.
 
     `backup_dir` is still injectable so tests can point it at a tmp_path
     instead of writing into the real one.
     """
     home = os.path.expanduser('~')
     if backup_dir is None:
-        backup_dir = Path.home() / '.local' / 'state' / 'dax' / 'backup'
+        backup_dir = Path(__file__).parent / 'backup'
 
     paths = []
     for f in config.get('dotfiles', {}).get('ro', []):
