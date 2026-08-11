@@ -703,6 +703,15 @@ def cmd_run(args):
     username = _get_username()
     config['_container_home'] = '/home/{}'.format(username)
 
+    # Same check `dax backup` runs by hand, just automatic now — quiet
+    # unless something actually changed. A failure here (permissions, disk
+    # full) is a warning, never a reason to block the actual container
+    # launch, which is the thing this command is actually for.
+    try:
+        _run_backup(config, verbose=False)
+    except Exception as e:
+        dax_print("[!] backup check failed: {}".format(e))
+
     name = config['envname']
     # Lands the shell at the project mount instead of $HOME — workdir is one
     # of the always-on baseline features, so this path is exactly where
@@ -1901,17 +1910,31 @@ def cmd_process(args):
         _run_process_destroy(config, args)
 
 
-def cmd_backup(args):
-    home = os.path.expanduser('~')
-    repo_root = Path(__file__).parent
-    backup_dir = repo_root / 'backup'
+def _run_backup(config, verbose=True, backup_dir=None):
+    """Copy configured dotfiles/backup paths into ~/.local/state/dax/backup/,
+    byte-for-byte comparison so only actually-changed files get copied.
+    Shared by `dax backup` (verbose=True, the full report) and `cmd_run`
+    (verbose=False - a startup banner reporting "unchanged" for every
+    dotfile on every ordinary launch is noise, not signal; an actual backup
+    is still always reported, regardless of verbose).
 
-    try:
-        with open(os.path.join(home, '.dax.yaml'), 'r') as f:
-            config = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        dax_print("[!] no ~/.dax.yaml found")
-        sys.exit(1)
+    Lives under `~/.local/state/dax/` - the same home `state_tree_path()`
+    (`dax_creds/config.py`) already uses for per-project Claude state - not
+    inside this repo's own checkout. It used to be `backup/` right here, and
+    that put personal backup content (dotfiles, `~/.dax.yaml` - which can
+    carry real project names and, for some providers, OAuth client secrets)
+    directly in this tool's own git-tracked, publicly-hosted source tree.
+    Found live 2026-08 when a real `~/.dax.yaml` full of real client names
+    landed in a diff about to be pushed. Personal state belongs in personal
+    state, same principle as the Claude tree migration - not in the thing
+    that gets published.
+
+    `backup_dir` is still injectable so tests can point it at a tmp_path
+    instead of writing into the real one.
+    """
+    home = os.path.expanduser('~')
+    if backup_dir is None:
+        backup_dir = Path.home() / '.local' / 'state' / 'dax' / 'backup'
 
     paths = []
     for f in config.get('dotfiles', {}).get('ro', []):
@@ -1966,10 +1989,24 @@ def cmd_backup(args):
 
     for e in updated:
         dax_print("[+] backed up: {}".format(e))
-    for e in unchanged:
-        dax_print("[-] unchanged: {}".format(e))
-    for e in skipped:
-        dax_print("[-] skipped (not found): {}".format(e))
+    if verbose:
+        for e in unchanged:
+            dax_print("[-] unchanged: {}".format(e))
+        for e in skipped:
+            dax_print("[-] skipped (not found): {}".format(e))
+
+    return updated, unchanged, skipped
+
+
+def cmd_backup(args):
+    try:
+        with open(os.path.join(os.path.expanduser('~'), '.dax.yaml'), 'r') as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        dax_print("[!] no ~/.dax.yaml found")
+        sys.exit(1)
+
+    _run_backup(config, verbose=True)
 
 
 def main():
