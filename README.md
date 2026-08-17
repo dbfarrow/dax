@@ -161,7 +161,7 @@ projects:
 | `dotfiles` | Files to mount into the container (`ro` / `rw`) |
 | `credentials` | Named credential definitions (managed by `dax creds`) |
 | `projects` | Registered environments (managed by `dax init`) |
-| `backup` | Host paths to copy into `backup/` when running `dax backup` |
+| `backup` | Host paths to copy into `backup/` in this checkout - gitignored, local only (`dax backup`, and quietly on every `dax run`) |
 
 ---
 

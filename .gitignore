@@ -10,3 +10,4 @@ dax.egg-info/
 Dockerfile
 *.crt
 docs/design/scripts/
+backup/

@@ -438,12 +438,18 @@ def feature_mounts(config):
     way `creds`/`features` are. Opt-in via `features: [mounts]`, same shape as
     `feature_ports`.
 
-    Each entry is `<host_path>` or `<host_path>:<container_name>` — the name
-    defaults to `dir_basename(host_path)`, but an explicit one is what lets a
-    host directory be mounted under a name other than its own basename,
+    Each entry is `<host_path>`, `<host_path>:<container_name>`, or
+    `<host_path>:<container_name>:ro` — the name defaults to
+    `dir_basename(host_path)` when omitted, but an explicit one is what lets
+    a host directory be mounted under a name other than its own basename,
     e.g. the host's own `~/.claude` mounted as `~/host-claude` to inspect its
     real content from inside a container without colliding with whatever
-    `claude_tenant_state` already mounted at `~/.claude` itself.
+    `claude_tenant_state` already mounted at `~/.claude` itself. A trailing
+    `:ro` (the default container name still applies, e.g. `~/discernment::ro`)
+    marks that one mount read-only — the same trailing-`:ro` Docker's own
+    `--volume` syntax uses, and the same convention `feature_dotfiles`
+    already applies to `dotfiles.ro`. Read-write unless present; nothing to
+    opt into for the common case.
     """
     opts = []
     mounts = config.get('mounts', [])
@@ -452,10 +458,12 @@ def feature_mounts(config):
         return opts
     container_home = _container_home(config)
     for entry in mounts:
-        host_path, _sep, container_name = entry.partition(':')
+        host_path, _sep, rest = entry.partition(':')
+        container_name, _sep, mode = rest.partition(':')
+        ro = mode == 'ro'
         host = os.path.expanduser(host_path)
         container = os.path.join(container_home, container_name or dir_basename(host))
-        opts.append('--volume={}:{}'.format(host, container))
+        opts.append('--volume={}:{}{}'.format(host, container, ':ro' if ro else ''))
     return opts
 
 
@@ -702,6 +710,15 @@ def cmd_run(args):
     config = load_config()
     username = _get_username()
     config['_container_home'] = '/home/{}'.format(username)
+
+    # Same check `dax backup` runs by hand, just automatic now — quiet
+    # unless something actually changed. A failure here (permissions, disk
+    # full) is a warning, never a reason to block the actual container
+    # launch, which is the thing this command is actually for.
+    try:
+        _run_backup(config, verbose=False)
+    except Exception as e:
+        dax_print("[!] backup check failed: {}".format(e))
 
     name = config['envname']
     # Lands the shell at the project mount instead of $HOME — workdir is one
@@ -1901,17 +1918,37 @@ def cmd_process(args):
         _run_process_destroy(config, args)
 
 
-def cmd_backup(args):
-    home = os.path.expanduser('~')
-    repo_root = Path(__file__).parent
-    backup_dir = repo_root / 'backup'
+def _run_backup(config, verbose=True, backup_dir=None):
+    """Copy configured dotfiles/backup paths into this repo's own backup/,
+    byte-for-byte comparison so only actually-changed files get copied.
+    Shared by `dax backup` (verbose=True, the full report) and `cmd_run`
+    (verbose=False - a startup banner reporting "unchanged" for every
+    dotfile on every ordinary launch is noise, not signal; an actual backup
+    is still always reported, regardless of verbose).
 
-    try:
-        with open(os.path.join(home, '.dax.yaml'), 'r') as f:
-            config = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        dax_print("[!] no ~/.dax.yaml found")
-        sys.exit(1)
+    Stays inside the repo checkout, deliberately - `~/.local/state/dax/`
+    (the state_tree_path() convention `dax_creds/config.py` uses for
+    per-project Claude state) looked like the obvious fix after a real
+    ~/.dax.yaml (real client names, and for some providers real OAuth client
+    secrets) landed in a diff about to be pushed to this repo's public
+    remote, but it was solving the wrong half of the problem: it's not
+    reliably persistent. Only paths a container's own feature functions
+    explicitly bind-mount survive that container's teardown (the project's
+    own workdir, dotfiles, ~/.claude via claude_tenant_state/claude) -
+    ~/.local/state/dax/backup is not one of those, so on dax's own
+    self-hosted dev loop (this repo, developed from inside a dax container)
+    it would quietly vanish on every rebuild. The project's own workdir does
+    survive exactly that, since it IS the bind mount - so backup/ stays
+    right here. What actually closes the leak is .gitignore, not location:
+    a gitignored path can never be `git add`ed regardless of what real
+    content lands in it, on any host.
+
+    `backup_dir` is still injectable so tests can point it at a tmp_path
+    instead of writing into the real one.
+    """
+    home = os.path.expanduser('~')
+    if backup_dir is None:
+        backup_dir = Path(__file__).parent / 'backup'
 
     paths = []
     for f in config.get('dotfiles', {}).get('ro', []):
@@ -1966,10 +2003,24 @@ def cmd_backup(args):
 
     for e in updated:
         dax_print("[+] backed up: {}".format(e))
-    for e in unchanged:
-        dax_print("[-] unchanged: {}".format(e))
-    for e in skipped:
-        dax_print("[-] skipped (not found): {}".format(e))
+    if verbose:
+        for e in unchanged:
+            dax_print("[-] unchanged: {}".format(e))
+        for e in skipped:
+            dax_print("[-] skipped (not found): {}".format(e))
+
+    return updated, unchanged, skipped
+
+
+def cmd_backup(args):
+    try:
+        with open(os.path.join(os.path.expanduser('~'), '.dax.yaml'), 'r') as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        dax_print("[!] no ~/.dax.yaml found")
+        sys.exit(1)
+
+    _run_backup(config, verbose=True)
 
 
 def main():

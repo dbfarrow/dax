@@ -157,6 +157,52 @@ def test_feature_mounts_explicit_name_does_not_affect_other_entries(monkeypatch)
     assert '--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment' in opts
 
 
+def test_feature_mounts_defaults_to_read_write(monkeypatch):
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'mounts': ['~/discernment'], '_container_home': '/home/dfarrow'}
+    opts = feature_mounts(config)
+    assert opts == ['--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment']
+    assert not opts[0].endswith(':ro')
+
+
+def test_feature_mounts_ro_with_default_container_name(monkeypatch):
+    """Empty middle field (host::ro) keeps the default basename-derived name
+    while still marking it read-only — the container name and the ro flag
+    are two independent, positionally-separate fields."""
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'mounts': ['~/discernment::ro'], '_container_home': '/home/dfarrow'}
+    opts = feature_mounts(config)
+    assert opts == ['--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment:ro']
+
+
+def test_feature_mounts_ro_with_explicit_container_name(monkeypatch):
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'mounts': ['~/.claude:host-claude:ro'], '_container_home': '/home/dfarrow'}
+    opts = feature_mounts(config)
+    assert opts == ['--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude:ro']
+
+
+def test_feature_mounts_ro_does_not_leak_into_other_entries(monkeypatch):
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {
+        'mounts': ['~/.claude:host-claude:ro', '~/discernment'],
+        '_container_home': '/home/dfarrow',
+    }
+    opts = feature_mounts(config)
+    assert '--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude:ro' in opts
+    assert '--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment' in opts
+    assert not any(o.endswith('discernment:ro') for o in opts)
+
+
+def test_feature_mounts_only_the_literal_ro_suffix_marks_read_only(monkeypatch):
+    """A container name that happens to end up in the third field but isn't
+    literally 'ro' must not be silently treated as read-only."""
+    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    config = {'mounts': ['~/discernment:mydir:rw'], '_container_home': '/home/dfarrow'}
+    opts = feature_mounts(config)
+    assert opts == ['--volume=/Users/dfarrow/discernment:/home/dfarrow/mydir']
+
+
 def test_feature_substrate_mounts_and_sets_env_var(monkeypatch):
     monkeypatch.setenv('HOME', '/Users/dfarrow')
     config = {'substrate': '~/virgil', '_container_home': '/home/dfarrow'}
