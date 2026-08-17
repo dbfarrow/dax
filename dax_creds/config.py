@@ -20,10 +20,13 @@ ENV_FIELDS = {
     'image': 'docker image to run for this env',
     'creds': 'comma-separated credential names (replaces the whole list)',
     'features': 'comma-separated features for this env, on top of the global list',
-    'mounts': 'comma-separated host paths, each mounted read-write at $HOME/<name> '
-              'in the container (needs "mounts" in features too). A path may be '
+    'mounts': 'comma-separated host paths, each mounted at $HOME/<name> in the '
+              'container (needs "mounts" in features too). A path may be '
               '<host>:<container_name> to mount under a name other than its own '
-              'basename, e.g. ~/.claude:host-claude',
+              'basename, e.g. ~/.claude:host-claude, and/or end in :ro to mount '
+              'read-only instead of the read-write default, e.g. '
+              '~/discernment::ro (empty middle field keeps the default name) '
+              'or ~/.claude:host-claude:ro',
     'substrate': 'host path to a virgil-style substrate repo, mounted read-write and '
                  'exposed as $SUBSTRATE_ROOT (needs "substrate" in features too)',
 }

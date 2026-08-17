@@ -438,12 +438,18 @@ def feature_mounts(config):
     way `creds`/`features` are. Opt-in via `features: [mounts]`, same shape as
     `feature_ports`.
 
-    Each entry is `<host_path>` or `<host_path>:<container_name>` — the name
-    defaults to `dir_basename(host_path)`, but an explicit one is what lets a
-    host directory be mounted under a name other than its own basename,
+    Each entry is `<host_path>`, `<host_path>:<container_name>`, or
+    `<host_path>:<container_name>:ro` — the name defaults to
+    `dir_basename(host_path)` when omitted, but an explicit one is what lets
+    a host directory be mounted under a name other than its own basename,
     e.g. the host's own `~/.claude` mounted as `~/host-claude` to inspect its
     real content from inside a container without colliding with whatever
-    `claude_tenant_state` already mounted at `~/.claude` itself.
+    `claude_tenant_state` already mounted at `~/.claude` itself. A trailing
+    `:ro` (the default container name still applies, e.g. `~/discernment::ro`)
+    marks that one mount read-only — the same trailing-`:ro` Docker's own
+    `--volume` syntax uses, and the same convention `feature_dotfiles`
+    already applies to `dotfiles.ro`. Read-write unless present; nothing to
+    opt into for the common case.
     """
     opts = []
     mounts = config.get('mounts', [])
@@ -452,10 +458,12 @@ def feature_mounts(config):
         return opts
     container_home = _container_home(config)
     for entry in mounts:
-        host_path, _sep, container_name = entry.partition(':')
+        host_path, _sep, rest = entry.partition(':')
+        container_name, _sep, mode = rest.partition(':')
+        ro = mode == 'ro'
         host = os.path.expanduser(host_path)
         container = os.path.join(container_home, container_name or dir_basename(host))
-        opts.append('--volume={}:{}'.format(host, container))
+        opts.append('--volume={}:{}{}'.format(host, container, ':ro' if ro else ''))
     return opts
 
 
