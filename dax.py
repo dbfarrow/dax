@@ -2,12 +2,15 @@
 
 import argparse
 import hashlib
+import json
 import os
 import shlex
 import shutil
 import sys
 import socket as _socket
 import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 import yaml
 
@@ -1736,6 +1739,281 @@ def _run_process_new(config, args):
     dax_print('[+] registered {}. Run `dax run` from {} to launch it.'.format(name, process_dir))
 
 
+# Rebuildable dependency/cache directories: excluded from `dax process
+# export` because the project's own env setup (npm install, pip install,
+# ...) regenerates them on the destination the first time it's used there,
+# so shipping them across machines just costs archive size and transfer
+# time for nothing. Matched by directory name at any depth, not just the
+# top level - a monorepo's nested node_modules gets skipped too.
+_EXPORT_SKIP_DIRS = {
+    'node_modules', '__pycache__', '.venv', 'venv', 'venv-2.7', 'venv-3',
+    '.pytest_cache', '.mypy_cache', '.tox',
+}
+
+
+def _export_tar_filter(tarinfo):
+    if Path(tarinfo.name).name in _EXPORT_SKIP_DIRS:
+        return None
+    return tarinfo
+
+
+def _state_tree_tar_filter(include_credential):
+    """Excludes .credentials.json unless --include-credential was passed.
+
+    The sibling shared-files manifest (<tenant>/<project>.shared-files.json)
+    needs no explicit exclusion here at all - it lives beside
+    state_tree_path(), never inside it, so it is never part of what gets
+    handed to tar.add() in the first place. Carrying it over would risk a
+    false drift warning on the destination's first `dax run` anyway, since
+    "host" there means a different machine's global CLAUDE.md/settings.json.
+    """
+    def filt(tarinfo):
+        if not include_credential and Path(tarinfo.name).name == '.credentials.json':
+            return None
+        return tarinfo
+    return filt
+
+
+def _dir_size_excluding(path, skip_dirs):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fname in files:
+            try:
+                total += os.lstat(os.path.join(root, fname)).st_size
+            except OSError:
+                continue  # vanished mid-walk — not worth failing a size estimate over
+    return total
+
+
+def _run_process_export(config, args):
+    """Package one registered env's project directory and Claude state tree
+    (if any) into a tarball for moving to another machine.
+
+    Deliberately excludes the live Claude credential unless
+    --include-credential is passed. Keychain-issued OAuth grants are per
+    machine by design (see the credential-isolation decisions this whole
+    project is built around) - copying the refresh token to a second
+    machine while the first still exists means one grant authenticating
+    from two places, with no local guard able to catch the collision, since
+    Keychain never leaves the source machine for this to check against.
+    Every *other* credential (github, gmail, auggie, ssh) never lived in
+    either archived directory to begin with - they are Keychain-only, so
+    the destination needs its own login for all of them regardless of this
+    flag, not just the Claude one.
+
+    substrate/mounts travel as the bare path strings from the registry
+    entry, not their contents - the destination machine is expected to
+    already have equivalent paths there, same as it needs its own logins.
+    """
+    from dax_creds.config import state_tree_path
+    from dax_creds.init import _tree_stats, _human_size
+
+    projects = config.get('projects') or {}
+    name = args.name
+    if name not in projects:
+        known = ', '.join(sorted(projects)) or '(none registered)'
+        dax_print('[!] no env named {!r}. Known envs: {}'.format(name, known))
+        sys.exit(1)
+    project = projects[name]
+
+    process_dir = Path(project.get('dir', '')).expanduser().resolve()
+    if not process_dir.is_dir():
+        dax_print('[!] {} does not exist — nothing to export'.format(process_dir))
+        sys.exit(1)
+
+    tenant = project.get('tenant')
+    state_dir = state_tree_path(tenant, name) if tenant else None
+    has_state = bool(state_dir and state_dir.is_dir())
+    has_claude_cred = has_state and (state_dir / '.credentials.json').exists()
+
+    out_path = Path(args.out).expanduser().resolve() if args.out else \
+        Path.cwd() / '{}-dax-export.tar.gz'.format(name)
+
+    dir_size = _dir_size_excluding(process_dir, _EXPORT_SKIP_DIRS)
+    state_size = _tree_stats(state_dir)[0] if has_state else 0
+
+    creds = project.get('creds') or []
+
+    print()
+    print('About to export {}:'.format(name))
+    print('  directory    {}   [{}]'.format(process_dir, _human_size(dir_size)))
+    if has_state:
+        print('  state tree   {}   [{}]'.format(state_dir, _human_size(state_size)))
+        if has_claude_cred:
+            if args.include_credential:
+                print('  credential   included (--include-credential) — the live Claude '
+                      'OAuth grant travels with this archive')
+            else:
+                print('  credential   excluded — `dax creds login` will be needed for it '
+                      'on the destination')
+    else:
+        print('  state tree   (none — claude_tenant_state not in use)')
+    if creds:
+        print('  creds        {}   (Keychain-only — none of these travel; '
+              're-authenticate all of them on the destination)'.format(', '.join(creds)))
+    if project.get('substrate'):
+        print('  substrate    {}   (path only — not its contents)'.format(project['substrate']))
+    if project.get('mounts'):
+        print('  mounts       {}   (paths only — not their contents)'.format(
+            ', '.join(project['mounts'])))
+    print('  output       {}'.format(out_path))
+    print()
+
+    if args.dry_run:
+        dax_print('[-]   dry run — nothing written')
+        return
+
+    manifest = {
+        'name': name,
+        'tenant': tenant,
+        'image': project.get('image'),
+        'creds': creds,
+        'features': project.get('features') or [],
+        'mounts': project.get('mounts') or [],
+        'substrate': project.get('substrate'),
+        'had_state_tree': has_state,
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest_path = Path(tmp) / 'dax-export-manifest.json'
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(out_path, 'w:gz') as tar:
+            tar.add(manifest_path, arcname='dax-export-manifest.json')
+            tar.add(process_dir, arcname='project', filter=_export_tar_filter)
+            if has_state:
+                tar.add(state_dir, arcname='state',
+                        filter=_state_tree_tar_filter(args.include_credential))
+
+    dax_print('[+] exported {} to {}'.format(name, out_path))
+
+
+def _run_process_import(config, args):
+    """Unpack an archive built by `dax process export` and register it as a
+    new env on this machine.
+
+    Runs the same _check_process_dir guardrails `process new` uses -
+    landing an imported project outside $HOME or nested inside/around an
+    already-registered project is exactly as bad here as it is there. Never
+    pre-populates any credential beyond whatever the archive itself
+    literally carried (nothing, unless the export side used
+    --include-credential) - every provider needs its own fresh login here
+    regardless, since Keychain never travels.
+
+    Reads just the manifest out of the tar first (no full extraction) so a
+    bad archive or a name collision fails immediately rather than after
+    unpacking a potentially large project directory for nothing.
+    """
+    from dax_creds.init import _q_confirm, register_project, run_env_set, save_config
+    from dax_creds.config import state_tree_path, resolve_credential_names
+
+    archive = Path(args.archive).expanduser().resolve()
+    if not archive.is_file():
+        dax_print('[!] {} not found'.format(archive))
+        sys.exit(1)
+
+    with tarfile.open(archive) as tar:
+        try:
+            manifest_member = tar.getmember('dax-export-manifest.json')
+        except KeyError:
+            dax_print('[!] {} is not a dax export archive (no manifest found)'.format(archive))
+            sys.exit(1)
+        manifest = json.loads(tar.extractfile(manifest_member).read())
+
+        name = args.name or manifest['name']
+        if name in (config.get('projects') or {}):
+            dax_print('[!] {!r} is already registered — pick a different --name'.format(name))
+            sys.exit(1)
+
+        process_dir = Path(args.dir).expanduser().resolve()
+        _check_process_dir(config, process_dir)
+
+        tenant = args.tenant or manifest.get('tenant')
+        if manifest.get('had_state_tree') and not tenant:
+            dax_print('[!] this archive has a Claude state tree but no tenant was given '
+                      '(pass --tenant)')
+            sys.exit(1)
+
+        if process_dir.exists() and any(process_dir.iterdir()):
+            dax_print('[!] {} already exists and is not empty — refusing to overwrite'.format(
+                process_dir))
+            sys.exit(1)
+        dest_state = state_tree_path(tenant, name) if tenant else None
+        if dest_state and dest_state.exists():
+            dax_print('[!] {} already exists — refusing to overwrite'.format(dest_state))
+            sys.exit(1)
+
+        creds = manifest.get('creds') or []
+        try:
+            resolved_names = [n for n, _p in resolve_credential_names(
+                {'creds': creds, 'tenant': tenant}, name)]
+        except ValueError as e:
+            resolved_names = None
+            dax_print('[!] {}'.format(e))
+
+        print()
+        print('About to import {}:'.format(name))
+        print('  directory    {}'.format(process_dir))
+        print('  tenant       {}'.format(tenant or '(none)'))
+        print('  image        {}'.format(manifest.get('image')))
+        if creds:
+            shown = ', '.join(resolved_names) if resolved_names else ', '.join(creds)
+            print('  creds        {}   (none authenticated yet — run `dax creds login` '
+                  'for each after this finishes)'.format(shown))
+        if manifest.get('substrate'):
+            print('  substrate    {}   (path only — must already exist on this machine)'.format(
+                manifest['substrate']))
+        if manifest.get('mounts'):
+            print('  mounts       {}   (paths only — must already exist on this machine)'.format(
+                ', '.join(manifest['mounts'])))
+        print('  state tree   {}'.format(dest_state or '(none)'))
+        print()
+
+        if args.dry_run:
+            dax_print('[-]   dry run — nothing imported or registered')
+            return
+
+        if not _q_confirm('Proceed?', default=True):
+            dax_print('[-]   aborted — nothing imported or registered')
+            return
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tar.extractall(tmp, filter='data')
+
+            project_src = tmp / 'project'
+            process_dir.parent.mkdir(parents=True, exist_ok=True)
+            if project_src.is_dir():
+                shutil.move(str(project_src), str(process_dir))
+            else:
+                process_dir.mkdir(parents=True, exist_ok=True)
+
+            state_src = tmp / 'state'
+            if manifest.get('had_state_tree') and state_src.is_dir():
+                dest_state.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(state_src), str(dest_state))
+
+        register_project(config, name=name, project_dir=process_dir,
+                         image=manifest.get('image') or 'dax-base', creds=creds)
+        save_config(config)
+        if tenant:
+            run_env_set(config, name, 'tenant', tenant)
+        if manifest.get('features'):
+            run_env_set(config, name, 'features', ','.join(manifest['features']),
+                        valid_features=_feature_names())
+        if manifest.get('mounts'):
+            run_env_set(config, name, 'mounts', ','.join(manifest['mounts']))
+        if manifest.get('substrate'):
+            run_env_set(config, name, 'substrate', manifest['substrate'])
+
+    dax_print('[+] imported {} at {}.'.format(name, process_dir))
+    for cred_name in (resolved_names if creds and resolved_names else creds):
+        dax_print('    dax creds login {}'.format(cred_name))
+    dax_print('    then `dax run` from {} to launch it.'.format(process_dir))
+
+
 def _uncommitted_git_note(dir_path):
     """A short "N uncommitted change(s)" note, or None if the directory isn't
     a git repo or has nothing outstanding. Surfaced in the destroy summary
@@ -1916,6 +2194,10 @@ def cmd_process(args):
         _run_process_new(config, args)
     elif args.process_command == 'destroy':
         _run_process_destroy(config, args)
+    elif args.process_command == 'export':
+        _run_process_export(config, args)
+    elif args.process_command == 'import':
+        _run_process_import(config, args)
 
 
 def _run_backup(config, verbose=True, backup_dir=None):
@@ -2129,6 +2411,34 @@ def main():
         '--dry-run', action='store_true',
         help='Print the full-path summary of what would be destroyed, then exit '
              'without changing anything')
+
+    process_export_p = process_sub.add_parser(
+        'export',
+        help='Package a registered process/env (project dir + Claude state tree) '
+             'into a tarball for moving to another machine')
+    process_export_p.add_argument('name', help='Env name to export')
+    process_export_p.add_argument(
+        '--out', help='Output path (default: <name>-dax-export.tar.gz in the cwd)')
+    process_export_p.add_argument(
+        '--include-credential', action='store_true',
+        help='Include the live Claude OAuth credential from the state tree. '
+             'Off by default — Keychain grants are per machine by design; only pass '
+             'this if you are retiring the source machine, not adding a second one')
+    process_export_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Print the summary of what would be exported, then exit without writing anything')
+
+    process_import_p = process_sub.add_parser(
+        'import',
+        help='Unpack a `dax process export` archive and register it as a new env here')
+    process_import_p.add_argument('archive', help='Path to the exported .tar.gz')
+    process_import_p.add_argument('--dir', required=True, help='Destination directory on this host')
+    process_import_p.add_argument('--name', help='Env name to register (default: the exported name)')
+    process_import_p.add_argument(
+        '--tenant', help='Tenant/grouping label (default: the exported tenant, if any)')
+    process_import_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Print the summary of what would be imported, then exit without changing anything')
 
     args = parser.parse_args()
 
