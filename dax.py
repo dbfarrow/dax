@@ -210,9 +210,23 @@ def feature_claude_tenant_state(config):
     mount, and pooling into a default is the isolation failure this design exists
     to prevent, so it refuses.
 
-    Host directories may not exist yet for a brand-new env. Verified 2026-07-27:
-    Docker auto-creates missing bind-mount host paths owned by the real host user
-    rather than root, so the container can write into them immediately.
+    Host directories may not exist yet for a brand-new env, and this creates
+    `host_tree` itself rather than leaving it for Docker to auto-create.
+    "Verified 2026-07-27: Docker auto-creates missing bind-mount host paths
+    owned by the real host user rather than root" was true, but only ever
+    tested on macOS Docker Desktop's own virtualized bind-mount layer -
+    found live 2026-08 that native Linux (a real WSL2 setup) creates missing
+    bind-mount host directories as root instead, so the container's own
+    non-root user gets EACCES writing into its own state tree. It went
+    unnoticed this long because `sync_claude_shared_files` below happens to
+    `mkdir` the tree as an incidental side effect of seeding shared files
+    into it - but only if the host already has at least one of
+    CLAUDE_SHARED_FILES to seed, which anyone who's used Claude Code
+    natively before already does. A genuinely first-time user, with no
+    prior native Claude Code use on that host at all, has none of them -
+    exactly the case that slipped through. Creating it explicitly here,
+    unconditionally, removes the dependency on both Docker's
+    platform-specific behavior and that incidental side effect.
     """
     project_name = config['workdir_name']
     tenant = config.get('tenant')
@@ -230,6 +244,13 @@ def feature_claude_tenant_state(config):
     cfg_dir = os.path.join(container_home, '.claude')
     host_tree = os.path.expanduser(
         os.path.join('~/.local/state/dax/tenants', tenant, project_name))
+
+    # Created here, by dax's own process (running as the real host user),
+    # rather than left for Docker to auto-create - on native Linux that
+    # happens as root, which then locks the container's non-root user out
+    # of its own state tree with EACCES. Idempotent and harmless if it
+    # already exists.
+    Path(host_tree).mkdir(parents=True, exist_ok=True)
 
     opts = [
         '-e', 'CLAUDE_CONFIG_DIR={}'.format(cfg_dir),
@@ -550,9 +571,16 @@ def _get_user_build_args():
 
 
 def _runcmd(cmd, test_only=False):
+    """Returns the real exit code (0 for a no-op test_only run) so callers
+    that need to know whether this actually succeeded - `cmd_build`'s
+    `docker build`/`docker tag` steps in particular - can check it. Nothing
+    checked this before, which is how a failed `docker build` still reached
+    "Commence to take over the world..." - subprocess.run() alone doesn't
+    raise or report failure, it just silently returns."""
     dax_print("[-]   " + ' '.join(cmd))
-    if not test_only:
-        subprocess.run(cmd)
+    if test_only:
+        return 0
+    return subprocess.run(cmd).returncode
 
 
 def cmd_build(args):
@@ -589,11 +617,17 @@ def cmd_build(args):
     if args.clean:
         build_cmd.append('--no-cache')
     build_cmd += ['-t', image_tag, '.']
-    _runcmd(build_cmd, args.test_only)
+    if _runcmd(build_cmd, args.test_only) != 0:
+        dax_print("[!] docker build failed — leaving ./Dockerfile in place to inspect")
+        sys.exit(1)
 
     dax_print("[+] tagging container")
+    # Expected to fail harmlessly on a first-ever build, when no prior
+    # dax:latest tag exists yet to remove — not checked, unlike the two below.
     _runcmd(['docker', 'rmi', latest_tag], args.test_only)
-    _runcmd(['docker', 'tag', image_tag, latest_tag], args.test_only)
+    if _runcmd(['docker', 'tag', image_tag, latest_tag], args.test_only) != 0:
+        dax_print("[!] docker tag failed — leaving ./Dockerfile in place to inspect")
+        sys.exit(1)
 
     _runcmd(['/bin/rm', '-f', './Dockerfile', './ca.crt'], args.test_only)
     dax_print("[+] Commence to take over the world...")
@@ -808,6 +842,35 @@ def cmd_run(args):
         config['mounts'] = project.get('mounts') or []
         config['substrate'] = project.get('substrate')
 
+        # Two competing conventions have accumulated for "the default image":
+        # a bare top-level `image:` (what load_config() above reads, and what
+        # .dax.yaml.example documents) and `defaults: {image: ...}` (what
+        # `dax process new`/`dax creds login`/`dax init`'s own fallback use).
+        # A project's own `image:` was never promoted at all - silently
+        # ignored, since this promotion never existed for it the way it does
+        # for tenant/mounts/substrate above. Found live: a real ~/.dax.yaml
+        # written in the `defaults:` shape, with no bare top-level `image:`
+        # and no promotion for the project's own override, crashed `dax run`
+        # outright with a bare KeyError. Project-specific wins, then whichever
+        # of the two global-default spellings is actually set, then a
+        # hardcoded fallback matching cmd_init's own — never a crash on a
+        # missing key again.
+        image = (project.get('image') or config.get('image') or
+                dax_config.get('defaults', {}).get('image') or 'dax-base')
+        # `dax-base` is what `dax init`/`dax process new` write into *every*
+        # project entry as routine scaffolding boilerplate - it has never
+        # been a real image (dax build only ever produces dax:<version>/
+        # dax:latest) and was never meant to override anything. It was
+        # harmless only because the promotion above didn't exist yet, so a
+        # real top-level `image: dax:latest` always won regardless of what
+        # every project entry happened to carry. The instant project-specific
+        # actually started winning, every real project's inert placeholder
+        # became load-bearing at once. cmd_creds_login already rewrites this
+        # exact value for the exact same reason; cmd_run needs it too.
+        if image in ('dax-base', 'dax-base:latest'):
+            image = 'dax:latest'
+        config['image'] = image
+
         ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
         if ssh_creds:
             dax_print("[+] starting ephemeral SSH agent")
@@ -909,6 +972,13 @@ def cmd_run(args):
     except Exception as e:
         dax_print(f"[!] credential daemon error: {e}")
 
+    # Backstop for the case above's own `except (FileNotFoundError, KeyError):
+    # pass` swallowing everything before config['image'] ever got set (no
+    # ~/.dax.yaml yet, or some other early KeyError) - this must never crash
+    # with a bare KeyError regardless of what happened above. dax:latest, not
+    # dax-base - the latter has never been a real image (see the comment
+    # above on the same confusion actually breaking a real run).
+    config.setdefault('image', 'dax:latest')
     cmd.append(config['image'])
 
     # The composition point for whatever the container's foreground process

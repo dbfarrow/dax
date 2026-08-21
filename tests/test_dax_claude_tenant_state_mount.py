@@ -131,6 +131,25 @@ def test_absent_host_directories_are_skipped(config):
     assert len(vols) == 1
 
 
+def test_creates_the_host_tree_itself_even_with_no_shared_files_to_seed(config):
+    """Found live 2026-08: on native Linux (a real WSL2 setup), Docker
+    creates a missing bind-mount host directory as root, not as the host
+    user - locking the container's own non-root user out of its own state
+    tree with EACCES. This went unnoticed because sync_claude_shared_files
+    happens to `mkdir` the tree as an incidental side effect of seeding
+    CLAUDE_SHARED_FILES into it - but only when the host already has at
+    least one of those files, which a genuinely first-time Claude Code user
+    (this test's fixture: no ~/.claude/CLAUDE.md etc. at all) does not. This
+    must create the tree itself, unconditionally, rather than depend on
+    that side effect or on Docker's own platform-specific behavior."""
+    host_tree = os.path.expanduser('~/.local/state/dax/tenants/personal/fabric')
+    assert not os.path.isdir(host_tree)  # nothing pre-seeded it, by construction
+
+    feature_claude_tenant_state(config)
+
+    assert os.path.isdir(host_tree)
+
+
 def test_skills_and_cache_are_not_shared(config, tmp_path):
     """Skills arrive from the discernment sidecar (decision D), so a copy here
     goes stale. Cache is derived and the only one where fetched content can turn

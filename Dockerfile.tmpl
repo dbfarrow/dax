@@ -442,8 +442,21 @@ RUN printf '%s\n' \
 # setup user
 ARG user_id=1000
 
+# Recent Ubuntu base images ship a pre-created `ubuntu` user at UID/GID 1000
+# (a real Canonical change, not a fluke) - and 1000 is also the standard
+# first-user UID on a fresh Linux/WSL2 install, so any host user with that
+# UID collides outright: `useradd -u 1000 ...` fails with "UID 1000 is not
+# unique" before ever reaching this env's own user. Found live 2026-08 on a
+# fresh WSL2 setup - this isn't an edge case, it's the default case for
+# exactly the people most likely to be setting dax up for the first time.
+# Deleting whatever already holds the target UID first (by UID, not by the
+# name "ubuntu" - a future base image could ship a different name for the
+# same collision) makes this work regardless of what the base image did.
 RUN echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen \
     && locale-gen \
+	&& (getent passwd ${user_id} >/dev/null 2>&1 \
+	    && userdel -r "$(getent passwd ${user_id} | cut -d: -f1)" \
+	    || true) \
 	&& useradd -m -s %%SHELL%% -u ${user_id} %%USER%% \
 	&& usermod -a -G sudo %%USER%% \
 	&& echo %%USER%%:%%PASSWD%% | chpasswd \
