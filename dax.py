@@ -852,8 +852,21 @@ def cmd_run(args):
         # of the two global-default spellings is actually set, then a
         # hardcoded fallback matching cmd_init's own — never a crash on a
         # missing key again.
-        config['image'] = (project.get('image') or config.get('image') or
-                           dax_config.get('defaults', {}).get('image') or 'dax-base')
+        image = (project.get('image') or config.get('image') or
+                dax_config.get('defaults', {}).get('image') or 'dax-base')
+        # `dax-base` is what `dax init`/`dax process new` write into *every*
+        # project entry as routine scaffolding boilerplate - it has never
+        # been a real image (dax build only ever produces dax:<version>/
+        # dax:latest) and was never meant to override anything. It was
+        # harmless only because the promotion above didn't exist yet, so a
+        # real top-level `image: dax:latest` always won regardless of what
+        # every project entry happened to carry. The instant project-specific
+        # actually started winning, every real project's inert placeholder
+        # became load-bearing at once. cmd_creds_login already rewrites this
+        # exact value for the exact same reason; cmd_run needs it too.
+        if image in ('dax-base', 'dax-base:latest'):
+            image = 'dax:latest'
+        config['image'] = image
 
         ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
         if ssh_creds:
@@ -959,8 +972,10 @@ def cmd_run(args):
     # Backstop for the case above's own `except (FileNotFoundError, KeyError):
     # pass` swallowing everything before config['image'] ever got set (no
     # ~/.dax.yaml yet, or some other early KeyError) - this must never crash
-    # with a bare KeyError regardless of what happened above.
-    config.setdefault('image', 'dax-base')
+    # with a bare KeyError regardless of what happened above. dax:latest, not
+    # dax-base - the latter has never been a real image (see the comment
+    # above on the same confusion actually breaking a real run).
+    config.setdefault('image', 'dax:latest')
     cmd.append(config['image'])
 
     # The composition point for whatever the container's foreground process
