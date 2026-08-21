@@ -1981,7 +1981,17 @@ def _run_process_import(config, args):
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            tar.extractall(tmp, filter='data')
+            # 'tar', not the stricter 'data' - a substrate-backed process's
+            # state tree legitimately contains symlinks with absolute
+            # targets (wire.sh links each skill directory into the tree at
+            # container boot), which 'data's AbsoluteLinkError rejects
+            # outright. Found live: a real `dax process import` failed on
+            # exactly this. This archive is one dax itself just built, not
+            # untrusted input, so 'tar' - which still refuses any member
+            # path that would escape the extraction directory, just
+            # permissive about symlink targets - is the right tier, not
+            # the one meant for arbitrary/untrusted tars.
+            tar.extractall(tmp, filter='tar')
 
             project_src = tmp / 'project'
             process_dir.parent.mkdir(parents=True, exist_ok=True)

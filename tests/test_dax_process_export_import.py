@@ -211,6 +211,44 @@ def test_import_round_trip_places_files_and_registers(tmp_path, home):
         os.environ['HOME'] = old_home
 
 
+def test_import_handles_absolute_symlinks_in_the_state_tree(tmp_path, home):
+    """Regression test: a real `dax process import` failed with
+    tarfile.AbsoluteLinkError on a substrate-backed process's state tree.
+    wire.sh symlinks each skill directory into the tree at container boot,
+    and those links have absolute targets — the strict 'data' extraction
+    filter rejects that outright, which is right for arbitrary/untrusted
+    tars but wrong for an archive dax itself just built."""
+    config = load_dax_config()
+    project_dir = _register(config, home, features=['claude_tenant_state'])
+    (project_dir / 'file.txt').write_text('hello')
+    tree = _state_tree(home, 'personal', 'demo')
+    (tree / '.claude.json').write_text('{}')
+    (tree / 'rules').mkdir()
+    (tree / 'rules' / '00-substrate.md').symlink_to('/some/absolute/substrate/00-substrate.md')
+
+    out = tmp_path / 'export.tar.gz'
+    _run_process_export(load_dax_config(), _export_args(out=str(out)))
+
+    dest_home = tmp_path / 'home2'
+    dest_home.mkdir()
+    (dest_home / '.dax.yaml').write_text('projects: {}\n')
+
+    import os
+    old_home = os.environ['HOME']
+    os.environ['HOME'] = str(dest_home)
+    try:
+        dest_dir = dest_home / 'imported'
+        _run_process_import(load_dax_config(), _import_args(
+            archive=str(out), dir=str(dest_dir)))
+
+        state_tree = dest_home / '.local' / 'state' / 'dax' / 'tenants' / 'personal' / 'demo'
+        link = state_tree / 'rules' / '00-substrate.md'
+        assert link.is_symlink()
+        assert os.readlink(link) == '/some/absolute/substrate/00-substrate.md'
+    finally:
+        os.environ['HOME'] = old_home
+
+
 def test_import_resolves_derived_credential_name_for_the_new_tenant(tmp_path, home, capsys):
     archive = _do_export(tmp_path, home, creds=['claude'])
 
