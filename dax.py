@@ -207,9 +207,23 @@ def feature_claude_tenant_state(config):
     mount, and pooling into a default is the isolation failure this design exists
     to prevent, so it refuses.
 
-    Host directories may not exist yet for a brand-new env. Verified 2026-07-27:
-    Docker auto-creates missing bind-mount host paths owned by the real host user
-    rather than root, so the container can write into them immediately.
+    Host directories may not exist yet for a brand-new env, and this creates
+    `host_tree` itself rather than leaving it for Docker to auto-create.
+    "Verified 2026-07-27: Docker auto-creates missing bind-mount host paths
+    owned by the real host user rather than root" was true, but only ever
+    tested on macOS Docker Desktop's own virtualized bind-mount layer -
+    found live 2026-08 that native Linux (a real WSL2 setup) creates missing
+    bind-mount host directories as root instead, so the container's own
+    non-root user gets EACCES writing into its own state tree. It went
+    unnoticed this long because `sync_claude_shared_files` below happens to
+    `mkdir` the tree as an incidental side effect of seeding shared files
+    into it - but only if the host already has at least one of
+    CLAUDE_SHARED_FILES to seed, which anyone who's used Claude Code
+    natively before already does. A genuinely first-time user, with no
+    prior native Claude Code use on that host at all, has none of them -
+    exactly the case that slipped through. Creating it explicitly here,
+    unconditionally, removes the dependency on both Docker's
+    platform-specific behavior and that incidental side effect.
     """
     project_name = config['workdir_name']
     tenant = config.get('tenant')
@@ -227,6 +241,13 @@ def feature_claude_tenant_state(config):
     cfg_dir = os.path.join(container_home, '.claude')
     host_tree = os.path.expanduser(
         os.path.join('~/.local/state/dax/tenants', tenant, project_name))
+
+    # Created here, by dax's own process (running as the real host user),
+    # rather than left for Docker to auto-create - on native Linux that
+    # happens as root, which then locks the container's non-root user out
+    # of its own state tree with EACCES. Idempotent and harmless if it
+    # already exists.
+    Path(host_tree).mkdir(parents=True, exist_ok=True)
 
     opts = [
         '-e', 'CLAUDE_CONFIG_DIR={}'.format(cfg_dir),
