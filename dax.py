@@ -547,9 +547,16 @@ def _get_user_build_args():
 
 
 def _runcmd(cmd, test_only=False):
+    """Returns the real exit code (0 for a no-op test_only run) so callers
+    that need to know whether this actually succeeded - `cmd_build`'s
+    `docker build`/`docker tag` steps in particular - can check it. Nothing
+    checked this before, which is how a failed `docker build` still reached
+    "Commence to take over the world..." - subprocess.run() alone doesn't
+    raise or report failure, it just silently returns."""
     dax_print("[-]   " + ' '.join(cmd))
-    if not test_only:
-        subprocess.run(cmd)
+    if test_only:
+        return 0
+    return subprocess.run(cmd).returncode
 
 
 def cmd_build(args):
@@ -586,11 +593,17 @@ def cmd_build(args):
     if args.clean:
         build_cmd.append('--no-cache')
     build_cmd += ['-t', image_tag, '.']
-    _runcmd(build_cmd, args.test_only)
+    if _runcmd(build_cmd, args.test_only) != 0:
+        dax_print("[!] docker build failed — leaving ./Dockerfile in place to inspect")
+        sys.exit(1)
 
     dax_print("[+] tagging container")
+    # Expected to fail harmlessly on a first-ever build, when no prior
+    # dax:latest tag exists yet to remove — not checked, unlike the two below.
     _runcmd(['docker', 'rmi', latest_tag], args.test_only)
-    _runcmd(['docker', 'tag', image_tag, latest_tag], args.test_only)
+    if _runcmd(['docker', 'tag', image_tag, latest_tag], args.test_only) != 0:
+        dax_print("[!] docker tag failed — leaving ./Dockerfile in place to inspect")
+        sys.exit(1)
 
     _runcmd(['/bin/rm', '-f', './Dockerfile', './ca.crt'], args.test_only)
     dax_print("[+] Commence to take over the world...")
@@ -805,6 +818,22 @@ def cmd_run(args):
         config['mounts'] = project.get('mounts') or []
         config['substrate'] = project.get('substrate')
 
+        # Two competing conventions have accumulated for "the default image":
+        # a bare top-level `image:` (what load_config() above reads, and what
+        # .dax.yaml.example documents) and `defaults: {image: ...}` (what
+        # `dax process new`/`dax creds login`/`dax init`'s own fallback use).
+        # A project's own `image:` was never promoted at all - silently
+        # ignored, since this promotion never existed for it the way it does
+        # for tenant/mounts/substrate above. Found live: a real ~/.dax.yaml
+        # written in the `defaults:` shape, with no bare top-level `image:`
+        # and no promotion for the project's own override, crashed `dax run`
+        # outright with a bare KeyError. Project-specific wins, then whichever
+        # of the two global-default spellings is actually set, then a
+        # hardcoded fallback matching cmd_init's own — never a crash on a
+        # missing key again.
+        config['image'] = (project.get('image') or config.get('image') or
+                           dax_config.get('defaults', {}).get('image') or 'dax-base')
+
         ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
         if ssh_creds:
             dax_print("[+] starting ephemeral SSH agent")
@@ -906,6 +935,11 @@ def cmd_run(args):
     except Exception as e:
         dax_print(f"[!] credential daemon error: {e}")
 
+    # Backstop for the case above's own `except (FileNotFoundError, KeyError):
+    # pass` swallowing everything before config['image'] ever got set (no
+    # ~/.dax.yaml yet, or some other early KeyError) - this must never crash
+    # with a bare KeyError regardless of what happened above.
+    config.setdefault('image', 'dax-base')
     cmd.append(config['image'])
 
     # The composition point for whatever the container's foreground process
