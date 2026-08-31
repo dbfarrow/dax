@@ -22,15 +22,20 @@ import argparse
 import yaml
 
 import dax
-from dax import _run_backup, cmd_run
+from dax import _default_backup_dir, _run_backup, cmd_run
 
 
 def test_default_backup_dir_is_inside_the_repo_checkout():
     """Confirms the default by reading the source, not by calling it with
     backup_dir=None - the real default must never actually run in a test,
-    even one with an empty config where it would technically be a no-op."""
+    even one with an empty config where it would technically be a no-op.
+
+    `_run_backup` and `dax process archive`/`restore` now share this
+    default via `_default_backup_dir()` rather than each hardcoding the
+    path, so the assertion lives against that helper instead of
+    `_run_backup`'s own source."""
     import inspect
-    source = inspect.getsource(_run_backup)
+    source = inspect.getsource(_default_backup_dir)
     assert "Path(__file__).parent / 'backup'" in source
 
 

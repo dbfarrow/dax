@@ -614,6 +614,161 @@ Residual unknown, unchanged: whether Anthropic caps concurrent grants per
 account or invalidates older grants for the same `client_id`. Cheap to test —
 log in for two projects, use the first, confirm the second still works.
 
+**Teardown write-back built 2026-08-31, closing this decision out.** Found
+live: a user hit exactly the gap this section already predicted — a
+container's session-refreshed credential had gone stale, and a host-side
+`dax creds login` (re-minting a fresh grant into Keychain) did nothing to
+fix it, because inject-if-absent only ever looks at Keychain when the
+tree's file is *missing*. Once the file exists, Keychain is never consulted
+again — only logging in *from inside the container* reached the tree
+directly. Working through the fix surfaced a bigger issue than the stale
+credential itself: the entire premise of storing secrets in Keychain was
+that they don't sit on disk when nothing's running, and `claude_tenant_state`
+quietly broke that the moment its state tree became a *persistent* host
+bind mount — the credential just sits there in plaintext indefinitely,
+Keychain reduced to a bootstrap for first launch only.
+
+Two false starts before landing on the real fix, both worth recording since
+they were the more obvious-looking designs and both wrong:
+
+1. **Timestamp-based "detect staleness, then refresh" heuristic** — parse
+   `refreshTokenExpiresAt` from the tree's `.credentials.json`, and if it's
+   past, re-inject from Keychain. Dropped: this project already found live
+   that `refreshTokenExpiresAt` "does not reliably encode mint date," so
+   the one signal available for detection is itself known to be flaky.
+   Worse, if Claude Code rotates the refresh token on use (an open
+   question, never confirmed either way) and the container's own tree has
+   silently rotated forward while Keychain never saw it (no write-back
+   exists), a false-positive "looks expired" read would *overwrite a live,
+   working credential with a dead Keychain snapshot* — actively worse than
+   doing nothing, not neutral.
+2. **Restructuring the `claude` wrapper to stop `exec`-ing** — the
+   assumption was that write-back-on-stop needed an in-container hook, and
+   `exec "$@"` replacing the wrapper's own process meant nothing could run
+   after `claude` exits. Wrong layer entirely: `claude_tenant_state`'s
+   state tree is a plain host bind mount, so `.credentials.json` is already
+   sitting on the *host* disk the whole time — no need to reach into the
+   container at all. `cmd_run` (`dax.py`) already blocks on
+   `subprocess.run(cmd)` and already has a teardown `finally:` that stops
+   the credential daemon and the SSH bridge when the container exits, for
+   any reason (clean exit or an external `docker stop`). That block is the
+   natural, already-existing hook.
+
+**What actually shipped**, entirely host-side, no wrapper or entrypoint
+changes: `_sync_and_clear_claude_credential` (`dax.py`), called from
+`cmd_run`'s existing teardown `finally:`. Reads the tree's
+`.credentials.json` directly (a real file on the host disk), writes it to
+Keychain via the same `ClaudeProvider.store()` the login flow already
+uses, then deletes it. Skipped entirely under `-t`/`test_only` — a pure
+preview must never delete real state as a side effect.
+
+Deliberately **not** gated on confirming the write actually landed before
+deleting (no `grant_id()` comparison, no "only delete if verified"): pushed
+on directly — is a failed write-back really worse than today? No. The
+worst case is Keychain ends up holding a stale-or-dead grant, and the next
+launch's inject either works fine (grant was still valid) or Claude Code's
+own refresh fails and it falls into normal re-authentication — which is
+identical in kind to a first-ever login, not a special broken state. No
+unique secret is destroyed either way; an OAuth grant is trivially
+re-mintable. That reframing is what made the fix small: best-effort
+write-back, unconditional delete, no confirm-then-delete complexity, no
+signal handling, no wrapper restructuring.
+
+Once the file is deleted here, the existing inject-if-absent check in the
+`claude` wrapper does the rest on the next launch with **no changes to
+it at all** — Keychain now always holds the freshest copy at the start of
+every `dax run`, so "inject" and "refresh" collapse into the same,
+unconditional action. The originally-proposed `dax creds refresh <name>`
+manual command is no longer needed; the divergence it existed to patch
+around can't happen anymore.
+
+**New sharp edge this introduces, worth knowing:** the write-back is
+unconditional, not "only if Keychain doesn't already have something
+newer." So `dax creds login <name>` **while that env's container is still
+running**, followed by stopping it, gets silently clobbered — the stop's
+teardown writes the tree's (old, pre-login) credential back over the fresh
+one that was just minted. The correct order to manually refresh a
+genuinely dead credential is: stop the container first (clears the tree
+and syncs whatever it had, harmless since it's about to be replaced),
+*then* `dax creds login <name>`, *then* `dax run`. No runtime guard against
+the wrong order was added — there's no reliable way to tell "Keychain was
+just intentionally refreshed" apart from "the tree legitimately has the
+newer copy" without real provenance neither system tracks, so this is
+documented behavior to follow, not something worth building
+conflict-resolution logic for.
+
+11 new tests
+(`tests/test_dax_cmd_run_claude_credential_sync.py`): the function's own
+guard conditions (feature not active, no claude credential in this run, no
+file, zero-byte file treated as absent — matching the wrapper's own `-s`
+check, no tenant, a malformed blob left on disk rather than destroyed, a
+Keychain failure reported not raised, correctly picking the claude entry
+out of a run with github/ssh credentials too) plus two wiring tests through
+the real `cmd_run` confirming it's actually called from teardown and
+correctly skipped under `test_only`. Suite at **623**. Verified live in a
+scratch scenario (not just unit tests): a real fake credentials blob
+written to Keychain via a stand-in, and the file's deletion confirmed on
+disk afterward.
+
+**Real bug found live immediately after, same day, testing the fix against
+a genuinely dead credential: `dax creds login` + restart still left the
+env logged out.** The user's actual `.credentials.json` (an env this whole
+decision C thread started from — its credential had already died before
+any of this session's work began) turned out to be:
+
+```json
+{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,
+"refreshTokenExpiresAt":1788120165026,"scopes":[...],
+"subscriptionType":"team","rateLimitTier":"default_raven"}}
+```
+
+Real, non-empty, valid JSON — Claude Code's own apparent behavior on a
+failed refresh is to blank `accessToken`/`refreshToken` to `""` while
+leaving the rest of the envelope (scopes, subscription info, rate limit
+tier) populated, rather than deleting the file or leaving it empty. Two
+separate places only ever checked "is the file empty or missing," never
+"does it actually have usable tokens," and both had the identical blind
+spot:
+
+1. **`_sync_and_clear_claude_credential`** — the just-built teardown sync
+   deliberately left an unrecognized blob on disk rather than deleting it,
+   reasoning that destroying data it didn't understand was the greater
+   risk. Wrong in this specific, now-understood case: a blanked-token
+   envelope can never become useful, and leaving it in place permanently
+   blocks re-injection at a path with exactly one legitimate content
+   shape — the caution was defending against a risk that doesn't exist
+   while causing the exact bug it was supposed to prevent. Fixed: any blob
+   that fails `is_oauth_envelope` now gets deleted unconditionally, not
+   just a successfully-synced one.
+2. **The `claude` wrapper's own inject condition** — `[ ! -s
+   "$_dax_creds_file" ]` (non-zero size) had the same gap independent of
+   the teardown sync entirely: a dead-but-present file was never "absent"
+   by that check, so a fresh Keychain login would never get pulled in on
+   the next launch regardless of what the teardown path did. Fixed with a
+   `_dax_creds_file_has_valid_grant` shell function — still checks size
+   first (catches a zero-byte interrupted write cheaply, no need to shell
+   out to Python for that case), then delegates the real validity check to
+   the same `is_oauth_envelope` the host-side login/import path already
+   uses, via `python3 -c "from dax_creds.providers.claude import
+   is_oauth_envelope; ..."` — one source of truth for "is this usable"
+   rather than re-deriving the rule in shell.
+
+**Needs an image rebuild (`dax build`) to take effect** — the wrapper is
+baked into the image at build time, same as every other wrapper change in
+this project's history. The `dax.py`/teardown-sync half takes effect
+immediately (no rebuild — it's the host-side installed `dax` package), but
+the wrapper half won't until the image is rebuilt, so a stale image will
+still exhibit the "login didn't fix it" symptom even after this fix lands
+on the host.
+
+1 new test (the exact real-world blob reproduced verbatim as a test case,
+plus the existing malformed-blob test updated from "left on disk" to
+"deleted" to match the corrected behavior), suite at **624**. The shell
+logic itself was verified directly (not just read for correctness): `bash
+-n` for syntax, and the embedded `python3 -c` snippet run standalone
+against both the real dead blob (exit 1, correctly triggers re-inject) and
+a valid blob (exit 0, correctly skips re-inject).
+
 ### C2. The per-env credential name is derived, not typed — built 2026-07-30
 
 Listing a bare provider name in an env's `creds:` asks dax to build the name:
@@ -1106,7 +1261,7 @@ match, the same blind spot `find_enclosing_project` closed for `cmd_run`, so
   `dax creds add` still outstanding** — its claude path imports from
   `~/.claude/.credentials.json` with no such guard, so minting a *derived* name
   that way would still share a grant.
-- Teardown write-back to Keychain (deferred by choice — see C).
+- ~~Teardown write-back to Keychain~~ — **built 2026-08-31, see C.**
 - ~~`dax creds add`'s overwrite early-return~~ — **fixed 2026-07-30.** Every
   `_setup_*_credential` takes `replace=`, set only on a confirmed "Overwrite
   it?", so the provider's store is actually reached. A confirmed replace that

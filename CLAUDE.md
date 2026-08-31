@@ -806,6 +806,33 @@ the shared mount, which is the intended fallback.
 
 ## Backlog
 
+- **Collapse `dax process` into `dax env` — "process" isn't a distinct
+  concept, it's an env with `substrate` in its `features`.** Raised
+  2026-08-31, during the discernment-processes migration (deregistering the
+  discernment monorepo env to register its sub-processes individually —
+  which is what surfaced the question in the first place: why do processes
+  and envs need to be different things at all). There is no `is_process`
+  flag anywhere in the data model; it's 100% derived from `substrate` being
+  in `features`. Checked against the actual implementations, not assumed:
+  `destroy`/`archive`/`restore`/`export`/`import` (all currently parented
+  under `dax process`) already don't branch on substrate anywhere —
+  `_run_process_destroy`'s own docstring says as much ("generalized past
+  substrate processes specifically... restricting this to substrate-tagged
+  ones would only get in the way of burning down other test cruft"). The
+  only command that's genuinely process-specific is `new` — it runs
+  `new-process.sh`, validates `--type` against the substrate's own
+  `process-types.tsv`, and wizards through prompts nothing else does.
+  Current namespacing is actively misleading, not just inelegant: parking
+  generic-env commands under `process` implies they're substrate-only, when
+  they work on any registered env (`dax`, `fabric`, anything) — a real
+  discoverability gap, found live when the user needed `archive`/`restore`
+  for ordinary non-substrate envs this same session and they were sitting
+  under a name that implied they wouldn't apply. Proposed fix, not yet
+  built: move `destroy`/`archive`/`restore`/`export`/`import` under
+  `dax env` (matching what they actually do), leave `dax process new` as
+  the one legitimately distinct command. Deferred — a real CLI restructure
+  (renamed subcommands, help text, doc/test churn), not a quick fix.
+
 - **~~Discernment process migration, stage 2: a helper script for the common
   process-init sequence~~ — superseded 2026-08-01 by `dax process new` and
   the rest of the virgil substrate contract** (see "In progress" above).

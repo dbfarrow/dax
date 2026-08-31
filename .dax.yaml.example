@@ -48,3 +48,12 @@ dotfiles:
 backup:
   - ~/.claude/CLAUDE.md
   - ~/.claude/.settings.json
+
+# Base directory `dax backup` and `dax process archive`/`restore` write
+# into. Defaults to backup/ inside this repo checkout if omitted — that
+# default exists specifically because it's bind-mounted into the container
+# and survives a rebuild. Pointing this elsewhere (an external drive, a NAS
+# share) is the point for real BCP/DR media, but only that path is backed
+# up if this container is ever rebuilt or lost, so make sure it's somewhere
+# that survives independently.
+# backup_dir: ~/backups/dax

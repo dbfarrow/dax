@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -743,6 +745,86 @@ def _format_docker_cmd(cmd):
     return '\n  '.join(lines)
 
 
+def _sync_and_clear_claude_credential(config, features, project_creds):
+    """Write a `claude_tenant_state` env's live `.credentials.json` back to
+    Keychain when the container stops, then delete it from disk — restoring
+    the property the Keychain design was originally built around
+    (credentials don't sit on disk when nothing is running), which the
+    persistent per-env state tree quietly broke: the tree survives a
+    container stop by design (that's the whole point of
+    `claude_tenant_state`), and nothing ever copied its refreshed token back
+    to Keychain, so it just sat there in plaintext indefinitely.
+
+    Runs entirely host-side, in `cmd_run`'s existing teardown `finally:`
+    (alongside stopping the credential daemon and SSH bridge) — the state
+    tree is a plain host bind mount, so the file is just sitting on this
+    machine's disk the whole time; no need to reach into the container, no
+    wrapper changes, no signal handling.
+
+    Deliberately best-effort, not gated on confirming the write actually
+    landed before deleting: the failure mode of "delete anyway, write-back
+    silently didn't happen" is a stale-but-usable (or, worst case, invalid)
+    Keychain entry, which just means the next `dax creds login` for this
+    env is a normal re-authentication — identical in kind to a first-ever
+    login, not a special broken state. There's no unique secret being
+    destroyed either way; an OAuth grant is trivially re-mintable.
+
+    Once this deletes the file, the next launch's injection picks up
+    whatever's freshest in Keychain — see `dax_creds/wrappers/claude`,
+    which also had to learn this same "non-empty but dead" shape: its
+    original `[ ! -s "$_dax_creds_file" ]` (non-zero size) inject condition
+    had the identical blind spot this function did, so a dead-but-present
+    file could survive a full stop/login/restart cycle untouched on that
+    side too.
+    """
+    if 'claude_tenant_state' not in features:
+        return
+    cred_name = next((n for n, d in project_creds.items()
+                       if d.get('provider') == 'claude'), None)
+    if not cred_name:
+        return
+
+    from dax_creds.config import state_tree_path
+    tenant = config.get('tenant')
+    if not tenant:
+        return
+    cred_file = state_tree_path(tenant, config['workdir_name']) / '.credentials.json'
+    if not cred_file.is_file() or cred_file.stat().st_size == 0:
+        return
+
+    try:
+        from dax_creds.providers.claude import ClaudeProvider
+        provider = ClaudeProvider()
+        blob = provider.import_from_disk({}, credentials_file=cred_file)
+        if blob is None:
+            # Found live, 2026-08-31: Claude Code writes exactly this shape
+            # when a refresh dies — a real, non-empty, JSON-valid
+            # claudeAiOauth object with scopes/subscriptionType/rateLimitTier
+            # intact but accessToken/refreshToken blanked to "". Not simply
+            # "unknown data to be cautious about" - it's a confirmed-dead
+            # credential at a path with exactly one legitimate content shape,
+            # and *keeping* it is actively harmful: it's non-empty, so both
+            # this check and the wrapper's own `-s` (non-zero size) inject
+            # test treat it as "already have a credential" forever, which
+            # permanently blocks re-injection from Keychain. There is no
+            # version of this file that becomes useful later, so delete
+            # unconditionally rather than leaving it in place "to be safe" —
+            # the earlier, more cautious version of this function created a
+            # real bug (a stale login this env could never recover from
+            # short of manually deleting the file) trying to prevent a
+            # non-existent risk (there's nothing here worth preserving).
+            cred_file.unlink()
+            dax_print('[!] {} was not a usable Claude credentials blob (dead '
+                      'refresh token) — cleared so the next launch can '
+                      'inject from Keychain'.format(cred_file))
+            return
+        provider.store(cred_name, blob)
+        cred_file.unlink()
+        dax_print('[-]   synced Claude credential to Keychain ({})'.format(cred_name))
+    except Exception as e:
+        dax_print('[!] could not sync Claude credential to Keychain: {}'.format(e))
+
+
 def cmd_run(args):
     config = load_config()
     username = _get_username()
@@ -1010,6 +1092,12 @@ def cmd_run(args):
             dax_print("[+] stopping ephemeral SSH agent")
             from dax_creds.providers.ssh import stop_ephemeral_agent
             stop_ephemeral_agent(config['_ephemeral_ssh_pid'])
+        if not args.test_only:
+            # -t is a pure preview (prints the docker command, launches
+            # nothing) - deleting the real credential file as a side effect
+            # of a dry run would be a bad surprise, so this is the one
+            # teardown step in this block that's skipped for it.
+            _sync_and_clear_claude_credential(config, features, project_creds)
 
 
 def cmd_init(args):
@@ -1632,9 +1720,12 @@ def _read_process_types(substrate_root):
     return types
 
 
-def _check_process_dir(config, process_dir):
-    """Refuse structurally bad choices for a new process directory, before
-    anything is created or registered.
+def _process_dir_conflict(config, process_dir):
+    """Returns an error message if process_dir is a structurally bad choice
+    for a new process directory, or None if it's fine. Pure, non-fatal core
+    of `_check_process_dir` — reused by `process restore`'s interactive
+    move-restore prompt, which needs to report a bad answer and ask again
+    rather than exit the whole restore session over one bad directory.
 
     Two classes of mistake, both cheap to catch here and expensive to
     unwind later: nesting/colliding with an already-registered project (the
@@ -1649,16 +1740,14 @@ def _check_process_dir(config, process_dir):
     try:
         process_dir.relative_to(home)
     except ValueError:
-        dax_print('[!] {} is not under your home directory ({}) — `dax run` '
-                  'refuses to launch from outside $HOME'.format(process_dir, home))
-        sys.exit(1)
+        return ('{} is not under your home directory ({}) — `dax run` '
+                 'refuses to launch from outside $HOME'.format(process_dir, home))
 
     enclosing = find_enclosing_project(config, process_dir)
     if enclosing is not None:
         enclosing_name, enclosing_project = enclosing
-        dax_print('[!] {} is inside already-registered project {!r} at {}'.format(
-            process_dir, enclosing_name, Path(enclosing_project['dir']).expanduser().resolve()))
-        sys.exit(1)
+        return '{} is inside already-registered project {!r} at {}'.format(
+            process_dir, enclosing_name, Path(enclosing_project['dir']).expanduser().resolve())
 
     for other_name, other_project in (config.get('projects') or {}).items():
         other_dir = other_project.get('dir')
@@ -1666,13 +1755,21 @@ def _check_process_dir(config, process_dir):
             continue
         other_dir = Path(other_dir).expanduser().resolve()
         if other_dir == process_dir:
-            dax_print('[!] {} is already registered as project {!r}'.format(
-                process_dir, other_name))
-            sys.exit(1)
+            return '{} is already registered as project {!r}'.format(process_dir, other_name)
         if process_dir in other_dir.parents:
-            dax_print('[!] {} would enclose already-registered project {!r} at {}'.format(
-                process_dir, other_name, other_dir))
-            sys.exit(1)
+            return '{} would enclose already-registered project {!r} at {}'.format(
+                process_dir, other_name, other_dir)
+    return None
+
+
+def _check_process_dir(config, process_dir):
+    """Refuse structurally bad choices for a new process directory, before
+    anything is created or registered. See `_process_dir_conflict` for what
+    counts as bad — this is just the fatal (sys.exit) wrapper around it."""
+    problem = _process_dir_conflict(config, process_dir)
+    if problem:
+        dax_print('[!] {}'.format(problem))
+        sys.exit(1)
 
 
 def _run_process_new(config, args):
@@ -1844,6 +1941,41 @@ def _state_tree_tar_filter(include_credential):
     return filt
 
 
+def _extractall_permissive(tar, path):
+    """`tar.extractall(path)`, using the 'tar' extraction filter when the
+    running Python supports it, falling back to plain `extractall()`
+    otherwise.
+
+    'tar' (not the stricter default 'data' filter) matters because a
+    substrate-backed process's state tree legitimately contains symlinks
+    with absolute targets (wire.sh links each skill directory into the
+    tree at container boot), which 'data's `AbsoluteLinkError` rejects
+    outright — found live when a real `dax process import` failed on
+    exactly this. 'tar' still refuses any member path that would escape
+    the extraction directory, just permissive about symlink targets — the
+    right tier for an archive dax itself just built, not arbitrary/
+    untrusted input.
+
+    Found live, 2026-08-30: `extractall()`'s `filter=` keyword didn't exist
+    at all before Python 3.12 (PEP 706) — passing it unconditionally raised
+    `TypeError: extractall() got an unexpected keyword argument 'filter'`
+    on the real host, which runs its own Python 3.9 (this repo's
+    `pyproject.toml` declares `requires-python = ">=3.7"`, so 3.9 is a
+    real, supported target, not an edge case). The dev/test sandbox runs a
+    newer Python, so every prior test run exercised only the 3.12+ path
+    and never caught this. `hasattr(tarfile, 'tar_filter')` is the
+    documented feature-detection check for the whole PEP 706 filter
+    mechanism — pre-3.12, extractall() has no filtering concept at all, so
+    the fallback is simply its old, always-permissive-about-symlinks
+    behavior, which is what every version before this fix effectively ran
+    anyway.
+    """
+    if hasattr(tarfile, 'tar_filter'):
+        tar.extractall(path, filter='tar')
+    else:
+        tar.extractall(path)
+
+
 def _dir_size_excluding(path, skip_dirs):
     total = 0
     for root, dirs, files in os.walk(path):
@@ -1854,6 +1986,97 @@ def _dir_size_excluding(path, skip_dirs):
             except OSError:
                 continue  # vanished mid-walk — not worth failing a size estimate over
     return total
+
+
+def _default_backup_dir(config=None):
+    """The base directory `dax backup` and `dax process archive`/`restore`
+    write into. A top-level `backup_dir:` in ~/.dax.yaml overrides it;
+    otherwise this falls back to backup/ under this repo checkout.
+
+    That fallback is deliberately not ~/.local/state/dax/...: only paths a
+    container's own feature functions explicitly bind-mount survive that
+    container's teardown, and this repo's own workdir mount is exactly such
+    a path (see _run_backup's own docstring for the fuller history of why
+    that matters here). Pointing `backup_dir:` at a path outside any mount
+    (an external drive, a NAS share, ~/backups) trades that guarantee away —
+    worth doing for real BCP/DR media, but the tradeoff is on the user
+    making that choice, not silently assumed.
+    """
+    configured = (config or {}).get('backup_dir')
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path(__file__).parent / 'backup'
+
+
+def _archive_path_for(backup_dir, name, today=None):
+    """backup_dir/daily/<name>-<YYYY-MM-DD>.tar.gz. Flat within the tier
+    rather than nested per project — the filename and the manifest inside
+    the tarball already carry every bit of identity a per-project directory
+    would add, so that extra nesting bought nothing. `daily` anticipates
+    rotation (not yet built): weekly/monthly/quarterly will land as sibling
+    flat directories, so rotating a file is just moving it between two
+    directories, never restructuring a per-project tree. `today` is
+    injectable so tests get a deterministic filename instead of depending
+    on the real date."""
+    if today is None:
+        today = datetime.date.today().isoformat()
+    return backup_dir / 'daily' / '{}-{}.tar.gz'.format(name, today)
+
+
+def _write_process_archive(config, name, out_path, include_credential=False):
+    """Build the manifest and tarball for one registered env — the shared
+    core of `process export` and `process archive`. Returns the manifest
+    dict so the caller can print its own summary.
+
+    Resolves the project/tenant/state-tree lookups itself rather than
+    taking them from the caller, so it stays a single self-contained unit
+    reusable from both commands regardless of whatever richer preview each
+    one prints beforehand.
+    """
+    from dax_creds.config import state_tree_path
+
+    projects = config.get('projects') or {}
+    if name not in projects:
+        known = ', '.join(sorted(projects)) or '(none registered)'
+        dax_print('[!] no env named {!r}. Known envs: {}'.format(name, known))
+        sys.exit(1)
+    project = projects[name]
+
+    process_dir = Path(project.get('dir', '')).expanduser().resolve()
+    if not process_dir.is_dir():
+        dax_print('[!] {} does not exist — nothing to archive'.format(process_dir))
+        sys.exit(1)
+
+    tenant = project.get('tenant')
+    state_dir = state_tree_path(tenant, name) if tenant else None
+    has_state = bool(state_dir and state_dir.is_dir())
+
+    manifest = {
+        'name': name,
+        'dir': str(process_dir),
+        'tenant': tenant,
+        'image': project.get('image'),
+        'creds': project.get('creds') or [],
+        'features': project.get('features') or [],
+        'mounts': project.get('mounts') or [],
+        'substrate': project.get('substrate'),
+        'had_state_tree': has_state,
+    }
+
+    out_path = Path(out_path).expanduser().resolve()
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest_path = Path(tmp) / 'dax-export-manifest.json'
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(out_path, 'w:gz') as tar:
+            tar.add(manifest_path, arcname='dax-export-manifest.json')
+            tar.add(process_dir, arcname='project', filter=_export_tar_filter)
+            if has_state:
+                tar.add(state_dir, arcname='state',
+                        filter=_state_tree_tar_filter(include_credential))
+
+    return manifest
 
 
 def _run_process_export(config, args):
@@ -1934,29 +2157,7 @@ def _run_process_export(config, args):
         dax_print('[-]   dry run — nothing written')
         return
 
-    manifest = {
-        'name': name,
-        'tenant': tenant,
-        'image': project.get('image'),
-        'creds': creds,
-        'features': project.get('features') or [],
-        'mounts': project.get('mounts') or [],
-        'substrate': project.get('substrate'),
-        'had_state_tree': has_state,
-    }
-
-    with tempfile.TemporaryDirectory() as tmp:
-        manifest_path = Path(tmp) / 'dax-export-manifest.json'
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
-
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(out_path, 'w:gz') as tar:
-            tar.add(manifest_path, arcname='dax-export-manifest.json')
-            tar.add(process_dir, arcname='project', filter=_export_tar_filter)
-            if has_state:
-                tar.add(state_dir, arcname='state',
-                        filter=_state_tree_tar_filter(args.include_credential))
-
+    _write_process_archive(config, name, out_path, include_credential=args.include_credential)
     dax_print('[+] exported {} to {}'.format(name, out_path))
 
 
@@ -2051,17 +2252,7 @@ def _run_process_import(config, args):
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            # 'tar', not the stricter 'data' - a substrate-backed process's
-            # state tree legitimately contains symlinks with absolute
-            # targets (wire.sh links each skill directory into the tree at
-            # container boot), which 'data's AbsoluteLinkError rejects
-            # outright. Found live: a real `dax process import` failed on
-            # exactly this. This archive is one dax itself just built, not
-            # untrusted input, so 'tar' - which still refuses any member
-            # path that would escape the extraction directory, just
-            # permissive about symlink targets - is the right tier, not
-            # the one meant for arbitrary/untrusted tars.
-            tar.extractall(tmp, filter='tar')
+            _extractall_permissive(tar, tmp)
 
             project_src = tmp / 'project'
             process_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -2074,6 +2265,8 @@ def _run_process_import(config, args):
             if manifest.get('had_state_tree') and state_src.is_dir():
                 dest_state.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(state_src), str(dest_state))
+                if manifest.get('dir'):
+                    _relocate_claude_project_key(dest_state, manifest['dir'], process_dir)
 
         register_project(config, name=name, project_dir=process_dir,
                          image=manifest.get('image') or 'dax-base', creds=creds)
@@ -2127,6 +2320,72 @@ def _derived_creds_for(project, name):
     return [cred_name for cred_name, provider in resolved if provider]
 
 
+def _teardown_process(config, name, project):
+    """Delete one registered process's directory, Claude state tree (plus
+    its sibling shared-files manifest), and any per-env derived credential —
+    the shared core of `process destroy` and `process archive --remove`.
+
+    Deliberately does not touch config['projects'] or call save_config: the
+    caller owns the registry edit and when to save, since destroy saves
+    once per name inside its own loop while `archive --remove` batches the
+    registry edits and saves once after the whole set.
+    """
+    from dax_creds.config import state_tree_path, _shared_files_manifest_path
+    from dax_creds.init import run_creds_remove
+
+    dir_path = Path(project.get('dir', '')).expanduser()
+    tenant = project.get('tenant')
+
+    if dir_path.exists():
+        shutil.rmtree(dir_path)
+        dax_print('[-]   removed {}'.format(dir_path))
+
+    if tenant:
+        state = state_tree_path(tenant, name)
+        if state.exists():
+            shutil.rmtree(state)
+            dax_print('[-]   removed {}'.format(state))
+        manifest = _shared_files_manifest_path(tenant, name)
+        if manifest.exists():
+            manifest.unlink()
+
+    for cred_name in _derived_creds_for(project, name):
+        try:
+            run_creds_remove(config, cred_name)
+        except Exception as e:
+            dax_print('[!] could not remove credential {}: {}'.format(cred_name, e))
+
+
+def _print_table(headers, rows):
+    """Generic aligned-table printer: header row, dashed separator,
+    per-column width computed from headers+data, left-justified cells.
+    Same convention `dax envs list` (`run_envs_list`) already established.
+    Standing preference (2026-08-30): any CLI output listing multiple
+    records that each carry the same set of fields renders this way, not
+    as repeated per-record "label   value" paragraphs — scanning N records'
+    fields down aligned columns beats reading N separate paragraphs.
+    """
+    all_rows = [headers] + list(rows)
+    widths = [max(len(str(r[i])) for r in all_rows) for i in range(len(headers))]
+
+    def _line(cells):
+        return '  '.join(str(c).ljust(widths[i]) for i, c in enumerate(cells))
+
+    print()
+    print(_line(headers))
+    print(_line(tuple('-' * w for w in widths)))
+    for row in rows:
+        print(_line(row))
+    print()
+
+
+def _print_teardown_table(rows):
+    """rows: [(name, directory_cell, state_tree_cell, credential_cell), ...].
+    Shared by `process destroy` and `process archive --remove`, which tear
+    down the same four things."""
+    _print_table(('name', 'directory', 'state tree', 'credential'), rows)
+
+
 def _run_process_destroy(config, args):
     """Tear down one or more registered processes: directory, Claude state
     tree (plus its sibling shared-files manifest), any per-env derived
@@ -2138,10 +2397,10 @@ def _run_process_destroy(config, args):
     restricting this to substrate-tagged ones would only get in the way of
     burning down other test cruft.
     """
-    from dax_creds.config import state_tree_path, _shared_files_manifest_path
+    from dax_creds.config import state_tree_path
     from dax_creds.init import (
         _q_checkbox, _container_name_for, _is_container_running,
-        _tree_stats, _human_size, _human_age, run_creds_remove, save_config,
+        _tree_stats, _human_size, _human_age, _home_relative, save_config,
     )
     import questionary
 
@@ -2179,48 +2438,40 @@ def _run_process_destroy(config, args):
                 name, container))
             sys.exit(1)
 
-    print()
-    print('About to destroy:')
+    rows = []
     for name in names:
         project = projects[name]
         dir_path = Path(project.get('dir', '')).expanduser()
         tenant = project.get('tenant')
 
-        print()
-        print(name)
         if dir_path.exists():
-            count = sum(1 for _ in dir_path.iterdir())
-            note = '{} item(s)'.format(count)
+            note = '{} item(s)'.format(sum(1 for _ in dir_path.iterdir()))
             git_note = _uncommitted_git_note(dir_path)
             if git_note:
                 note += '; ' + git_note
-            print('  directory   {}   [{}]'.format(dir_path, note))
+            dir_cell = '{}  [{}]'.format(_home_relative(dir_path), note)
         else:
-            print('  directory   {}   [already gone]'.format(dir_path))
+            dir_cell = '{}  [already gone]'.format(_home_relative(dir_path))
 
         if tenant:
             state = state_tree_path(tenant, name)
             if state.exists():
                 size, used = _tree_stats(state)
-                print('  state tree  {}   [{}, used {} ago]'.format(
-                    state, _human_size(size), _human_age(used)))
+                state_cell = '{}  [{}, {} ago]'.format(
+                    _home_relative(state), _human_size(size), _human_age(used))
             else:
-                print('  state tree  {}   [already gone]'.format(state))
+                state_cell = '{}  [already gone]'.format(_home_relative(state))
         else:
-            print('  state tree  (no tenant declared — none)')
+            state_cell = '(no tenant declared)'
 
         derived = _derived_creds_for(project, name)
-        if derived:
-            print('  credential  {}   (derived — also removed from Keychain)'.format(
-                ', '.join(derived)))
-        else:
-            print('  credential  (none derived)')
+        cred_cell = ', '.join(derived) if derived else '(none derived)'
 
-        print('  registry    ~/.dax.yaml entry')
+        rows.append((name, dir_cell, state_cell, cred_cell))
 
-    print()
-    print('{} process(es) above will be permanently destroyed. This cannot be undone.'.format(
-        len(names)))
+    _print_teardown_table(rows)
+    print('{} process(es) above will be permanently destroyed (including each one\'s '
+          '~/.dax.yaml entry). This cannot be undone.'.format(len(names)))
     print()
 
     if args.dry_run:
@@ -2234,31 +2485,669 @@ def _run_process_destroy(config, args):
 
     for name in names:
         project = projects[name]
-        dir_path = Path(project.get('dir', '')).expanduser()
-        tenant = project.get('tenant')
-
-        if dir_path.exists():
-            shutil.rmtree(dir_path)
-            dax_print('[-]   removed {}'.format(dir_path))
-
-        if tenant:
-            state = state_tree_path(tenant, name)
-            if state.exists():
-                shutil.rmtree(state)
-                dax_print('[-]   removed {}'.format(state))
-            manifest = _shared_files_manifest_path(tenant, name)
-            if manifest.exists():
-                manifest.unlink()
-
-        for cred_name in _derived_creds_for(project, name):
-            try:
-                run_creds_remove(config, cred_name)
-            except Exception as e:
-                dax_print('[!] could not remove credential {}: {}'.format(cred_name, e))
-
+        _teardown_process(config, name, project)
         del config['projects'][name]
         save_config(config)
         dax_print('[+] destroyed {}'.format(name))
+
+
+def _run_process_archive(config, args):
+    """Snapshot one or more registered processes into
+    backup_dir/daily/<name>-<date>.tar.gz — the BCP/DR backup mechanism
+    itself, not a tidiness convenience (see
+    docs/design/2026-08-22-process-archive-restore.md). Archiving is always
+    non-destructive; `--remove` additionally tears each env down afterward,
+    but only once every archive in the batch has already succeeded, and
+    only after one combined confirmation covering the whole batch.
+
+    Output is a single status line per target under one header, rather
+    than a separate "about to..." preview followed by a repeated "archived
+    X to Y" line — with backup_dir a shared prefix across every target,
+    printing the full destination path twice per target was mostly noise;
+    now it prints once, in the header.
+    """
+    from dax_creds.config import state_tree_path
+    from dax_creds.init import (
+        _q_checkbox, _q_confirm, _container_name_for, _is_container_running,
+        _tree_stats, _human_size, _human_age, _home_relative, save_config,
+    )
+    import questionary
+
+    projects = config.get('projects') or {}
+
+    if args.all:
+        names = sorted(projects)
+        if not names:
+            dax_print('[!] no registered envs to archive')
+            return
+    else:
+        names = list(args.name or [])
+        if not names:
+            if not projects:
+                dax_print('[!] no registered envs to archive')
+                return
+            choices = []
+            for pname, project in sorted(projects.items()):
+                tenant = project.get('tenant')
+                label = '{}   [{}{}]'.format(
+                    pname, project.get('dir', '?'),
+                    ', tenant {}'.format(tenant) if tenant else ', no tenant')
+                choices.append(questionary.Choice(label, value=pname))
+            names = _q_checkbox('Select processes to archive (nothing pre-checked):', choices)
+            if not names:
+                dax_print('[-]   nothing selected')
+                return
+
+    unknown = [n for n in names if n not in projects]
+    if unknown:
+        dax_print('[!] not registered: {}'.format(', '.join(unknown)))
+        sys.exit(1)
+
+    def _dir_for(name):
+        return Path(projects[name].get('dir', '')).expanduser()
+
+    def _has_dir(name):
+        return _dir_for(name).is_dir()
+
+    # A stale/moved directory must skip that one target, not abort the
+    # whole batch — this is the BCP mechanism ("back up everything on the
+    # machine in one call"), so one bad registry entry can't be allowed to
+    # take every other env's backup down with it. Checked up front (not
+    # deep inside _write_process_archive, which used to hard sys.exit(1)
+    # and take the whole batch with it) so --dry-run reports the same
+    # outcome the real run would have.
+    if not any(_has_dir(n) for n in names):
+        dax_print('[!] nothing left to archive — every selected env is missing its directory')
+        return
+
+    # Same batch-atomicity guard as `destroy`: checked for every candidate
+    # with a directory before any archive is written, so a bad --remove
+    # target doesn't get discovered only after the rest of the batch
+    # already succeeded. A target already missing its directory skips on
+    # its own below regardless, so it's excluded here rather than treated
+    # as "running".
+    if args.remove:
+        for name in names:
+            if not _has_dir(name):
+                continue
+            container = _container_name_for(_dir_for(name))
+            if _is_container_running(container):
+                dax_print('[!] {} is running — stop it first (`docker stop {}`)'.format(
+                    name, container))
+                sys.exit(1)
+
+    backup_dir = _default_backup_dir(config)
+    today = datetime.date.today().isoformat()
+    daily_dir = backup_dir / 'daily'
+    out_paths = {name: _archive_path_for(backup_dir, name, today=today) for name in names}
+
+    name_width = max(len(n) for n in names)
+
+    print()
+    print('Archiving {} process(es) to {} ({}):'.format(len(names), daily_dir, today))
+    for name in names:
+        padded = name.ljust(name_width)
+        if not _has_dir(name):
+            dax_print('  [!] {}   directory not found ({}), skipping'.format(
+                padded, _dir_for(name)))
+            continue
+        if not args.dry_run:
+            _write_process_archive(config, name, out_paths[name],
+                                   include_credential=args.include_credential)
+        dax_print('  [+] {}   {}'.format(padded, _dir_for(name)))
+
+    available = [n for n in names if _has_dir(n)]
+
+    if not args.remove:
+        if args.dry_run:
+            print()
+            dax_print('[-]   dry run — nothing written')
+        return
+
+    rows = []
+    for name in available:
+        project = projects[name]
+        dir_path = _dir_for(name)
+        tenant = project.get('tenant')
+
+        dir_cell = _home_relative(dir_path)
+        if tenant:
+            state = state_tree_path(tenant, name)
+            if state.exists():
+                size, used = _tree_stats(state)
+                state_cell = '{}  [{}, {} ago]'.format(
+                    _home_relative(state), _human_size(size), _human_age(used))
+            else:
+                state_cell = _home_relative(state)
+        else:
+            state_cell = '(no tenant declared)'
+        derived = _derived_creds_for(project, name)
+        cred_cell = ', '.join(derived) if derived else '(none derived)'
+
+        rows.append((name, dir_cell, state_cell, cred_cell))
+
+    print()
+    if args.dry_run:
+        print('Would then remove (after every archive above succeeds), pending one '
+              'combined confirmation:')
+        _print_teardown_table(rows)
+        dax_print('[-]   dry run — nothing written')
+        return
+
+    print('All archives above succeeded — already backed up. About to remove:')
+    _print_teardown_table(rows)
+
+    if not _q_confirm('Remove {} archived process(es) now?'.format(len(available)), default=False):
+        dax_print('[-]   archived only — nothing removed')
+        return
+
+    for name in available:
+        _teardown_process(config, name, projects[name])
+        del config['projects'][name]
+    save_config(config)
+    for name in available:
+        dax_print('[+] removed {}'.format(name))
+
+
+_ARCHIVE_FILENAME_RE = re.compile(r'^(?P<name>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.tar\.gz$')
+
+
+def _available_archives(backup_dir):
+    """{name: (archive_path, date_str)} — the newest dated archive per env
+    name found under backup_dir/daily/. Filenames are
+    <name>-YYYY-MM-DD.tar.gz; parsed back via a fixed-shape date suffix
+    rather than a naive split, since `name` itself may contain hyphens."""
+    daily_dir = backup_dir / 'daily'
+    if not daily_dir.is_dir():
+        return {}
+    found = {}
+    for f in sorted(daily_dir.glob('*.tar.gz')):
+        m = _ARCHIVE_FILENAME_RE.match(f.name)
+        if not m:
+            continue
+        name, date = m.group('name'), m.group('date')
+        if name not in found or date > found[name][1]:
+            found[name] = (f, date)
+    return found
+
+
+def _read_archive_manifest(archive):
+    with tarfile.open(archive) as tar:
+        try:
+            member = tar.getmember('dax-export-manifest.json')
+        except KeyError:
+            dax_print('[!] {} is not a dax archive (no manifest found)'.format(archive))
+            sys.exit(1)
+        return json.loads(tar.extractfile(member).read())
+
+
+def _relocate_claude_project_key(dest_state, old_dir, new_dir):
+    """Rename `dest_state`'s Claude `projects/<key>/` directory so it's
+    keyed to the *new* project location's basename, not the archived
+    source's.
+
+    Claude Code's own session index (`projects/<mangled-container-cwd>/`,
+    which `/resume` reads) is keyed by the container's absolute cwd —
+    `<container_home>/<basename-of-project-dir>`, exactly where
+    `feature_workdir` mounts a project. Restoring a state tree copies that
+    directory verbatim, so a name/location change (move-restore, or a
+    plain restore's `--dir` landing on a differently-named path) leaves
+    the transcripts sitting under the *old* basename's key — invisible to
+    `/resume`, which looks up the *new*, current cwd's key.
+
+    Found live, 2026-08-30: `fabric` restored (moved) as `denim` showed the
+    right directory contents but no `/resume` history, because Claude Code
+    was looking for `-home-<user>-denim` and only `-home-<user>-fabric`
+    existed in the tree.
+
+    Deliberately doesn't need the container's home path or username: the
+    mangled key only ever differs in its trailing segment (the basename),
+    so this matches on that suffix alone and rewrites just that part,
+    whatever prefix precedes it. A no-op when the basename didn't change
+    (the common in-place-restore case) or when there's nothing to rename.
+    """
+    old_base = Path(old_dir).name
+    new_base = Path(new_dir).name
+    if old_base == new_base:
+        return
+    projects_dir = dest_state / 'projects'
+    if not projects_dir.is_dir():
+        return
+    old_suffix = '-' + old_base
+    new_suffix = '-' + new_base
+    for entry in list(projects_dir.iterdir()):
+        if entry.is_dir() and entry.name.endswith(old_suffix):
+            target = projects_dir / (entry.name[:-len(old_suffix)] + new_suffix)
+            if not target.exists():
+                entry.rename(target)
+
+
+def _extract_process_archive(config, archive, manifest, name, process_dir, tenant):
+    """Extract one archive's project/ (and state/, if the manifest says it
+    had one) into place, deliberately replacing whatever's already there
+    (a restore is always a replace, never a merge), then register `name`
+    at `process_dir` with `tenant` and the manifest's
+    image/creds/features/mounts/substrate. The one extraction+registration
+    core shared by every restore path — in place, moved to a new name/
+    location, or batch/--all — so it exists exactly once. Returns the
+    manifest's creds list, for the caller to print login reminders from.
+    """
+    from dax_creds.init import register_project, run_env_set, save_config
+    from dax_creds.config import state_tree_path
+
+    dest_state = state_tree_path(tenant, name) if tenant else None
+
+    with tarfile.open(archive) as tar, tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        _extractall_permissive(tar, tmp)
+
+        project_src = tmp / 'project'
+        if process_dir.exists():
+            shutil.rmtree(process_dir)
+        process_dir.parent.mkdir(parents=True, exist_ok=True)
+        if project_src.is_dir():
+            shutil.move(str(project_src), str(process_dir))
+        else:
+            process_dir.mkdir(parents=True, exist_ok=True)
+
+        state_src = tmp / 'state'
+        if manifest.get('had_state_tree') and state_src.is_dir():
+            if dest_state.exists():
+                shutil.rmtree(dest_state)
+            dest_state.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(state_src), str(dest_state))
+            if manifest.get('dir'):
+                _relocate_claude_project_key(dest_state, manifest['dir'], process_dir)
+
+    creds = manifest.get('creds') or []
+    register_project(config, name=name, project_dir=process_dir,
+                     image=manifest.get('image') or 'dax-base', creds=creds)
+    save_config(config)
+    if tenant:
+        run_env_set(config, name, 'tenant', tenant)
+    if manifest.get('features'):
+        run_env_set(config, name, 'features', ','.join(manifest['features']),
+                    valid_features=_feature_names())
+    if manifest.get('mounts'):
+        run_env_set(config, name, 'mounts', ','.join(manifest['mounts']))
+    if manifest.get('substrate'):
+        run_env_set(config, name, 'substrate', manifest['substrate'])
+    return creds
+
+
+def _print_restore_login_reminders(creds, tenant, name):
+    if not creds:
+        return
+    from dax_creds.config import resolve_credential_names
+    try:
+        resolved_names = [n for n, _p in resolve_credential_names(
+            {'creds': creds, 'tenant': tenant}, name)]
+    except ValueError as e:
+        dax_print('[!] {}'.format(e))
+        resolved_names = creds
+    for cred_name in resolved_names:
+        dax_print('    dax creds login {}'.format(cred_name))
+
+
+def _print_restore_preview(heading, process_dir, tenant, manifest, dest_state, name_for_creds):
+    """Full preview of exactly what would land in ~/.dax.yaml — directory,
+    tenant, image, creds (resolved to the derived name a bare provider
+    entry would produce, when resolvable), features, mounts, substrate,
+    and state tree — printed identically for a dry run and a real run, so
+    `--dry-run` is a genuine preview of the registry entry `register_project`/
+    `run_env_set` would otherwise write, not just a same/different-dir note.
+    Mirrors `_run_process_import`'s preview block, which this was modeled on.
+    """
+    from dax_creds.config import resolve_credential_names
+
+    creds = manifest.get('creds') or []
+    try:
+        resolved_names = [n for n, _p in resolve_credential_names(
+            {'creds': creds, 'tenant': tenant}, name_for_creds)]
+    except ValueError:
+        resolved_names = None
+
+    print()
+    print(heading)
+    print('  directory    {}'.format(process_dir))
+    print('  tenant       {}'.format(tenant or '(none)'))
+    print('  image        {}'.format(manifest.get('image')))
+    if creds:
+        shown = ', '.join(resolved_names) if resolved_names else ', '.join(creds)
+        print('  creds        {}   (a name already defined in ~/.dax.yaml is just '
+              're-referenced, never redefined — run `dax creds login` for any that '
+              'still need a fresh grant)'.format(shown))
+    if manifest.get('features'):
+        print('  features     {}'.format(', '.join(manifest['features'])))
+    if manifest.get('substrate'):
+        print('  substrate    {}   (path only — must already exist on this machine)'.format(
+            manifest['substrate']))
+    if manifest.get('mounts'):
+        print('  mounts       {}   (paths only — must already exist on this machine)'.format(
+            ', '.join(manifest['mounts'])))
+    print('  state tree   {}'.format(dest_state or '(none)'))
+    print()
+
+
+def _restore_preview_row(config, name, archive, args):
+    """One row for the batch (`--all`/multiple explicit names) `--dry-run`
+    summary table: name, directory, tenant, image, creds, state tree, and
+    what would happen. Mirrors `_restore_in_place`'s own branching
+    (registered vs not, missing-tenant, occupied-path/`_process_dir_conflict`)
+    but only computes and reports — never prompts, never extracts. A
+    single-target interactive restore still gets the fuller
+    `_print_restore_preview` treatment via `_restore_in_place` directly;
+    this is specifically for previewing a whole batch at once, the same
+    "many records, same fields, tabular" shape `_print_teardown_table`
+    already established for destroy/archive --remove.
+    """
+    from dax_creds.config import resolve_credential_names, state_tree_path
+    from dax_creds.init import _home_relative
+
+    manifest = _read_archive_manifest(archive)
+    projects = config.get('projects') or {}
+    registered = name in projects
+
+    if registered:
+        process_dir = Path(projects[name]['dir']).expanduser().resolve()
+    elif args.dir:
+        process_dir = Path(args.dir).expanduser().resolve()
+    else:
+        process_dir = Path(manifest['dir']).expanduser().resolve()
+
+    tenant = manifest.get('tenant')
+    creds = manifest.get('creds') or []
+    try:
+        resolved_names = [n for n, _p in resolve_credential_names(
+            {'creds': creds, 'tenant': tenant}, name)]
+    except ValueError:
+        resolved_names = None
+    creds_cell = ', '.join(resolved_names) if resolved_names else (', '.join(creds) or '(none)')
+
+    dest_state = state_tree_path(tenant, name) if tenant else None
+
+    if manifest.get('had_state_tree') and not tenant:
+        outcome = 'would skip — no tenant recorded'
+    elif registered:
+        outcome = 'would prompt to confirm overwrite'
+    elif process_dir.exists() and any(process_dir.iterdir()):
+        outcome = 'would skip — directory occupied'
+    else:
+        problem = _process_dir_conflict(config, process_dir)
+        outcome = 'would skip — {}'.format(problem) if problem else 'would restore'
+
+    return (name, _home_relative(process_dir), tenant or '(none)',
+            manifest.get('image') or '?', creds_cell,
+            _home_relative(dest_state) if dest_state else '(none)', outcome)
+
+
+def _restore_in_place(config, name, archive, args):
+    """Restore `name` at its manifest (or, if already registered, currently
+    registered) directory — the shared logic behind a non-interactive
+    `process restore <name>` and the interactive picker's "restore in
+    place" choice.
+
+    Deliberately targets the *currently registered* dir when `name` is
+    already registered, not the manifest's — the project may have moved
+    since it was archived, and the live registry entry is the more current
+    answer to "where does this actually live now."
+    """
+    from dax_creds.init import _q_confirm
+    from dax_creds.config import state_tree_path
+
+    manifest = _read_archive_manifest(archive)
+    projects = config.get('projects') or {}
+    registered = name in projects
+
+    if registered:
+        process_dir = Path(projects[name]['dir']).expanduser().resolve()
+    elif args.dir:
+        process_dir = Path(args.dir).expanduser().resolve()
+    else:
+        process_dir = Path(manifest['dir']).expanduser().resolve()
+
+    tenant = manifest.get('tenant')
+    if manifest.get('had_state_tree') and not tenant:
+        dax_print('[!] {} — archive has a Claude state tree but no tenant recorded, '
+                  'skipping'.format(name))
+        return
+
+    if not registered:
+        if process_dir.exists() and any(process_dir.iterdir()):
+            dax_print('[!] {} — {} already exists and is not empty, skipping'.format(
+                name, process_dir))
+            return
+        problem = _process_dir_conflict(config, process_dir)
+        if problem:
+            dax_print('[!] {} — {}, skipping'.format(name, problem))
+            return
+
+    dest_state = state_tree_path(tenant, name) if tenant else None
+    heading = ('About to restore {} over its existing registration:'.format(name) if registered
+               else 'About to restore {}:'.format(name))
+    _print_restore_preview(heading, process_dir, tenant, manifest, dest_state, name)
+
+    if registered:
+        # --dry-run must never block on input — report what it would ask
+        # rather than actually asking.
+        if args.dry_run:
+            dax_print('[-]   dry run — would prompt to confirm before restoring over the '
+                      'existing registration')
+            return
+        if not _q_confirm('{} is already registered at {} — restore over it?'.format(
+                name, process_dir), default=False):
+            dax_print('[-]   skipped {}'.format(name))
+            return
+    elif args.dry_run:
+        dax_print('[-]   dry run — nothing restored')
+        return
+
+    creds = _extract_process_archive(config, archive, manifest, name, process_dir, tenant)
+    dax_print('[+] restored {} at {}'.format(name, process_dir))
+    _print_restore_login_reminders(creds, tenant, name)
+
+
+def _restore_moved(config, name, archive, manifest, args):
+    """Restore an archived snapshot under a *new* name and directory,
+    leaving whatever's currently registered under the original name
+    (if anything) completely untouched — the interactive picker's "move
+    restore" choice, for pulling an old snapshot back as a second, separate
+    env alongside a still-live original, or relocating a process that no
+    longer belongs at its original path.
+
+    Both the new name and the new directory are re-prompted on a bad
+    answer rather than aborting the whole restore session over one typo —
+    `_process_dir_conflict` (the non-fatal core `_check_process_dir` wraps)
+    exists specifically to make that possible.
+    """
+    from dax_creds.init import _prompt, _q_confirm
+    from dax_creds.config import state_tree_path
+
+    print()
+    print('Move restore {!r}: choose a new name and location so the original '
+          'stays untouched.'.format(name))
+
+    new_name = None
+    while True:
+        candidate = _prompt('New env name')
+        if not candidate:
+            dax_print('[-]   cancelled')
+            return
+        if candidate in (config.get('projects') or {}):
+            dax_print('[!] {!r} is already registered — pick a different name'.format(candidate))
+            continue
+        new_name = candidate
+        break
+
+    new_dir = None
+    while True:
+        candidate_dir = _prompt('New directory')
+        if not candidate_dir:
+            dax_print('[-]   cancelled')
+            return
+        candidate_dir = Path(candidate_dir).expanduser().resolve()
+        if candidate_dir.exists() and any(candidate_dir.iterdir()):
+            dax_print('[!] {} already exists and is not empty — pick a different '
+                      'location'.format(candidate_dir))
+            continue
+        problem = _process_dir_conflict(config, candidate_dir)
+        if problem:
+            dax_print('[!] {}'.format(problem))
+            continue
+        new_dir = candidate_dir
+        break
+
+    tenant = manifest.get('tenant')
+    if manifest.get('had_state_tree'):
+        entered = _prompt('Tenant/grouping label', default=tenant)
+        tenant = entered or tenant
+        if not tenant:
+            dax_print('[!] this archive has a Claude state tree but no tenant — '
+                      'cannot move restore without one')
+            return
+    dest_state = state_tree_path(tenant, new_name) if tenant else None
+    if dest_state and dest_state.exists():
+        dax_print('[!] {} already exists — pick a different name'.format(dest_state))
+        return
+
+    _print_restore_preview('About to move-restore {} as {}:'.format(name, new_name),
+                           new_dir, tenant, manifest, dest_state, new_name)
+
+    if args.dry_run:
+        dax_print('[-]   dry run — nothing restored')
+        return
+
+    if not _q_confirm('Proceed?', default=True):
+        dax_print('[-]   cancelled')
+        return
+
+    creds = _extract_process_archive(config, archive, manifest, new_name, new_dir, tenant)
+    dax_print('[+] restored {} as {} at {}'.format(name, new_name, new_dir))
+    _print_restore_login_reminders(creds, tenant, new_name)
+
+
+_RESTORE_CANCEL = object()
+
+
+def _run_process_restore_interactive(config, available, args):
+    """`dax process restore` with no name/--all: presents available
+    archives as a single-select list (never a checkbox — restore is rare
+    and low-volume), and for whichever one is picked, asks whether to
+    restore it in place or move it to a new name/location. Handles exactly
+    one restore, then returns — run the command again for another.
+
+    Deliberately one-shot, not a loop back to the top-level list. An
+    earlier version looped so "several can be handled in one sitting" —
+    found live, 2026-08-30, that chaining several interactive prompts
+    together is exactly the shape that let a leftover keystroke (from an
+    earlier prompt, most likely a habitual double Enter) bleed into the
+    next one and silently resolve it to its default choice before the user
+    ever saw it. `_flush_stdin` (`dax_creds/init.py`) now guards every
+    individual prompt against that regardless, but removing the loop
+    closes off the whole class of chained-prompt risk for this flow rather
+    than only defending against it, and it's also just what was actually
+    wanted: restore the one thing, return to the shell.
+
+    Uses a sentinel object for "Cancel" rather than `value=None` —
+    found live on the real host: `questionary.Choice(title, value=None)`
+    does not actually store `None`. questionary's own default for an
+    omitted `value` is `None`, so passing it explicitly is
+    indistinguishable from not passing it at all, and questionary silently
+    substitutes the choice's *title string* instead — which made "Cancel"
+    fall through into starting a move-restore instead of doing nothing. A
+    plain `object()` sentinel round-trips through `Choice` correctly
+    (confirmed: only an explicit `None` gets replaced), and is compared
+    with `is`, never `==`, so it can never collide with a real env name or
+    mode string.
+    """
+    from dax_creds.init import _q_select
+    import questionary
+
+    name_width = max((len(n) for n in available), default=0)
+
+    projects = config.get('projects') or {}
+    choices = []
+    for name, (_archive, date) in sorted(available.items()):
+        note = '   [currently registered]' if name in projects else ''
+        choices.append(questionary.Choice(
+            '{}   (archived {}){}'.format(name.ljust(name_width), date, note),
+            value=name))
+    choices.append(questionary.Choice('Cancel', value=_RESTORE_CANCEL))
+
+    try:
+        picked = _q_select('Select a process to restore:', choices)
+    except KeyboardInterrupt:
+        return
+    if picked is _RESTORE_CANCEL:
+        return
+
+    archive, _date = available[picked]
+    manifest = _read_archive_manifest(archive)
+
+    try:
+        mode = _q_select(
+            'How do you want to restore {!r}?'.format(picked),
+            [
+                questionary.Choice('Restore in place (original name and location)',
+                                   value='in_place'),
+                questionary.Choice('Move restore (new name and location on this machine)',
+                                   value='move'),
+                questionary.Choice('Cancel', value=_RESTORE_CANCEL),
+            ])
+    except KeyboardInterrupt:
+        return
+    if mode is _RESTORE_CANCEL:
+        return
+    elif mode == 'in_place':
+        _restore_in_place(config, picked, archive, args)
+    else:
+        _restore_moved(config, picked, archive, manifest, args)
+
+
+def _run_process_restore(config, args):
+    """Restore one or more processes from `dax process archive`'s backups —
+    the recovery half of the BCP/DR mechanism (see
+    docs/design/2026-08-22-process-archive-restore.md).
+
+    Explicit name(s)/--all skip straight to a non-interactive restore-in-
+    place per name (the scripted/full-machine-rebuild path); omitting both
+    drops into the interactive one-at-a-time picker, which additionally
+    offers a "move restore" to a new name/location per pick.
+    """
+    if args.dir and (args.all or not args.name or len(args.name) != 1):
+        dax_print('[!] --dir only makes sense with exactly one explicit name')
+        sys.exit(1)
+
+    backup_dir = _default_backup_dir(config)
+    available = _available_archives(backup_dir)
+    if not available:
+        dax_print('[!] no archives found under {}'.format(backup_dir / 'daily'))
+        return
+
+    if args.all or args.name:
+        names = sorted(available) if args.all else list(args.name)
+        unknown = [n for n in names if n not in available]
+        if unknown:
+            dax_print('[!] no archive found for: {}'.format(', '.join(unknown)))
+            sys.exit(1)
+
+        if args.dry_run:
+            # One combined table for the whole batch rather than N repeated
+            # full-preview paragraphs — --dry-run has no interleaved
+            # per-target prompt to interrupt it, so the whole batch can be
+            # reported at once, same shape as destroy/archive --remove.
+            rows = [_restore_preview_row(config, name, available[name][0], args)
+                    for name in names]
+            _print_table(('name', 'directory', 'tenant', 'image', 'creds', 'state tree',
+                          'outcome'), rows)
+            dax_print('[-]   dry run — nothing restored')
+            return
+
+        for name in names:
+            _restore_in_place(config, name, available[name][0], args)
+        return
+
+    _run_process_restore_interactive(config, available, args)
 
 
 def cmd_process(args):
@@ -2278,6 +3167,10 @@ def cmd_process(args):
         _run_process_export(config, args)
     elif args.process_command == 'import':
         _run_process_import(config, args)
+    elif args.process_command == 'archive':
+        _run_process_archive(config, args)
+    elif args.process_command == 'restore':
+        _run_process_restore(config, args)
 
 
 def _run_backup(config, verbose=True, backup_dir=None):
@@ -2310,7 +3203,7 @@ def _run_backup(config, verbose=True, backup_dir=None):
     """
     home = os.path.expanduser('~')
     if backup_dir is None:
-        backup_dir = Path(__file__).parent / 'backup'
+        backup_dir = _default_backup_dir(config)
 
     paths = []
     for f in config.get('dotfiles', {}).get('ro', []):
@@ -2519,6 +3412,46 @@ def main():
     process_import_p.add_argument(
         '--dry-run', action='store_true',
         help='Print the summary of what would be imported, then exit without changing anything')
+
+    process_archive_p = process_sub.add_parser(
+        'archive',
+        help='Snapshot one or more processes into a permanent backup — the BCP/DR '
+             'mechanism (see docs/design/2026-08-22-process-archive-restore.md)')
+    process_archive_p.add_argument(
+        'name', nargs='*',
+        help='Env name(s) to archive (omit for an interactive picker over every registered env)')
+    process_archive_p.add_argument(
+        '--all', action='store_true', help='Archive every registered env, no picker')
+    process_archive_p.add_argument(
+        '--remove', action='store_true',
+        help='Also remove each env after every archive in the batch succeeds '
+             '(default: snapshot only, non-destructive)')
+    process_archive_p.add_argument(
+        '--include-credential', action='store_true',
+        help='Include the live Claude OAuth credential in each state tree snapshot')
+    process_archive_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Print what would be archived (and removed, if --remove), then exit '
+             'without writing anything')
+
+    process_restore_p = process_sub.add_parser(
+        'restore',
+        help='Restore one or more archived processes — the recovery half of the BCP/DR '
+             'mechanism (see docs/design/2026-08-22-process-archive-restore.md)')
+    process_restore_p.add_argument(
+        'name', nargs='*',
+        help='Env name(s) to restore, non-interactively and in place (omit for an '
+             'interactive picker, one at a time, with a move-restore option per pick)')
+    process_restore_p.add_argument(
+        '--all', action='store_true',
+        help='Restore every process with an available archive, non-interactively and in place')
+    process_restore_p.add_argument(
+        '--dir',
+        help='Relocate: restore to this path instead of the archived dir '
+             '(only valid with exactly one explicit name)')
+    process_restore_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Print what would be restored, then exit without changing anything')
 
     args = parser.parse_args()
 

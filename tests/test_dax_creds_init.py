@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 import yaml
 from pathlib import Path
@@ -343,3 +345,79 @@ def test_save_config_writes_yaml(tmp_path, monkeypatch):
 
     saved = _load_yaml(tmp_path / '.dax.yaml')
     assert saved['projects']['my-project']['dir'] == str(tmp_path)
+
+
+class _FakeAsk:
+    def __init__(self, value):
+        self._value = value
+
+    def ask(self):
+        return self._value
+
+
+def test_flush_stdin_is_a_silent_noop_without_a_real_terminal():
+    """Regression coverage for a real bug found live, 2026-08-30: in
+    `dax process restore`'s interactive picker (several questionary prompts
+    in a row, looping back after each pick), a leftover buffered keystroke
+    (most likely a habitual double Enter on the previous prompt) got
+    silently consumed by the *next* prompt the instant it started reading,
+    resolving it to its default/first choice before the user ever saw it.
+    `_flush_stdin` exists to drain that buffer right before every prompt;
+    this confirms it never raises outside a real TTY (pytest's own stdin),
+    which is also every non-interactive/scripted/piped-input case."""
+    from dax_creds.init import _flush_stdin
+    _flush_stdin()  # must not raise
+
+
+def test_flush_stdin_calls_termios_tcflush_when_available(monkeypatch):
+    """Fakes sys.stdin rather than relying on the ambient real one: under
+    pytest's default output capture, sys.stdin is replaced with a
+    DontReadFromInput-style object whose .fileno() raises — which
+    _flush_stdin's own broad except is right to swallow in production, but
+    made an earlier version of this test pass only under `-s` (capture
+    disabled) and silently do nothing (0 calls recorded, assertion never
+    exercising the real code path) under the suite's normal captured run.
+    A substitute stdin with a real, working fileno() makes the test
+    deterministic regardless of capture mode."""
+    import termios
+
+    class _FakeStdin:
+        def fileno(self):
+            return 99
+
+    monkeypatch.setattr(sys, 'stdin', _FakeStdin())
+    calls = []
+    monkeypatch.setattr(termios, 'tcflush', lambda fd, mode: calls.append((fd, mode)))
+
+    from dax_creds.init import _flush_stdin
+    _flush_stdin()
+
+    assert calls == [(99, termios.TCIFLUSH)]
+
+
+@pytest.mark.parametrize('wrapper, method, value', [
+    ('_q_text', 'text', 'typed'),
+    ('_q_select', 'select', 'picked'),
+    ('_q_confirm', 'confirm', True),
+    ('_q_checkbox', 'checkbox', ['a']),
+])
+def test_prompt_wrappers_flush_stdin_before_asking(monkeypatch, wrapper, method, value):
+    """Each interactive prompt wrapper must flush stdin before it asks —
+    this is what actually closes the bug: it's not enough for
+    `_flush_stdin` to exist, every prompt in a chained/looped sequence has
+    to call it first."""
+    import questionary
+    import dax_creds.init as init_mod
+
+    flushed = []
+    monkeypatch.setattr(init_mod, '_flush_stdin', lambda: flushed.append(True))
+    monkeypatch.setattr(questionary, method, lambda *a, **k: _FakeAsk(value))
+
+    fn = getattr(init_mod, wrapper)
+    if wrapper in ('_q_select', '_q_checkbox'):
+        result = fn('prompt', ['a', 'b'])
+    else:
+        result = fn('prompt')
+
+    assert flushed == [True]
+    assert result == value

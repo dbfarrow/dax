@@ -55,8 +55,39 @@ def save_config(config):
         f.write(rendered)
 
 
+def _flush_stdin():
+    """Best-effort drain of any buffered terminal input before showing a
+    new interactive prompt.
+
+    Found live, 2026-08-30: in `dax process restore`'s interactive picker
+    (which asks several questionary prompts in a row, looping back to the
+    top after each pick), a leftover keystroke — most likely a habitual
+    double Enter confirming the previous prompt — sat in the terminal's
+    input queue and was silently consumed by the *next* prompt the moment
+    it started reading, instantly resolving it to its first/default choice
+    before the user ever saw it. Reported live: picking "Proceed? Yes" for
+    one restore, then landing already past the next loop iteration's
+    top-level picker (silently "choosing" whichever env sorted first) and
+    straight into that env's mode-choice screen, never having consciously
+    picked it.
+
+    POSIX only (termios) and deliberately swallow-everything: this is a UX
+    nicety protecting against a hazard of chaining interactive prompts in a
+    loop, not something to fail loudly over when unavailable (non-TTY
+    stdin, a platform without termios, a piped/redirected input stream
+    feeding scripted answers on purpose - flushing there would eat input
+    the caller actually wants).
+    """
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
 def _q_text(prompt, default=None):
     import questionary
+    _flush_stdin()
     result = questionary.text(prompt, default=default or '').ask()
     if result is None:
         raise KeyboardInterrupt
@@ -65,6 +96,7 @@ def _q_text(prompt, default=None):
 
 def _q_select(prompt, choices):
     import questionary
+    _flush_stdin()
     result = questionary.select(prompt, choices=choices).ask()
     if result is None:
         raise KeyboardInterrupt
@@ -73,6 +105,7 @@ def _q_select(prompt, choices):
 
 def _q_confirm(prompt, default=False):
     import questionary
+    _flush_stdin()
     result = questionary.confirm(prompt, default=default).ask()
     if result is None:
         raise KeyboardInterrupt
@@ -81,6 +114,7 @@ def _q_confirm(prompt, default=False):
 
 def _q_checkbox(prompt, choices):
     import questionary
+    _flush_stdin()
     result = questionary.checkbox(prompt, choices=choices).ask()
     if result is None:
         raise KeyboardInterrupt
