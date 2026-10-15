@@ -31,29 +31,71 @@ fi
 
 _dax_creds_file="$_dax_cfg_dir/.credentials.json"
 
-# Inject from Keychain only when the state tree has no credential yet. Claude
-# Code owns and refreshes this file from first launch onward; the daemon copy is
-# a *bootstrap*, not the running source of truth.
+# Inject from Keychain only when the state tree has no *usable* credential
+# yet. Claude Code owns and refreshes this file from first launch onward; the
+# daemon copy is a *bootstrap*, not the running source of truth.
 #
 # Overwriting on every launch was harmless while ~/.claude was a shared mount
 # that Claude Code refreshed in place — the daemon snapshot and the file stayed
 # in step. Under a persistent per-tenant/project state tree they diverge: the
-# session refreshes the token into its own tree, nothing propagates back to
-# Keychain, and the next launch would clobber the good token with the stale
-# snapshot. If Anthropic rotates refresh tokens on use, that snapshot is already
-# dead, so every project would independently break on its second start.
+# session refreshes the token into its own tree, and (since 2026-08-31)
+# `cmd_run`'s teardown syncs it back to Keychain and deletes the file on
+# every container stop — see decision C of
+# docs/design/2026-07-27-tenant-isolation.md — so by the time this wrapper
+# runs, an absent file is the normal case, not the risky one.
 #
-# `-s` rather than `-e`: a zero-byte file left by an interrupted write counts as
-# no credential. To force a re-fetch, delete the file and relaunch.
-#
-# Teardown write-back to Keychain is deliberately not built yet — see decision C
-# of docs/design/2026-07-27-tenant-isolation.md.
-if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ] && [ ! -s "$_dax_creds_file" ]; then
+# "Usable" is content-based, not just `-s` (non-zero size), since 2026-08-31:
+# found live, a dead credential doesn't necessarily leave the file empty.
+# Claude Code's own behavior on a failed refresh is to blank
+# accessToken/refreshToken to "" while leaving scopes/subscriptionType/
+# rateLimitTier and the rest of the envelope populated — real, non-empty,
+# valid JSON that the old `-s`-only check accepted as "already have a
+# credential," permanently blocking re-injection even across a fresh
+# `dax creds login`. `_dax_creds_file_has_valid_grant` below checks size
+# first (still catches a zero-byte file from an interrupted write) and then
+# delegates the actual "is this usable" call to the same
+# `is_oauth_envelope` check the host-side login/import path already uses,
+# rather than re-deriving the rule in shell.
+_is_oauth_envelope_file() {
+    python3 -c "
+import sys
+from dax_creds.providers.claude import is_oauth_envelope
+sys.exit(0 if is_oauth_envelope(open(sys.argv[1]).read()) else 1)
+" "$1" 2>/dev/null
+}
+
+_dax_creds_file_has_valid_grant() {
+    [ -s "$_dax_creds_file" ] || return 1
+    _is_oauth_envelope_file "$_dax_creds_file"
+}
+
+if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ] && ! _dax_creds_file_has_valid_grant; then
     if _creds=$(dax-creds get "$DAX_CREDS_CLAUDE"); then
         case "$_creds" in
             *'"claudeAiOauth"'*)
+                # The substring match above only confirms this *looks*
+                # envelope-shaped, same blind spot _dax_creds_file_has_valid_grant
+                # used to have before 2026-08-31: a dead, blanked-token blob
+                # (Claude Code's own shape for a failed refresh - real,
+                # non-empty, contains "claudeAiOauth", but accessToken/
+                # refreshToken are "") passes this check just fine. Found
+                # live, 2026-09-23: nothing else in this script ever
+                # verified the *fetched* content has usable tokens before
+                # writing it - only whatever was already on disk got that
+                # check. Write to a temp file first and validate it the
+                # same way, so a dead Keychain copy gets a clear message
+                # here instead of a silent write followed by Claude Code's
+                # own surprise mid-session login prompt.
                 mkdir -p "$_dax_cfg_dir"
-                ( umask 077; printf '%s' "$_creds" > "$_dax_creds_file" )
+                _dax_creds_tmp="$(mktemp)"
+                printf '%s' "$_creds" > "$_dax_creds_tmp"
+                if _is_oauth_envelope_file "$_dax_creds_tmp"; then
+                    ( umask 077; mv "$_dax_creds_tmp" "$_dax_creds_file" )
+                else
+                    rm -f "$_dax_creds_tmp"
+                    echo "dax: credential '$DAX_CREDS_CLAUDE' in Keychain has no usable tokens (a dead grant) — run on the host:" >&2
+                    echo "dax:   dax creds login $DAX_CREDS_CLAUDE" >&2
+                fi
                 ;;
             *)
                 echo "dax: credential '$DAX_CREDS_CLAUDE' is not a Claude credentials blob" >&2

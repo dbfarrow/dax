@@ -1,5 +1,19 @@
 image: dax:latest
 
+# Fallback values, used only when something else can't resolve its own
+# answer. `image` backstops a project with no image of its own (and no
+# top-level `image:` above). `timezone` backstops `dax run`'s own
+# host-timezone detection (read from /etc/localtime at every launch) when
+# the host doesn't use that convention and nothing can be detected.
+# `relogin_cooldown_hours` controls how long `dax run` waits, per credential,
+# before running the Claude login flow again for a `claude_tenant_state` env
+# — it runs unconditionally before every launch unless the last login flow
+# (for that exact credential) ran more recently than this. Defaults to 24.
+# defaults:
+#   image: dax-base
+#   timezone: America/New_York
+#   relogin_cooldown_hours: 24
+
 # workdir, dotfiles, and webpreview are always on — no top-level features:
 # list needed for them. Everything else (claude, claude_tenant_state, auggie,
 # github, mounts, substrate, auto_claude, ...) is opt-in per project: add it
@@ -48,3 +62,12 @@ dotfiles:
 backup:
   - ~/.claude/CLAUDE.md
   - ~/.claude/.settings.json
+
+# Base directory `dax backup` and `dax process archive`/`restore` write
+# into. Defaults to backup/ inside this repo checkout if omitted — that
+# default exists specifically because it's bind-mounted into the container
+# and survives a rebuild. Pointing this elsewhere (an external drive, a NAS
+# share) is the point for real BCP/DR media, but only that path is backed
+# up if this container is ever rebuilt or lost, so make sure it's somewhere
+# that survives independently.
+# backup_dir: ~/backups/dax
