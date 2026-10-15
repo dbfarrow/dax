@@ -23,7 +23,12 @@ def _setup(tmp_path, monkeypatch, project_extra=None):
     home.mkdir(exist_ok=True)
     repo = home / 'a-priest-and-an-imam'
     repo.mkdir(exist_ok=True)
-    (home / 'virgil').mkdir(exist_ok=True)
+    # feature_substrate refuses a mount with no shared/wire.sh (2026-08-31),
+    # so a real fixture needs one to still count as "available."
+    wire_sh = home / 'virgil' / 'shared' / 'wire.sh'
+    wire_sh.parent.mkdir(parents=True, exist_ok=True)
+    wire_sh.write_text('#!/bin/sh\n')
+    wire_sh.chmod(0o755)
 
     project = {'dir': str(repo), 'tenant': 'personal', 'creds': []}
     project.update(project_extra or {})

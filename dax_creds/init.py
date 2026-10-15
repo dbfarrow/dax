@@ -6,8 +6,8 @@ from pathlib import Path
 from dax_creds.config import (
     BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
     credential_users, derived_credentials, env_field_help,
-    resolve_credential_names, state_tree_path, state_trees,
-    sync_claude_shared_files,
+    last_login_at, relogin_due, resolve_credential_names, state_tree_path,
+    state_trees, sync_claude_shared_files,
 )
 from dax_creds.providers.ssh import SshProvider
 
@@ -613,7 +613,29 @@ def _cred_status(config, name, cred_def):
     elif provider == 'claude':
         try:
             from dax_creds.providers.claude import ClaudeProvider
-            if ClaudeProvider().has_disk_copy(cred_def):
+            claude_provider = ClaudeProvider()
+            # Checked per env, not once against a single fixed location: a
+            # claude_tenant_state env's live credential lives in its own
+            # state tree, not the shared `~/.claude/.credentials.json` this
+            # used to check unconditionally — which meant the warning was
+            # checking a path a tenant-state env never writes to at all, and
+            # silently missing the one it actually uses. An env with no
+            # claude_tenant_state (the plain shared `claude` mount, or no
+            # feature info at all) still checks the shared path, since
+            # that's genuinely where its copy would be.
+            found = False
+            for env_name in envs:
+                proj = config.get('projects', {}).get(env_name, {})
+                tenant = proj.get('tenant')
+                if 'claude_tenant_state' in (proj.get('features') or []) and tenant:
+                    tree_file = state_tree_path(tenant, env_name) / '.credentials.json'
+                    if claude_provider.has_disk_copy(cred_def, disk_locations=[tree_file]):
+                        found = True
+                elif claude_provider.has_disk_copy(cred_def):
+                    found = True
+            if not envs and claude_provider.has_disk_copy(cred_def):
+                found = True
+            if found:
                 warnings.append('[!] key on disk')
         except ImportError:
             pass
@@ -659,11 +681,14 @@ def run_creds_list(config):
     _ENVS_MAX = 30
     _DETAIL_MAX = 28
     _FLAGS_MAX = 24
+    _RELOGIN_MAX = 10
 
     col = max(len(n) for n in credentials) + 2
     print()
-    print(f"  {'name':<{col}}  {'provider':<8}  {'stored':<6}  {'detail':<{_DETAIL_MAX}}  {'used by':<{_ENVS_MAX}}  warnings")
-    print(f"  {'-'*col}  {'-'*8}  {'-'*6}  {'-'*_DETAIL_MAX}  {'-'*_ENVS_MAX}  {'-'*_FLAGS_MAX}")
+    print(f"  {'name':<{col}}  {'provider':<8}  {'stored':<6}  {'detail':<{_DETAIL_MAX}}  "
+          f"{'used by':<{_ENVS_MAX}}  {'relogin':<{_RELOGIN_MAX}}  warnings")
+    print(f"  {'-'*col}  {'-'*8}  {'-'*6}  {'-'*_DETAIL_MAX}  {'-'*_ENVS_MAX}  "
+          f"{'-'*_RELOGIN_MAX}  {'-'*_FLAGS_MAX}")
     for name, cred_def in credentials.items():
         provider = cred_def.get('provider', '?')
         stored_bool, envs, warnings = _cred_status(config, name, cred_def)
@@ -675,17 +700,36 @@ def run_creds_list(config):
             detail = browser_label(cred_def.get('browser', 'default'), cred_def.get('chrome_profile'))
         else:
             detail = ''
-        if name in derived:
-            warnings = warnings + ['(derived)']
+        # Only meaningful for a claude credential actually used by a
+        # claude_tenant_state env — that's the only case `dax run` consults
+        # the cooldown for at all (see CLAUDE.md's "found live, 2026-10"
+        # entry). "stored: yes" above says nothing about this: it is true
+        # for a well-formed Keychain blob whose refresh token Anthropic has
+        # already stopped honoring, which is exactly the gap this column
+        # closes — not a shape check, a "when did the flow last actually run"
+        # one, since no local shape check can tell the two apart.
+        relogin_col = '-'
+        if provider == 'claude' and any(
+                'claude_tenant_state' in (config.get('projects', {}).get(e, {}).get('features') or [])
+                for e in envs):
+            last = last_login_at(name)
+            if last is None:
+                relogin_col = 'never'
+            else:
+                age = _human_age(last.timestamp())
+                relogin_col = f'{age} due' if relogin_due(name, config) else age
         flags = '  '.join(warnings)
         if len(detail) > _DETAIL_MAX:
             detail = detail[:_DETAIL_MAX - 3] + '...'
         if len(flags) > _FLAGS_MAX:
             flags = flags[:_FLAGS_MAX - 3] + '...'
+        if len(relogin_col) > _RELOGIN_MAX:
+            relogin_col = relogin_col[:_RELOGIN_MAX - 3] + '...'
         envs_str = ', '.join(envs)
         if len(envs_str) > _ENVS_MAX:
             envs_str = envs_str[:_ENVS_MAX - 3] + '...'
-        print(f'  {name:<{col}}  {provider:<8}  {stored:<6}  {detail:<{_DETAIL_MAX}}  {envs_str:<{_ENVS_MAX}}  {flags}')
+        print(f'  {name:<{col}}  {provider:<8}  {stored:<6}  {detail:<{_DETAIL_MAX}}  '
+              f'{envs_str:<{_ENVS_MAX}}  {relogin_col:<{_RELOGIN_MAX}}  {flags}')
     print()
 
 

@@ -2,6 +2,8 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
 from dax import (
     feature_workdir,
     feature_optdir,
@@ -101,32 +103,46 @@ def test_feature_ports_returns_port_flags():
     assert '8443:443' in opts
 
 
-def test_feature_mounts_mounts_each_path_as_a_home_sibling(monkeypatch):
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+def _make_wired_substrate(root):
+    """A substrate repo real enough to pass feature_substrate's own
+    availability check: shared/wire.sh present and executable."""
+    wire_sh = root / 'shared' / 'wire.sh'
+    wire_sh.parent.mkdir(parents=True, exist_ok=True)
+    wire_sh.write_text('#!/bin/sh\n')
+    wire_sh.chmod(0o755)
+
+
+def test_feature_mounts_mounts_each_path_as_a_home_sibling(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'discernment').mkdir()
+    other = tmp_path / 'fatsec' / 'some-process'
+    other.mkdir(parents=True)
     config = {
-        'mounts': ['~/discernment', '/Users/dfarrow/fatsec/some-process'],
+        'mounts': ['~/discernment', str(other)],
         '_container_home': '/home/dfarrow',
     }
     opts = feature_mounts(config)
-    assert '--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment' in opts
-    assert '--volume=/Users/dfarrow/fatsec/some-process:/home/dfarrow/some-process' in opts
+    assert '--volume={}/discernment:/home/dfarrow/discernment'.format(tmp_path) in opts
+    assert '--volume={}:/home/dfarrow/some-process'.format(other) in opts
 
 
-def test_feature_mounts_not_nested_under_the_workdir_mount(monkeypatch):
+def test_feature_mounts_not_nested_under_the_workdir_mount(tmp_path, monkeypatch):
     """The whole point: a sibling under $HOME, never a path inside another
     mount — that nesting is the class of bug sync_claude_shared_files exists
     to route around."""
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'discernment').mkdir()
     config = {'mounts': ['~/discernment'], '_container_home': '/home/dfarrow'}
     opts = feature_mounts(config)
-    assert opts == ['--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment']
+    assert opts == ['--volume={}/discernment:/home/dfarrow/discernment'.format(tmp_path)]
 
 
-def test_feature_mounts_is_not_fooled_by_a_trailing_slash(monkeypatch):
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+def test_feature_mounts_is_not_fooled_by_a_trailing_slash(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'discernment').mkdir()
     config = {'mounts': ['~/discernment/'], '_container_home': '/home/dfarrow'}
     opts = feature_mounts(config)
-    assert '--volume=/Users/dfarrow/discernment/:/home/dfarrow/discernment' in opts
+    assert '--volume={}/discernment/:/home/dfarrow/discernment'.format(tmp_path) in opts
 
 
 def test_feature_mounts_warns_if_none_defined(capsys):
@@ -135,94 +151,152 @@ def test_feature_mounts_warns_if_none_defined(capsys):
     assert 'no mounts defined' in capsys.readouterr().out
 
 
-def test_feature_mounts_supports_an_explicit_container_name(monkeypatch):
+def test_feature_mounts_refuses_a_missing_source(tmp_path, monkeypatch, capsys):
+    """Docker auto-creates a missing bind-mount source as an empty directory
+    rather than failing, so without this check a mount that's supposed to
+    come from elsewhere (another machine, a network share) but isn't
+    currently there would start the container fine with nothing behind it.
+    Found live, 2026-08-31, for feature_substrate's identical case."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    config = {'mounts': ['~/not-actually-there'], '_container_home': '/home/dfarrow'}
+
+    with pytest.raises(SystemExit):
+        feature_mounts(config)
+
+    assert 'is it mounted' in capsys.readouterr().out
+
+
+def test_feature_mounts_supports_an_explicit_container_name(tmp_path, monkeypatch):
     """host:container_name — the escape hatch for mounting a host directory
     under a name other than its own basename, e.g. the host's real ~/.claude
     mounted alongside (not instead of) an env's claude_tenant_state tree,
     which already owns ~/.claude itself."""
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / '.claude').mkdir()
     config = {'mounts': ['~/.claude:host-claude'], '_container_home': '/home/dfarrow'}
     opts = feature_mounts(config)
-    assert opts == ['--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude']
+    assert opts == ['--volume={}/.claude:/home/dfarrow/host-claude'.format(tmp_path)]
 
 
-def test_feature_mounts_explicit_name_does_not_affect_other_entries(monkeypatch):
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+def test_feature_mounts_explicit_name_does_not_affect_other_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / '.claude').mkdir()
+    (tmp_path / 'discernment').mkdir()
     config = {
         'mounts': ['~/.claude:host-claude', '~/discernment'],
         '_container_home': '/home/dfarrow',
     }
     opts = feature_mounts(config)
-    assert '--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude' in opts
-    assert '--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment' in opts
+    assert '--volume={}/.claude:/home/dfarrow/host-claude'.format(tmp_path) in opts
+    assert '--volume={}/discernment:/home/dfarrow/discernment'.format(tmp_path) in opts
 
 
-def test_feature_mounts_defaults_to_read_write(monkeypatch):
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+def test_feature_mounts_defaults_to_read_write(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'discernment').mkdir()
     config = {'mounts': ['~/discernment'], '_container_home': '/home/dfarrow'}
     opts = feature_mounts(config)
-    assert opts == ['--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment']
+    assert opts == ['--volume={}/discernment:/home/dfarrow/discernment'.format(tmp_path)]
     assert not opts[0].endswith(':ro')
 
 
-def test_feature_mounts_ro_with_default_container_name(monkeypatch):
+def test_feature_mounts_ro_with_default_container_name(tmp_path, monkeypatch):
     """Empty middle field (host::ro) keeps the default basename-derived name
     while still marking it read-only — the container name and the ro flag
     are two independent, positionally-separate fields."""
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'discernment').mkdir()
     config = {'mounts': ['~/discernment::ro'], '_container_home': '/home/dfarrow'}
     opts = feature_mounts(config)
-    assert opts == ['--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment:ro']
+    assert opts == ['--volume={}/discernment:/home/dfarrow/discernment:ro'.format(tmp_path)]
 
 
-def test_feature_mounts_ro_with_explicit_container_name(monkeypatch):
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+def test_feature_mounts_ro_with_explicit_container_name(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / '.claude').mkdir()
     config = {'mounts': ['~/.claude:host-claude:ro'], '_container_home': '/home/dfarrow'}
     opts = feature_mounts(config)
-    assert opts == ['--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude:ro']
+    assert opts == ['--volume={}/.claude:/home/dfarrow/host-claude:ro'.format(tmp_path)]
 
 
-def test_feature_mounts_ro_does_not_leak_into_other_entries(monkeypatch):
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+def test_feature_mounts_ro_does_not_leak_into_other_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / '.claude').mkdir()
+    (tmp_path / 'discernment').mkdir()
     config = {
         'mounts': ['~/.claude:host-claude:ro', '~/discernment'],
         '_container_home': '/home/dfarrow',
     }
     opts = feature_mounts(config)
-    assert '--volume=/Users/dfarrow/.claude:/home/dfarrow/host-claude:ro' in opts
-    assert '--volume=/Users/dfarrow/discernment:/home/dfarrow/discernment' in opts
+    assert '--volume={}/.claude:/home/dfarrow/host-claude:ro'.format(tmp_path) in opts
+    assert '--volume={}/discernment:/home/dfarrow/discernment'.format(tmp_path) in opts
     assert not any(o.endswith('discernment:ro') for o in opts)
 
 
-def test_feature_mounts_only_the_literal_ro_suffix_marks_read_only(monkeypatch):
+def test_feature_mounts_only_the_literal_ro_suffix_marks_read_only(tmp_path, monkeypatch):
     """A container name that happens to end up in the third field but isn't
     literally 'ro' must not be silently treated as read-only."""
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'discernment').mkdir()
     config = {'mounts': ['~/discernment:mydir:rw'], '_container_home': '/home/dfarrow'}
     opts = feature_mounts(config)
-    assert opts == ['--volume=/Users/dfarrow/discernment:/home/dfarrow/mydir']
+    assert opts == ['--volume={}/discernment:/home/dfarrow/mydir'.format(tmp_path)]
 
 
-def test_feature_substrate_mounts_and_sets_env_var(monkeypatch):
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+def test_feature_substrate_mounts_and_sets_env_var(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    _make_wired_substrate(tmp_path / 'virgil')
     config = {'substrate': '~/virgil', '_container_home': '/home/dfarrow'}
     opts = feature_substrate(config)
-    assert '--volume=/Users/dfarrow/virgil:/home/dfarrow/virgil' in opts
+    assert '--volume={}/virgil:/home/dfarrow/virgil'.format(tmp_path) in opts
     assert '-e' in opts
     assert 'SUBSTRATE_ROOT=/home/dfarrow/virgil' in opts
 
 
-def test_feature_substrate_is_not_fooled_by_a_trailing_slash(monkeypatch):
-    monkeypatch.setenv('HOME', '/Users/dfarrow')
+def test_feature_substrate_is_not_fooled_by_a_trailing_slash(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    _make_wired_substrate(tmp_path / 'virgil')
     config = {'substrate': '~/virgil/', '_container_home': '/home/dfarrow'}
     opts = feature_substrate(config)
-    assert '--volume=/Users/dfarrow/virgil/:/home/dfarrow/virgil' in opts
+    assert '--volume={}/virgil/:/home/dfarrow/virgil'.format(tmp_path) in opts
 
 
 def test_feature_substrate_warns_if_none_configured(capsys):
     opts = feature_substrate({})
     assert opts == []
     assert 'no substrate configured' in capsys.readouterr().out
+
+
+def test_feature_substrate_refuses_a_missing_mount(tmp_path, monkeypatch, capsys):
+    """The real-world case this was built for: a substrate mounted from
+    another machine (over a network share, a mount that isn't always up)
+    isn't currently there. Docker would otherwise auto-create an empty
+    directory and start the container fine with nothing behind it —
+    entrypoint.sh's own wire.sh-missing check only catches this *after*
+    boot. Found live, 2026-08-31."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    (tmp_path / 'virgil').mkdir()  # exists, but no shared/wire.sh inside
+    config = {'substrate': '~/virgil', '_container_home': '/home/dfarrow'}
+
+    with pytest.raises(SystemExit):
+        feature_substrate(config)
+
+    assert 'is the mount up' in capsys.readouterr().out.lower()
+
+
+def test_feature_substrate_refuses_a_non_executable_wire_sh(tmp_path, monkeypatch):
+    """Present but not executable is exactly as broken as absent — matches
+    entrypoint.sh's own `[ -x ... ]` check, not just `[ -e ... ]`."""
+    monkeypatch.setenv('HOME', str(tmp_path))
+    root = tmp_path / 'virgil'
+    wire_sh = root / 'shared' / 'wire.sh'
+    wire_sh.parent.mkdir(parents=True)
+    wire_sh.write_text('#!/bin/sh\n')
+    wire_sh.chmod(0o644)  # not executable
+    config = {'substrate': '~/virgil', '_container_home': '/home/dfarrow'}
+
+    with pytest.raises(SystemExit):
+        feature_substrate(config)
 
 
 # `ssh` is no longer a feature at all (removed 2026-08): forwarding turns on

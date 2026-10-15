@@ -769,6 +769,30 @@ logic itself was verified directly (not just read for correctness): `bash
 against both the real dead blob (exit 1, correctly triggers re-inject) and
 a valid blob (exit 0, correctly skips re-inject).
 
+**Fifth real bug found live, 2026-09-23 — the fetched half of the same
+check was never added.** The fourth fix above hardened
+`_dax_creds_file_has_valid_grant` (does the file *already on disk* have
+usable tokens), but the wrapper's separate injection path — what happens
+when that check says no and it fetches a replacement from Keychain — kept
+its original, weaker validation: a bash `case` matching only the literal
+substring `"claudeAiOauth"`. A dead, blanked-token blob (Claude Code's own
+shape for a failed refresh) contains that substring just as validly as a
+real one, so a dead *Keychain* copy would get written to disk as if it
+were fine, discovered only when Claude Code itself noticed mid-session and
+prompted to log in — no clear dax-level message the way every other dead-
+credential path in this file now gives. Found live asking a direct
+question after a real teardown ("will the next `dax run` need to log
+in?") that couldn't be answered with confidence from the code as it stood.
+Fixed by extracting `_is_oauth_envelope_file` (the shared body both checks
+now call) and validating the *fetched* content the same way before writing
+it — written to a temp file first, validated, only `mv`'d into place if it
+passes; a dead Keychain copy now prints the same clear "run `dax creds
+login`" message instead of being silently written. Verified two ways: the
+`is_oauth_envelope` check directly against both blob shapes, and the full
+shell branch logic run standalone against both cases, confirming the dead
+case never touches the real file and the valid case still writes exactly
+as before.
+
 ### C2. The per-env credential name is derived, not typed — built 2026-07-30
 
 Listing a bare provider name in an env's `creds:` asks dax to build the name:

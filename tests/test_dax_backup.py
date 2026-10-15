@@ -22,7 +22,7 @@ import argparse
 import yaml
 
 import dax
-from dax import _default_backup_dir, _run_backup, cmd_run
+from dax import _default_backup_dir, _run_backup, cmd_backup, cmd_run
 
 
 def test_default_backup_dir_is_inside_the_repo_checkout():
@@ -141,3 +141,97 @@ def test_cmd_run_calls_backup_check_quietly(tmp_path, monkeypatch):
     cmd_run(_args())
 
     assert calls == [False]
+
+
+def test_explain_prints_without_touching_dax_yaml_or_running_backup(tmp_path, monkeypatch, capsys):
+    """`--explain` must be safe to run with no ~/.dax.yaml at all (the exact
+    situation someone unsure what the command does might be in), and must
+    not call `_run_backup` — the whole point is answering "what would this
+    do" without doing it."""
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+
+    calls = []
+    monkeypatch.setattr(dax, '_run_backup', lambda *a, **k: calls.append(1))
+
+    cmd_backup(argparse.Namespace(explain=True))
+
+    assert calls == []
+    assert not (home / '.dax.yaml').exists()
+
+
+def test_explain_mentions_the_config_keys_and_gitignore_safety(tmp_path, monkeypatch, capsys):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+
+    cmd_backup(argparse.Namespace(explain=True))
+    out = capsys.readouterr().out
+    for term in ('dotfiles.ro', 'dotfiles.rw', 'backup:', 'backup_dir',
+                 '.gitignore', 'dax process archive'):
+        assert term in out
+
+
+def test_explain_leads_with_the_process_archive_disambiguation(tmp_path, monkeypatch, capsys):
+    """The two commands are easy to confuse by name alone — found live,
+    2026-10 — so the redirect to `dax process archive` must be the first
+    thing printed, not a footnote after the dotfile-copying detail."""
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+
+    cmd_backup(argparse.Namespace(explain=True))
+    out = capsys.readouterr().out
+    assert out.index('dax process archive') < out.index('Copies a fixed list')
+
+
+def test_explain_shows_the_real_configured_values(tmp_path, monkeypatch, capsys):
+    """The whole point of this flag is feeling safe running the real
+    command — showing the abstract shape of dotfiles.ro/rw/backup isn't
+    enough if you can't tell what *your* config actually has in it."""
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    with open(home / '.dax.yaml', 'w') as f:
+        yaml.dump({
+            'dotfiles': {'ro': ['~/.zshrc'], 'rw': ['~/.gitconfig']},
+            'backup': ['~/.claude/CLAUDE.md'],
+            'backup_dir': '~/backups/dax',
+        }, f)
+
+    cmd_backup(argparse.Namespace(explain=True))
+    out = capsys.readouterr().out
+    assert '~/.zshrc' in out
+    assert '~/.gitconfig' in out
+    assert '~/.claude/CLAUDE.md' in out
+    assert '~/backups/dax' in out
+
+
+def test_explain_notes_when_no_config_exists_rather_than_showing_blank_values(
+        tmp_path, monkeypatch, capsys):
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+
+    cmd_backup(argparse.Namespace(explain=True))
+    out = capsys.readouterr().out
+    assert 'No ~/.dax.yaml found' in out
+    assert '(none configured)' in out
+
+
+def test_explain_is_false_by_default_and_runs_the_real_backup(tmp_path, monkeypatch):
+    """Regression guard for the new flag: omitting --explain must behave
+    exactly as before."""
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    with open(home / '.dax.yaml', 'w') as f:
+        yaml.dump({'dotfiles': {'ro': [], 'rw': []}, 'backup': []}, f)
+
+    calls = []
+    monkeypatch.setattr(dax, '_run_backup', lambda config, verbose=True: calls.append(verbose))
+
+    cmd_backup(argparse.Namespace(explain=False))
+
+    assert calls == [True]

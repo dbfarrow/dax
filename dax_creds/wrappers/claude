@@ -56,21 +56,46 @@ _dax_creds_file="$_dax_cfg_dir/.credentials.json"
 # delegates the actual "is this usable" call to the same
 # `is_oauth_envelope` check the host-side login/import path already uses,
 # rather than re-deriving the rule in shell.
-_dax_creds_file_has_valid_grant() {
-    [ -s "$_dax_creds_file" ] || return 1
+_is_oauth_envelope_file() {
     python3 -c "
 import sys
 from dax_creds.providers.claude import is_oauth_envelope
 sys.exit(0 if is_oauth_envelope(open(sys.argv[1]).read()) else 1)
-" "$_dax_creds_file" 2>/dev/null
+" "$1" 2>/dev/null
+}
+
+_dax_creds_file_has_valid_grant() {
+    [ -s "$_dax_creds_file" ] || return 1
+    _is_oauth_envelope_file "$_dax_creds_file"
 }
 
 if [ -n "$DAX_CREDS_SOCK" ] && [ -n "$DAX_CREDS_CLAUDE" ] && ! _dax_creds_file_has_valid_grant; then
     if _creds=$(dax-creds get "$DAX_CREDS_CLAUDE"); then
         case "$_creds" in
             *'"claudeAiOauth"'*)
+                # The substring match above only confirms this *looks*
+                # envelope-shaped, same blind spot _dax_creds_file_has_valid_grant
+                # used to have before 2026-08-31: a dead, blanked-token blob
+                # (Claude Code's own shape for a failed refresh - real,
+                # non-empty, contains "claudeAiOauth", but accessToken/
+                # refreshToken are "") passes this check just fine. Found
+                # live, 2026-09-23: nothing else in this script ever
+                # verified the *fetched* content has usable tokens before
+                # writing it - only whatever was already on disk got that
+                # check. Write to a temp file first and validate it the
+                # same way, so a dead Keychain copy gets a clear message
+                # here instead of a silent write followed by Claude Code's
+                # own surprise mid-session login prompt.
                 mkdir -p "$_dax_cfg_dir"
-                ( umask 077; printf '%s' "$_creds" > "$_dax_creds_file" )
+                _dax_creds_tmp="$(mktemp)"
+                printf '%s' "$_creds" > "$_dax_creds_tmp"
+                if _is_oauth_envelope_file "$_dax_creds_tmp"; then
+                    ( umask 077; mv "$_dax_creds_tmp" "$_dax_creds_file" )
+                else
+                    rm -f "$_dax_creds_tmp"
+                    echo "dax: credential '$DAX_CREDS_CLAUDE' in Keychain has no usable tokens (a dead grant) — run on the host:" >&2
+                    echo "dax:   dax creds login $DAX_CREDS_CLAUDE" >&2
+                fi
                 ;;
             *)
                 echo "dax: credential '$DAX_CREDS_CLAUDE' is not a Claude credentials blob" >&2

@@ -118,6 +118,34 @@ def _get_username():
     return os.environ.get('USER') or os.environ.get('LOGNAME')
 
 
+def _host_timezone():
+    """The host's current IANA timezone name (e.g. 'America/New_York'), or
+    None if it can't be determined.
+
+    Read from `/etc/localtime` — the standard macOS/Linux convention is a
+    symlink to the real zoneinfo file, e.g.
+    `/etc/localtime -> /usr/share/zoneinfo/America/New_York`. Reading the
+    live symlink (not baking a zone into the image) is what makes this
+    reflect the host's *current* setting at every launch — it tracks
+    changes (travel, a manual timezone change) without needing a rebuild,
+    the same reasoning that keeps credentials and other host state out of
+    the image.
+
+    Deliberately best-effort: a host that doesn't use this convention (not
+    a symlink, path doesn't contain 'zoneinfo/') just means TZ isn't set in
+    the container — not a reason to block the launch over.
+    """
+    try:
+        target = os.readlink('/etc/localtime')
+    except OSError:
+        return None
+    marker = 'zoneinfo/'
+    idx = target.find(marker)
+    if idx == -1:
+        return None
+    return target[idx + len(marker):]
+
+
 def _container_home(config):
     return config.get('_container_home', '/home/{}'.format(_get_username()))
 
@@ -488,6 +516,17 @@ def feature_mounts(config):
         container_name, _sep, mode = rest.partition(':')
         ro = mode == 'ro'
         host = os.path.expanduser(host_path)
+        # Docker silently auto-creates a missing bind-mount source as an
+        # empty directory rather than failing, so a mount that's supposed
+        # to come from elsewhere (a network share, a mount from another
+        # machine, ...) but isn't currently there would otherwise start the
+        # container anyway with nothing behind it — discovered only later,
+        # from inside, if at all. Checked host-side, before Docker ever
+        # runs, so a missing mount refuses the launch instead.
+        if not os.path.isdir(host):
+            dax_print("[!] mount source not found: {} — is it mounted? Refusing to "
+                      "start without it.".format(host))
+            sys.exit(1)
         container = os.path.join(container_home, container_name or dir_basename(host))
         opts.append('--volume={}:{}{}'.format(host, container, ':ro' if ro else ''))
     return opts
@@ -513,6 +552,21 @@ def feature_substrate(config):
                   "(dax env set <name> substrate <path>)")
         return []
     host = os.path.expanduser(substrate)
+    # Same reasoning as feature_mounts' own check: Docker auto-creates a
+    # missing bind-mount source as an empty directory rather than failing,
+    # so a substrate mounted from another machine (over a network share, a
+    # mount that isn't always up, ...) would otherwise start the container
+    # fine with an empty $SUBSTRATE_ROOT — `entrypoint.sh`'s own
+    # `wire.sh`-missing check only catches this *after* the container has
+    # already booted. Checking for the exact same marker
+    # (`shared/wire.sh`, executable) host-side, before Docker ever runs,
+    # refuses the launch instead of starting into a broken substrate.
+    wire_sh = Path(host) / 'shared' / 'wire.sh'
+    if not (wire_sh.is_file() and os.access(str(wire_sh), os.X_OK)):
+        dax_print("[!] substrate not available at {} — shared/wire.sh is missing "
+                  "or not executable. Is the mount up? Refusing to start "
+                  "without it.".format(host))
+        sys.exit(1)
     container = os.path.join(_container_home(config), dir_basename(host))
     return [
         '--volume={}:{}'.format(host, container),
@@ -851,6 +905,17 @@ def cmd_run(args):
         '-h', '{}.fatsec.docker'.format(name),
         '-w', workdir,
     ]
+    # Unconditional, like workdir/dotfiles/webpreview — nobody wants their
+    # container showing a different timezone than their own by default.
+    # Read fresh at every launch, not baked into the image, so it tracks
+    # the host's actual current setting (travel, a manual change) without
+    # needing a rebuild. Falls back to `defaults.timezone` in ~/.dax.yaml
+    # (the existing fallback-value block `defaults.image` already uses)
+    # when the host's own setting can't be determined, rather than just
+    # silently leaving the container with none.
+    tz = _host_timezone() or config.get('defaults', {}).get('timezone')
+    if tz:
+        cmd += ['-e', 'TZ={}'.format(tz)]
 
     daemon_proc = None
     ssh_bridge_proc = None
@@ -990,6 +1055,7 @@ def cmd_run(args):
                 dax_print(f"[!] SSH agent bridge error: {e}")
                 ssh_bridge_proc = None
         non_ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') != 'ssh'}
+        missing = set()
         if non_ssh_creds:
             from dax_creds.init import ensure_project_credentials
             missing = ensure_project_credentials(dax_config, non_ssh_creds)
@@ -998,6 +1064,31 @@ def cmd_run(args):
                 answer = input(f'    Run `dax creds login {cred_name}` now? [Y/n] ').strip().lower()
                 if answer in ('', 'y', 'yes'):
                     cmd_creds_login(cred_name, dax_config)
+
+        # Proactive relogin for claude_tenant_state envs. A credential already
+        # in Keychain can still be a dead link in the refresh-token rotation
+        # chain — the env's last session died before a teardown ever synced a
+        # fresher token back — and there is no local signal on the blob
+        # (expiresAt is the short-lived access token; refreshTokenExpiresAt is
+        # documented as unreliable) that can tell a live grant from a dead one
+        # short of actually trying it. Rather than guess, just run the login
+        # flow before every launch — gated on `relogin_due`'s cooldown so
+        # restarting the same env several times in a day (picking up a `dax
+        # build`) doesn't pop a browser window on every single restart.
+        # `missing` credentials are skipped: the loop above either just
+        # logged them in or the user declined to, either way nothing further
+        # to do here.
+        if 'claude_tenant_state' in config['features']:
+            from dax_creds.config import relogin_due
+            for cred_name, cred_def in non_ssh_creds.items():
+                if cred_def.get('provider') != 'claude' or cred_name in missing:
+                    continue
+                if relogin_due(cred_name, dax_config):
+                    dax_print(f'[+] {cred_name}: stale — running the Claude '
+                              'login flow before launch')
+                    cmd_creds_login(cred_name, dax_config)
+                else:
+                    dax_print(f'[-] {cred_name}: logged in recently — skipping relogin')
     except (FileNotFoundError, KeyError):
         pass
 
@@ -1280,6 +1371,9 @@ def cmd_creds_login(cred_name, config):
 
     # Post-login: import token to Keychain
     _post_login_import(cred_name, cred_def, config, provider, before=before)
+
+    from dax_creds.config import record_login
+    record_login(cred_name)
 
 
 def _disk_token_for(cred_def, provider):
@@ -3150,12 +3244,106 @@ def _run_process_restore(config, args):
     _run_process_restore_interactive(config, available, args)
 
 
+def _process_archive_explain_text(config):
+    """`config` is None when ~/.dax.yaml doesn't exist — --explain must work
+    with zero setup, same contract as `dax backup --explain`."""
+    have_config = config is not None
+    config = config or {}
+    configured_backup_dir = config.get('backup_dir') or '(not set)'
+    resolved_backup_dir = _default_backup_dir(config)
+    registered = len(config.get('projects') or {})
+
+    config_note = (
+        '' if have_config else
+        "\nNo ~/.dax.yaml found right now — the values below are what an "
+        "empty config resolves to, not real settings, and there is nothing "
+        "registered to archive yet.\n")
+
+    return f"""\
+dax process archive
+{config_note}
+The BCP/DR backup mechanism: a point-in-time, dated snapshot of one or more
+registered dax envs ("processes") — their directory, Claude state tree, and
+registry metadata — not an ongoing dotfile mirror. In most cases this
+replaces GitHub as the real backup store for a process, since it captures
+the Claude session state and registry entry GitHub never would.
+    currently: {registered} env(s) registered in ~/.dax.yaml
+
+If you're looking to back up dotfiles/config instead (.zshrc, .gitconfig,
+CLAUDE.md, ...), you want `dax backup` instead — run `dax backup --explain`
+to see what that does.
+
+What one archive run captures per env, into
+backup_dir/daily/<name>-<date>.tar.gz:
+  - The env's own directory (dir: in ~/.dax.yaml), tarred whole.
+  - Its Claude state tree, if it has one (transcripts, auto-memory,
+    .credentials.json's *absence* is normal — see below).
+  - A manifest: name, dir, tenant, image, creds, features, mounts,
+    substrate, and whether a state tree existed — everything `restore`
+    needs to recreate the registry entry later, since the env itself is
+    deleted (if --remove) or may simply be gone by the time you restore.
+
+What it deliberately leaves out, by default:
+  - The live Claude OAuth credential. Writing a secret into a plain file on
+    disk is exactly what Keychain-backed credentials exist to avoid; pass
+    --include-credential to include it anyway if you specifically need a
+    fully self-contained snapshot (e.g. moving to a machine with no
+    Keychain access to re-derive it).
+
+Selecting targets:
+  - Name one or more envs on the command line, pass --all for every
+    registered env, or omit both for an interactive checkbox picker over
+    everything registered (nothing pre-checked).
+  - One target with a missing/moved directory is skipped, reported, and
+    does not abort the rest of the batch — this command's whole point is
+    "back up everything in one call," so one stale registry entry can't
+    take the others down with it.
+
+Archiving alone (no --remove) is always non-destructive: nothing is
+deleted, nothing is stopped, the registry is untouched. Run it as often as
+you like.
+
+--remove additionally tears each env down, but only after every archive in
+the batch has already succeeded, and only after one combined confirmation
+covering the whole batch: deletes the env's directory, its Claude state
+tree, any derived credential, and its ~/.dax.yaml entry. Refuses up front
+if any target's container is currently running (stop it first) — checked
+for every candidate before anything is torn down, so a bad target is
+caught before the rest of the batch is affected.
+
+--dry-run previews exactly what --remove alone would print — what gets
+archived, and what would then be removed — without writing or deleting
+anything.
+
+Where it writes: backup_dir/daily/, the same backup_dir: ~/.dax.yaml
+setting `dax backup` uses (defaults to backup/ inside this repo checkout,
+survives a container rebuild; point it at real off-site/BCP media if
+that's what you need).
+    backup_dir: currently {configured_backup_dir}
+    resolves right now to: {resolved_backup_dir}
+
+The recovery half is `dax process restore` — see
+docs/design/2026-08-22-process-archive-restore.md for the full design.
+"""
+
+
 def cmd_process(args):
     from dax_creds.config import load_dax_config
 
     try:
         config = load_dax_config()
     except FileNotFoundError:
+        config = None
+
+    if getattr(args, 'explain', False):
+        explain_fn = {
+            'archive': _process_archive_explain_text,
+        }.get(args.process_command)
+        if explain_fn:
+            print(explain_fn(config))
+            return
+
+    if config is None:
         dax_print('[!] no ~/.dax.yaml found — run `dax init` first')
         sys.exit(1)
 
@@ -3267,11 +3455,97 @@ def _run_backup(config, verbose=True, backup_dir=None):
     return updated, unchanged, skipped
 
 
+def _fmt_explain_list(paths):
+    return ', '.join(paths) if paths else '(none configured)'
+
+
+def _backup_explain_text(config):
+    """`config` is None when ~/.dax.yaml doesn't exist at all (--explain must
+    work with zero setup) — every value below falls back to what an empty
+    config would resolve to, with a note that it's hypothetical rather than
+    silently showing real-looking values for a file that isn't there."""
+    have_config = config is not None
+    config = config or {}
+    dotfiles = config.get('dotfiles') or {}
+    ro = _fmt_explain_list(dotfiles.get('ro') or [])
+    rw = _fmt_explain_list(dotfiles.get('rw') or [])
+    backup_list = _fmt_explain_list(config.get('backup') or [])
+    configured_backup_dir = config.get('backup_dir') or '(not set)'
+    resolved_backup_dir = _default_backup_dir(config)
+
+    config_note = (
+        '' if have_config else
+        "\nNo ~/.dax.yaml found right now — the values below are what an "
+        "empty config resolves to, not real settings.\n")
+
+    return f"""\
+dax backup
+{config_note}
+If you're looking to back up a working process (a registered dax env's own
+directory and state), you want `dax process archive` instead — run
+`dax process archive --explain` to see what that does. This command only
+copies dotfiles/config, described below.
+
+Copies a fixed list of host files into backup/ inside this repo checkout
+(or wherever `backup_dir:` in ~/.dax.yaml points, if you've set one) — a
+plain file copy, not an archive and not off-site storage on its own.
+
+What it copies, read fresh from ~/.dax.yaml each run:
+  - dotfiles.ro   (read-only mounts, e.g. .zshrc, .vimrc)
+      currently: {ro}
+  - dotfiles.rw   (read-write mounts, e.g. .gitconfig, .claude.json)
+      currently: {rw}
+  - backup:       (anything else listed there, e.g. CLAUDE.md, settings.json)
+      currently: {backup_list}
+
+How it decides what to touch:
+  - Byte-for-byte comparison against whatever's already in backup/. A file
+    that hasn't changed is left alone and reported "unchanged", not
+    re-copied.
+  - A changed or new file is copied in (shutil.copy2 — content, mtime, and
+    permissions all carried over).
+  - A configured path that doesn't exist on disk right now is skipped and
+    reported, never an error.
+  - Nothing is ever deleted — not the source file, not a stale copy already
+    sitting in backup/ for a path you've since removed from the config.
+
+Where it writes, and why that's safe:
+  - Defaults to backup/ inside this repo checkout. Deliberate: it's the one
+    location guaranteed to survive a container rebuild (it's this project's
+    own bind-mounted workdir), and backup/ is in .gitignore — so nothing
+    copied here, including dotfiles that may carry secrets, can ever be
+    `git add`ed or pushed, regardless of what lands in it.
+      resolves right now to: {resolved_backup_dir}
+  - A `backup_dir:` override in ~/.dax.yaml points this — and `dax process
+    archive`/`restore`, which share the same base directory — somewhere
+    else entirely: real off-site/BCP media. That trades away the
+    survives-a-rebuild guarantee on purpose. Your call, never assumed.
+      currently: {configured_backup_dir}
+
+It also runs automatically, quietly, on every `dax run` (unchanged files
+aren't reported then, a failure there is a warning and never blocks the
+container launch) — running `dax backup` by hand just does the same pass
+and shows every file's status, including the unchanged ones.
+
+Not the same thing as `dax process archive`/`restore`: this is an ongoing,
+incremental dotfile mirror; archive/restore is the deliberate, dated,
+point-in-time snapshot-and-restore mechanism for an entire process
+directory, meant to replace GitHub as the backup store for BCP/DR.
+"""
+
+
 def cmd_backup(args):
     try:
         with open(os.path.join(os.path.expanduser('~'), '.dax.yaml'), 'r') as f:
             config = yaml.safe_load(f) or {}
     except FileNotFoundError:
+        config = None
+
+    if getattr(args, 'explain', False):
+        print(_backup_explain_text(config))
+        return
+
+    if config is None:
         dax_print("[!] no ~/.dax.yaml found")
         sys.exit(1)
 
@@ -3296,7 +3570,10 @@ def main():
 
     subparsers.add_parser('init', help='Register current directory as a dax project')
     subparsers.add_parser('features', help='List available features')
-    subparsers.add_parser('backup', help='Back up dotfiles and config to backup/')
+    backup_p = subparsers.add_parser('backup', help='Back up dotfiles and config to backup/')
+    backup_p.add_argument('--explain', action='store_true',
+                          help='print what this command does and where it writes, then exit '
+                               '(reads nothing, copies nothing)')
 
     creds_p = subparsers.add_parser('creds', help='Manage credentials')
     creds_sub = creds_p.add_subparsers(dest='creds_command', required=True)
@@ -3433,6 +3710,9 @@ def main():
         '--dry-run', action='store_true',
         help='Print what would be archived (and removed, if --remove), then exit '
              'without writing anything')
+    process_archive_p.add_argument(
+        '--explain', action='store_true',
+        help='print what this command does, then exit (reads nothing, writes nothing)')
 
     process_restore_p = process_sub.add_parser(
         'restore',

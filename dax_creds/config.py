@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import yaml
 
@@ -56,6 +57,65 @@ def state_trees():
         for tenant_dir in sorted(root.iterdir()) if tenant_dir.is_dir()
         for project_dir in sorted(tenant_dir.iterdir()) if project_dir.is_dir()
     }
+
+
+DEFAULT_RELOGIN_COOLDOWN_HOURS = 24
+
+
+def login_state_root():
+    return Path.home() / '.local' / 'state' / 'dax' / 'creds-login'
+
+
+def login_state_path(cred_name):
+    return login_state_root() / '{}.json'.format(cred_name)
+
+
+def record_login(cred_name, when=None):
+    """Marks the login flow as having just run for `cred_name`.
+
+    Deliberately records "the flow ran", not "a fresh grant was minted" —
+    the browser round trip is itself the expensive part this exists to
+    avoid repeating, and `_post_login_import`'s own before/after guard
+    already refuses to import an unchanged token from an abandoned attempt.
+    A sibling of the credential itself, never inside anything a container
+    mounts — this is host-side bookkeeping only.
+    """
+    path = login_state_path(cred_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    when = when or datetime.now(timezone.utc)
+    path.write_text(json.dumps({'last_login_at': when.isoformat()}))
+
+
+def last_login_at(cred_name):
+    path = login_state_path(cred_name)
+    if not path.is_file():
+        return None
+    try:
+        return datetime.fromisoformat(json.loads(path.read_text())['last_login_at'])
+    except (json.JSONDecodeError, OSError, KeyError, ValueError):
+        return None
+
+
+def relogin_due(cred_name, config, now=None):
+    """Whether `dax run` should proactively run the login flow for
+    `cred_name` before launching, rather than trust whatever is already in
+    Keychain.
+
+    There is no reliable local signal for "is this refresh token still
+    good" — `expiresAt` is the short-lived access token and says nothing,
+    and `refreshTokenExpiresAt` was found not to correlate with actual mint
+    date (see the 2026-07-30 decision C notes), so it cannot be trusted
+    either. Rather than guess, just relogin — gated on a cooldown so
+    restarting the same env several times in a day (e.g. after `dax build`)
+    doesn't pop a browser window on every single restart.
+    """
+    last = last_login_at(cred_name)
+    if last is None:
+        return True
+    cooldown_hours = (config.get('defaults') or {}).get(
+        'relogin_cooldown_hours', DEFAULT_RELOGIN_COOLDOWN_HOURS)
+    now = now or datetime.now(timezone.utc)
+    return (now - last) > timedelta(hours=cooldown_hours)
 
 
 # User-level files a `claude_tenant_state` tree mount replaces wholesale, taking
