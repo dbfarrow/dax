@@ -73,7 +73,13 @@ def _q_select(prompt, choices):
 
 def _q_confirm(prompt, default=False):
     import questionary
-    result = questionary.confirm(prompt, default=default).ask()
+    # auto_enter defaults to True in questionary itself, which commits a
+    # y/n answer on the keypress alone — no Enter, no moment to reconsider.
+    # Every confirm in dax (credential overwrites, batch destroy/archive
+    # removals, this one) inherits that unless overridden here. Found live,
+    # 2026-10: felt "delicate" — a single stray or too-fast keypress
+    # advances a multi-step wizard with no recovery.
+    result = questionary.confirm(prompt, default=default, auto_enter=False).ask()
     if result is None:
         raise KeyboardInterrupt
     return result
