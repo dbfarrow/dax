@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y \
 	sudo \
 	tcpdump \
 	tmux \
+	tzdata \
 	unzip \
 	vim \
 	wget \
@@ -60,6 +61,21 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
 
 # install markdown renderer for dax-preview, and MS Office doc support
 RUN pip3 install --break-system-packages markdown pyyaml ruamel.yaml openpyxl python-docx python-pptx pandas pytest
+
+# install spaCy and its small English model — a separate layer from the pip
+# install above so changing that package list doesn't force re-downloading
+# the model, and vice versa.
+#
+# PIP_BREAK_SYSTEM_PACKAGES=1 (the env-var form, not just --break-system-
+# packages on the first command) because `spacy download` shells out to its
+# own internal `pip install` to fetch the model package — found live,
+# 2026-10-15: the explicit flag on the spacy install itself wasn't enough,
+# since that inner pip invocation never saw it and hit the same PEP 668
+# externally-managed-environment refusal. Exporting the env var instead
+# covers every pip call in this RUN, not just the one spelled out here.
+RUN export PIP_BREAK_SYSTEM_PACKAGES=1 \
+    && pip3 install spacy \
+    && python3 -m spacy download en_core_web_sm
 
 # install dax-preview web server
 RUN cat > /usr/local/bin/dax-preview << 'PYEOF'

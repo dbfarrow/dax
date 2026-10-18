@@ -324,7 +324,12 @@ the shared mount, which is the intended fallback.
    nothing, and holding a fourth live grant.
 6. **Step 7 of the cred test sequence**: relaunch `claude` in a migrated env and
    confirm `.credentials.json`'s mtime does not change. Cheap, and now meaningful.
-7. **Roll `discernment` over** once `dax` has a few days behind it.
+7. ~~Roll `discernment` over~~ — **resolved 2026-10-15, not needed.** `discernment`
+   the registered env isn't operated as a main dax session anymore — it's kept
+   registered purely as the mount source other substrate envs (`fabric`, etc.)
+   pull `wire.sh`/`process-types.tsv` from. No live Claude session there to
+   protect, so `claude_tenant_state` buys nothing; it can stay on the shared
+   `claude` mount indefinitely.
 8. **Step 5 of decision B — the E deletions.** Still the largest item, still pure
    deletion, and still reading as current code to anyone who looks.
 
@@ -732,6 +737,45 @@ the shared mount, which is the intended fallback.
   `~/.local/state/dax/tenants/*/*/.credentials.json` and flag grants that match no
   Keychain entry (or duplicate another tree's) is **not yet built**.
 
+  **Found live, 2026-10: a well-formed Keychain credential can still be a
+  dead link in the refresh-token rotation chain, with no local way to tell.**
+  `atticus`'s state-tree session died before any teardown ever synced a
+  fresher token back to Keychain. The next `dax run` launched clean —
+  `is_oauth_envelope` only checks shape, not whether Anthropic still accepts
+  the refresh token — and the container came up already logged out,
+  discovered only once Claude Code's own `/status` said so. Checked and
+  ruled out as a fix: `expiresAt` is the short-lived access token and says
+  nothing about the refresh token's health; `refreshTokenExpiresAt` was
+  already found (2026-07-30, above) not to correlate with actual mint date,
+  so it can't be trusted as a staleness signal either. There is no local
+  field worth building a heuristic on.
+
+  **Fix: `dax run` now reruns the login flow unconditionally before every
+  launch of a `claude_tenant_state` env**, rather than trusting whatever's
+  already in Keychain — gated by a cooldown (`relogin_due`,
+  `dax_creds/config.py`) so restarting the same env several times in a day
+  (e.g. picking up a `dax build`) doesn't pop a browser window on every
+  single restart. `record_login(cred_name)` writes a small sidecar timestamp
+  at `~/.local/state/dax/creds-login/<name>.json` — a sibling of the state
+  trees, never inside one, matching the shared-files-manifest convention
+  above — every time `cmd_creds_login` actually runs the flow, whether
+  triggered by this proactive check, the existing "not in Keychain, log in
+  now?" prompt, or a manual `dax creds login`. Default cooldown 24h,
+  overridable via `defaults.relogin_cooldown_hours` in `~/.dax.yaml`.
+  Deliberate design call, made explicitly with the user: given his actual
+  usage pattern (sessions run for weeks, restarts are rare, and every
+  restart this past week needed a fresh login anyway), the marginal cost of
+  "always relogin" is near zero and a local freshness heuristic would have
+  been false confidence regardless. The one real risk considered — Anthropic
+  capping concurrent OAuth grants per account, and a proactive relogin
+  policy repeated across many projects pushing other, unrelated, healthy
+  projects' credentials over that cap — was judged low for this usage
+  pattern specifically (low absolute launch frequency keeps total mint
+  volume low) but remains **untested**; worth an empirical check before this
+  policy is ever made more aggressive (e.g. dropping the cooldown). 16 new
+  tests (`test_dax_creds_login_state.py`, `test_dax_cmd_run_relogin.py`),
+  suite at **651**.
+
 - **Claude credentials are per tenant/project** — named
   `claude-<tenant>-<project>`, each minted by its **own fresh login**. That is
   load-bearing: independent OAuth grants have independent refresh-token chains,
@@ -805,6 +849,33 @@ the shared mount, which is the intended fallback.
   something to script automatically.
 
 ## Backlog
+
+- **Collapse `dax process` into `dax env` — "process" isn't a distinct
+  concept, it's an env with `substrate` in its `features`.** Raised
+  2026-08-31, during the discernment-processes migration (deregistering the
+  discernment monorepo env to register its sub-processes individually —
+  which is what surfaced the question in the first place: why do processes
+  and envs need to be different things at all). There is no `is_process`
+  flag anywhere in the data model; it's 100% derived from `substrate` being
+  in `features`. Checked against the actual implementations, not assumed:
+  `destroy`/`archive`/`restore`/`export`/`import` (all currently parented
+  under `dax process`) already don't branch on substrate anywhere —
+  `_run_process_destroy`'s own docstring says as much ("generalized past
+  substrate processes specifically... restricting this to substrate-tagged
+  ones would only get in the way of burning down other test cruft"). The
+  only command that's genuinely process-specific is `new` — it runs
+  `new-process.sh`, validates `--type` against the substrate's own
+  `process-types.tsv`, and wizards through prompts nothing else does.
+  Current namespacing is actively misleading, not just inelegant: parking
+  generic-env commands under `process` implies they're substrate-only, when
+  they work on any registered env (`dax`, `fabric`, anything) — a real
+  discoverability gap, found live when the user needed `archive`/`restore`
+  for ordinary non-substrate envs this same session and they were sitting
+  under a name that implied they wouldn't apply. Proposed fix, not yet
+  built: move `destroy`/`archive`/`restore`/`export`/`import` under
+  `dax env` (matching what they actually do), leave `dax process new` as
+  the one legitimately distinct command. Deferred — a real CLI restructure
+  (renamed subcommands, help text, doc/test churn), not a quick fix.
 
 - **~~Discernment process migration, stage 2: a helper script for the common
   process-init sequence~~ — superseded 2026-08-01 by `dax process new` and

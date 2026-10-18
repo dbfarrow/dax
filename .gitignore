@@ -11,3 +11,4 @@ Dockerfile
 *.crt
 docs/design/scripts/
 backup/
+.claude/settings.local.json

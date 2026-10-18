@@ -133,7 +133,7 @@ def test_dry_run_touches_nothing(home, capsys):
     _run_process_destroy(config, _args(['demo'], dry_run=True))
 
     out = capsys.readouterr().out
-    assert str(process_dir) in out
+    assert process_dir.name in out  # table shows ~/-relative paths, not the raw absolute one
     assert 'dry run' in out
     assert process_dir.exists()
     assert state_tree_path('acme', 'demo').exists()
