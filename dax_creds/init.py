@@ -7,7 +7,8 @@ from dax_creds.config import (
     BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
     credential_users, derived_credentials, env_field_help,
     last_login_at, relogin_due, resolve_credential_names, state_tree_path,
-    state_trees, sync_claude_shared_files,
+    state_trees, sync_claude_shared_files, unknown_env_keys,
+    describe_unknown_env_keys,
 )
 from dax_creds.providers.ssh import SshProvider
 
@@ -873,13 +874,12 @@ def run_env_show(config, name):
             suffix = '   [not created yet]'
         print(f'  state    {state}{suffix}')
 
-    # Surfaced because these are being removed, so an entry still carrying them
-    # is a migration to-do rather than configuration.
-    legacy = [k for k in ('multi_tenant', 'tenant_subdir') if k in proj]
-    if legacy:
+    # Anything outside ENV_FIELDS is a typo (ignored) or a retired
+    # multi-tenant key; say which, rather than let it look like configuration.
+    unknown = unknown_env_keys({'projects': {name: proj}}).get(name)
+    if unknown:
         print()
-        print(f'  note: entry still carries {", ".join(legacy)} — '
-              'deprecated by the 2026-07-29 redesign')
+        print(f'  note: {describe_unknown_env_keys(unknown)}')
     print()
 
 
@@ -952,7 +952,7 @@ def run_env_accept_shared_files(config, name):
     if not tenant:
         raise ValueError(
             f'{name!r} has no tenant declared, so it has no state tree — '
-            f'set one with `dax env set {name} tenant <name>`')
+            f'add `tenant: <name>` to its entry in ~/.dax.yaml')
 
     sync_claude_shared_files(tenant, name, force=True)
     print(f'  [{name}] CLAUDE.md/settings.json/settings.local.json now match the host.')
@@ -1055,8 +1055,9 @@ def run_creds_remove(config, name, keyring=None):
         referenced = sorted(credential_users(config, name))
         if referenced:
             raise ValueError(
-                f'{name} is still used by: {", ".join(referenced)}. Detach it first, '
-                f'e.g. `dax env set {referenced[0]} creds <remaining,names>`.')
+                f'{name} is still used by: {", ".join(referenced)}. Detach it first '
+                f'by removing it from `creds:` in ~/.dax.yaml '
+                f'(e.g. under {referenced[0]}).')
 
     kr = keyring or _keyring_module
     if kr is None:

@@ -266,8 +266,8 @@ def feature_claude_tenant_state(config):
         dax_print('    The state tree lives at '
                   '~/.local/state/dax/tenants/<tenant>/{}/, so there is nowhere'.format(
                       project_name))
-        dax_print('    to mount without one. Set it with:')
-        dax_print('      dax env set {} tenant <name>'.format(project_name))
+        dax_print('    to mount without one. Add one to this env\'s entry in ~/.dax.yaml:')
+        dax_print('      tenant: <name>')
         sys.exit(1)
 
     container_home = _container_home(config)
@@ -488,8 +488,8 @@ def feature_mounts(config):
     B2) — this sidesteps it rather than relying on directory nesting (which
     does work) staying that way.
 
-    Named `mounts` on the project entry, comma-split by `dax env set` the same
-    way `creds`/`features` are. Opt-in via `features: [mounts]`, same shape as
+    Named `mounts` on the project entry, a list the same way `creds`/`features`
+    are. Opt-in via `features: [mounts]`, same shape as
     `feature_ports`.
 
     Each entry is `<host_path>`, `<host_path>:<container_name>`, or
@@ -549,7 +549,7 @@ def feature_substrate(config):
     substrate = config.get('substrate')
     if not substrate:
         dax_print("[!] no substrate configured for this env "
-                  "(dax env set <name> substrate <path>)")
+                  "(add `substrate: <path>` to its entry in ~/.dax.yaml)")
         return []
     host = os.path.expanduser(substrate)
     # Same reasoning as feature_mounts' own check: Docker auto-creates a
@@ -923,10 +923,16 @@ def cmd_run(args):
     try:
         from dax_creds.config import (
             load_dax_config, find_named_project_by_dir, find_enclosing_project,
-            get_project_credentials,
+            get_project_credentials, unknown_env_keys, describe_unknown_env_keys,
         )
         from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
         dax_config = load_dax_config()
+        # Quiet unless something's wrong, like the backup check above — and
+        # across every registered env, not just this one, so a typo in an env
+        # nobody has launched lately still surfaces on the next launch of any.
+        for _env, _keys in unknown_env_keys(dax_config).items():
+            dax_print('[!] ~/.dax.yaml: env {!r} has {}'.format(
+                _env, describe_unknown_env_keys(_keys)))
         try:
             project_name, project = find_named_project_by_dir(dax_config, Path.cwd())
         except KeyError:
@@ -1577,7 +1583,7 @@ def _resolve_env_name(config, explicit):
 
 def cmd_env(args):
     from dax_creds.config import load_dax_config
-    from dax_creds.init import run_env_accept_shared_files, run_env_set, run_env_show
+    from dax_creds.init import run_env_accept_shared_files, run_env_show
 
     try:
         config = load_dax_config()
@@ -1585,15 +1591,17 @@ def cmd_env(args):
         dax_print('[!] no ~/.dax.yaml found — run `dax init` first')
         sys.exit(1)
 
-    name = _resolve_env_name(config, args.name)
+    # The env name is resolved per subcommand, never up front: `_resolve_env_name`
+    # exits when cwd isn't a registered env, which is right for single-env
+    # inspection but wrong for `destroy`, whose no-argument form is a picker
+    # over every env and is normally run from somewhere that isn't one.
     try:
         if args.env_command == 'show':
-            run_env_show(config, name)
-        elif args.env_command == 'set':
-            run_env_set(config, name, args.field, args.value,
-                        valid_features=_feature_names())
+            run_env_show(config, _resolve_env_name(config, args.name))
         elif args.env_command == 'accept-shared-files':
-            run_env_accept_shared_files(config, name)
+            run_env_accept_shared_files(config, _resolve_env_name(config, args.name))
+        elif args.env_command == 'destroy':
+            _run_env_destroy(config, args)
     except (KeyError, ValueError) as e:
         dax_print('[!] {}'.format(e.args[0] if e.args else e))
         sys.exit(1)
@@ -2417,7 +2425,7 @@ def _derived_creds_for(project, name):
 def _teardown_process(config, name, project):
     """Delete one registered process's directory, Claude state tree (plus
     its sibling shared-files manifest), and any per-env derived credential —
-    the shared core of `process destroy` and `process archive --remove`.
+    the shared core of `env destroy` and `process archive --remove`.
 
     Deliberately does not touch config['projects'] or call save_config: the
     caller owns the registry edit and when to save, since destroy saves
@@ -2475,13 +2483,13 @@ def _print_table(headers, rows):
 
 def _print_teardown_table(rows):
     """rows: [(name, directory_cell, state_tree_cell, credential_cell), ...].
-    Shared by `process destroy` and `process archive --remove`, which tear
+    Shared by `env destroy` and `process archive --remove`, which tear
     down the same four things."""
     _print_table(('name', 'directory', 'state tree', 'credential'), rows)
 
 
-def _run_process_destroy(config, args):
-    """Tear down one or more registered processes: directory, Claude state
+def _run_env_destroy(config, args):
+    """Tear down one or more registered envs: directory, Claude state
     tree (plus its sibling shared-files manifest), any per-env derived
     credential, and the ~/.dax.yaml entry itself.
 
@@ -2512,7 +2520,7 @@ def _run_process_destroy(config, args):
                 pname, project.get('dir', '?'),
                 ', tenant {}'.format(tenant) if tenant else ', no tenant')
             choices.append(questionary.Choice(label, value=pname))
-        names = _q_checkbox('Select processes to destroy (nothing pre-checked):', choices)
+        names = _q_checkbox('Select envs to destroy (nothing pre-checked):', choices)
         if not names:
             dax_print('[-]   nothing selected')
             return
@@ -2564,14 +2572,12 @@ def _run_process_destroy(config, args):
         rows.append((name, dir_cell, state_cell, cred_cell))
 
     _print_teardown_table(rows)
-    print('{} process(es) above will be permanently destroyed (including each one\'s '
+    print('{} env(s) above will be permanently destroyed (including each one\'s '
           '~/.dax.yaml entry). This cannot be undone.'.format(len(names)))
     print()
 
-    if args.dry_run:
-        dax_print('[-]   dry run — nothing destroyed')
-        return
-
+    # No --dry-run (decision 30): the table above is the preview, and anything
+    # but the typed literal below leaves everything untouched.
     typed = input('Type DESTROY to confirm: ')
     if typed != 'DESTROY':
         dax_print('[-]   aborted — nothing destroyed')
@@ -3349,8 +3355,6 @@ def cmd_process(args):
 
     if args.process_command == 'new':
         _run_process_new(config, args)
-    elif args.process_command == 'destroy':
-        _run_process_destroy(config, args)
     elif args.process_command == 'export':
         _run_process_export(config, args)
     elif args.process_command == 'import':
@@ -3592,22 +3596,21 @@ def main():
 
     # Singular `env` acts on one environment, plural `envs` lists them — the
     # same split the existing `tenant`/`tenants` pair uses.
-    from dax_creds.config import ENV_FIELDS, env_field_help
     env_p = subparsers.add_parser(
-        'env', help='Inspect or edit a single environment',
-        description='Operates on the env for the current directory when no name is given.')
+        'env', help='Inspect or remove environments',
+        description='Edit an env by hand-editing its entry in ~/.dax.yaml.')
     env_sub = env_p.add_subparsers(dest='env_command', required=True)
 
     env_show_p = env_sub.add_parser('show', help="Show one env's configuration")
     env_show_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
 
-    env_set_p = env_sub.add_parser(
-        'set', help='Set a single field on an env',
-        epilog=env_field_help(),
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    env_set_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
-    env_set_p.add_argument('field', choices=sorted(ENV_FIELDS), help='Field to set')
-    env_set_p.add_argument('value', help='New value')
+    env_destroy_p = env_sub.add_parser(
+        'destroy',
+        help='Permanently remove one or more envs: directory, state tree, '
+             'derived credential, and registry entry')
+    env_destroy_p.add_argument(
+        'name', nargs='*',
+        help='Env name(s) to destroy (omit for an interactive picker over every registered env)')
 
     env_accept_p = env_sub.add_parser(
         'accept-shared-files',
@@ -3649,18 +3652,6 @@ def main():
         '--dry-run', action='store_true',
         help='Resolve every field and print the full-path summary, then exit '
              'without creating or registering anything')
-
-    process_destroy_p = process_sub.add_parser(
-        'destroy',
-        help='Permanently remove one or more processes: directory, state tree, '
-             'derived credential, and registry entry')
-    process_destroy_p.add_argument(
-        'name', nargs='*',
-        help='Env name(s) to destroy (omit for an interactive picker over every registered env)')
-    process_destroy_p.add_argument(
-        '--dry-run', action='store_true',
-        help='Print the full-path summary of what would be destroyed, then exit '
-             'without changing anything')
 
     process_export_p = process_sub.add_parser(
         'export',

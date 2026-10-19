@@ -5,12 +5,12 @@ from pathlib import Path
 import yaml
 
 
-# Settable through `dax env set`. Deliberately not the full set of keys that
-# may appear on a registry entry: `multi_tenant`/`tenant_subdir` are slated for
-# deletion with the multi-tenant model (see the design doc's 2026-07-29
-# redesign) and are not worth teaching anyone to set. `features` is not here
-# either — it lives at the top level of ~/.dax.yaml or in a project-local
-# .dax.yaml, not on the registry entry.
+# Every key dax reads or writes on a project (env) entry in ~/.dax.yaml. Any
+# other key is unknown, almost always a typo, and `unknown_env_keys` below
+# reports it (from `dax env show` and, quietly, from every `dax run`). The
+# retired multi-tenant `multi_tenant`/`tenant_subdir` keys are deliberately
+# absent, so an entry still carrying them is flagged too. A new per-env field
+# must be added here, or it starts being flagged on its own legitimate use.
 #
 # Lives here rather than in init.py so building the argument parser, which
 # needs the field names, does not pull in init.py's keyring/provider imports on
@@ -20,7 +20,7 @@ ENV_FIELDS = {
     'dir': 'absolute path to the project directory on the host',
     'image': 'docker image to run for this env',
     'creds': 'comma-separated credential names (replaces the whole list)',
-    'features': 'comma-separated features for this env, on top of the global list',
+    'features': 'features for this env, on top of the always-on baseline',
     'mounts': 'comma-separated host paths, each mounted at $HOME/<name> in the '
               'container (needs "mounts" in features too). A path may be '
               '<host>:<container_name> to mount under a name other than its own '
@@ -208,6 +208,39 @@ def sync_claude_shared_files(tenant, project, force=False):
     return warnings
 
 
+# Retired multi-tenant keys: outside ENV_FIELDS so they're still flagged, but
+# described as retired rather than "ignored", because the multi-tenant code
+# that reads them survives until the env-lifecycle consolidation's step 8.
+RETIRED_ENV_KEYS = ('multi_tenant', 'tenant_subdir')
+
+
+def describe_unknown_env_keys(keys):
+    """One phrase for a list of unknown keys, telling retired ones apart from
+    plain unknowns (almost always typos), which dax genuinely ignores."""
+    retired = [k for k in keys if k in RETIRED_ENV_KEYS]
+    other = [k for k in keys if k not in RETIRED_ENV_KEYS]
+    parts = []
+    if other:
+        parts.append('unknown key(s) {} — ignored (typo?)'.format(', '.join(other)))
+    if retired:
+        parts.append('retired key(s) {} — remove them'.format(', '.join(retired)))
+    return '; '.join(parts)
+
+
+def unknown_env_keys(config):
+    """{env name: [unknown key, ...]} for every registered env whose entry
+    carries a key outside ENV_FIELDS, in registry order; envs with none are
+    omitted. Typos are the point: a misspelled key is otherwise silently
+    ignored, the same way a misspelled credential name (`claud-fre`) once sat
+    unused in ~/.dax.yaml for weeks."""
+    found = {}
+    for name, proj in (config.get('projects') or {}).items():
+        unknown = [k for k in (proj or {}) if k not in ENV_FIELDS]
+        if unknown:
+            found[name] = unknown
+    return found
+
+
 def env_field_help():
     width = max(len(f) for f in ENV_FIELDS)
     return 'fields:\n' + '\n'.join(
@@ -331,7 +364,7 @@ def resolve_credential_names(project, project_name):
             raise ValueError(
                 f"env '{project_name}' asks for a '{entry}' credential by convention, "
                 f"but has no tenant — the name is derived as {entry}-<tenant>-<project>. "
-                f"Set one with `dax env set {project_name} tenant <tenant>`.")
+                f"Add `tenant: <tenant>` to its entry in ~/.dax.yaml.")
         resolved.append((derived_credential_name(entry, tenant, project_name), entry))
     return resolved
 

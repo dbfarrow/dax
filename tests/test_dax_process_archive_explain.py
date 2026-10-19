@@ -95,7 +95,7 @@ def test_explain_is_archive_specific_other_process_commands_unaffected(tmp_path,
     monkeypatch.setenv('HOME', str(home))
 
     try:
-        cmd_process(argparse.Namespace(process_command='destroy'))
+        cmd_process(argparse.Namespace(process_command='export'))
         assert False, 'expected SystemExit for missing ~/.dax.yaml'
     except SystemExit as e:
         assert e.code == 1

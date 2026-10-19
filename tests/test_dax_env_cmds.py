@@ -1,14 +1,12 @@
-"""Tests for `dax env show` / `dax env set`.
-
-These exist so changing one field on a registered env doesn't require walking
-`dax init`'s full wizard (image -> credential checkbox -> new-credential loop)
-just to edit a single string.
+"""Tests for `dax env show`, plus `run_env_set`, the internal helper that
+outlived the `dax env set` command (removed in the env-lifecycle
+consolidation's step 1; the helper itself goes in step 4).
 """
 import pytest
 
 from dax_creds.config import (
     ENV_FIELDS, env_field_help, load_dax_config, state_tree_path,
-    sync_claude_shared_files,
+    sync_claude_shared_files, unknown_env_keys, describe_unknown_env_keys,
 )
 from dax_creds.init import run_env_accept_shared_files, run_env_set, run_env_show
 
@@ -122,12 +120,46 @@ def test_show_reports_tenant_and_state_path(home, capsys):
     assert 'not created yet' in out
 
 
-def test_show_flags_deprecated_multi_tenant_fields(home, capsys):
+def test_show_flags_retired_multi_tenant_fields_as_retired(home, capsys):
     run_env_show(load_dax_config(), 'legacy')
 
     out = capsys.readouterr().out
-    assert 'multi_tenant' in out and 'tenant_subdir' in out
-    assert 'deprecated' in out
+    assert 'retired key(s) multi_tenant, tenant_subdir' in out
+    assert 'ignored' not in out  # still read until the multi-tenant code goes
+
+
+def test_show_flags_a_typo_d_key(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['tennant'] = 'personal'
+
+    run_env_show(config, 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'unknown key(s) tennant — ignored (typo?)' in out
+
+
+def test_show_is_silent_about_keys_when_all_are_known(home, capsys):
+    run_env_show(load_dax_config(), 'fabric')
+
+    assert 'unknown key' not in capsys.readouterr().out
+
+
+def test_unknown_env_keys_reports_every_env_with_one():
+    config = {'projects': {
+        'clean': {'dir': '/x', 'image': 'i', 'creds': [], 'tenant': 't'},
+        'typo': {'dir': '/y', 'feautres': ['mounts']},
+        'legacy': {'dir': '/z', 'multi_tenant': True, 'tenant_subdir': 'p'},
+    }}
+
+    assert unknown_env_keys(config) == {
+        'typo': ['feautres'],
+        'legacy': ['multi_tenant', 'tenant_subdir'],
+    }
+
+
+def test_unknown_env_keys_handles_no_projects():
+    assert unknown_env_keys({}) == {}
+    assert unknown_env_keys({'projects': None}) == {}
 
 
 def test_show_unknown_env_raises(home):
@@ -376,3 +408,10 @@ def test_accept_shared_files_adopts_the_host_version_over_drift(home):
     run_env_accept_shared_files(load_dax_config(), 'fabric')
 
     assert tree_file.read_text() == 'v2'
+
+
+def test_describe_unknown_env_keys_separates_typos_from_retired_keys():
+    assert describe_unknown_env_keys(['tennant']) == 'unknown key(s) tennant — ignored (typo?)'
+    assert describe_unknown_env_keys(['multi_tenant']) == 'retired key(s) multi_tenant — remove them'
+    assert describe_unknown_env_keys(['tennant', 'tenant_subdir']) == (
+        'unknown key(s) tennant — ignored (typo?); retired key(s) tenant_subdir — remove them')

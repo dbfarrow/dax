@@ -88,7 +88,7 @@ def test_a_missing_tenant_refuses_rather_than_pooling(config, capsys):
 
     assert excinfo.value.code != 0
     out = capsys.readouterr().out
-    assert 'dax env set fabric tenant' in out
+    assert 'tenant: <name>' in out and '~/.dax.yaml' in out
 
 
 # --- the two host directories (decision B2) ---------------------------------

@@ -143,4 +143,5 @@ def test_an_env_without_a_tenant_is_refused_before_launch(tmp_path, monkeypatch,
         cmd_run(_args())
 
     assert excinfo.value.code != 0
-    assert 'dax env set fabric tenant' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert 'tenant: <name>' in out and '~/.dax.yaml' in out

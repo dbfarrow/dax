@@ -49,7 +49,7 @@ def test_bare_token_without_a_tenant_is_refused():
 
     message = excinfo.value.args[0]
     assert 'no tenant' in message
-    assert 'dax env set fabric tenant' in message
+    assert '`tenant: <tenant>`' in message and '~/.dax.yaml' in message
 
 
 def test_unregistered_derived_credential_is_synthesized():
