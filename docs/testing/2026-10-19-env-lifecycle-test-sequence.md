@@ -320,7 +320,6 @@ Use any confirm, e.g. `cd ~/test/dxt-a && dax env archive` → at "Proceed?":
 | Check | Pass |
 |---|---|
 | press `y` without Enter | nothing happens until Enter |
-| press Enter twice quickly at a prompt | the second Enter doesn't silently answer the *next* prompt |
 
 ---
 
@@ -378,10 +377,25 @@ dax envs ; dax tenant ; dax tenants
 
 ---
 
+## Step 8b — `dax config`
+
+```bash
+dax config                     # change nothing, quit the editor
+ls -l ~/.dax.yaml ~/.dax.yaml.prev
+dax config                     # add a line `  bogus: 1` under dxt-a, save, quit
+dax config                     # break the YAML (e.g. delete a colon), save, quit
+```
+
+| Check | Pass |
+|---|---|
+| first run | opens your editor on `~/.dax.yaml`; `~/.dax.yaml.prev` now exists and matches the file |
+| `bogus: 1` | after quitting: a warning naming `dxt-a` and `bogus`; then remove the line with `dax config` again |
+| broken YAML | after quitting: the parse error is printed and you're offered the editor again; fix it there. `~/.dax.yaml.prev` holds the last good version if needed |
+
 ## Step 6 — docs sweep (run last, after step 8)
 
-Step 6 is implemented last (execution order 1, 2, 3, 4, 5, 7, 8, 6), so
-its checks come here.
+Step 6 is implemented last (execution order 1, 2, 3, 4, 5, 7, 8, 8b, 6),
+so its checks come here.
 
 ```bash
 dax --help ; dax env --help ; dax backup --explain | head
@@ -389,7 +403,7 @@ dax --help ; dax env --help ; dax backup --explain | head
 
 | Check | Pass |
 |---|---|
-| top level | exactly `build run features backup creds env` |
+| top level | exactly `build run features backup creds env config` |
 | `backup --explain` | points at `dax env archive`, not `dax process archive` |
 | any error or hint message you saw during the sequence | none named a removed command (`dax env set`, `dax process`, `dax init`, `dax envs`, `dax tenant`) |
 | `README.md` | skim: no removed command names, and Claude described as always-on |
@@ -440,6 +454,10 @@ note at the top).
   account is still untested (see the relogin entry in `CLAUDE.md`). This
   sequence mints a handful; if a login fails with a limit-shaped error,
   that's a finding, not a regression.
+- **Type-ahead between prompts** (keys typed while dax is busy must not
+  answer the next prompt). Too fast to hit by hand; covered by unit tests
+  showing every prompt helper flushes stdin first and that the flush calls
+  `termios.tcflush`. Not proven on a real macOS terminal, by choice.
 - **The corrupt-archive path of decision 34**, and the "archive contained
   a credential" warning of decision 29 (it needs a hand-built old-style
   archive), are automated-suite only.

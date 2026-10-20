@@ -1,8 +1,8 @@
 # `dax env` lifecycle consolidation
 
-**Status:** Scoping complete, nothing implemented yet. 37 decisions:
+**Status:** Steps 1–5 built. 38 decisions:
 1–24 from 2026-10-18; 25–37 plus several in-place corrections from a
-pre-implementation risk review on 2026-10-19.
+pre-implementation risk review on 2026-10-19; 38 on 2026-10-20.
 
 **Branch:** `feature/env-lifecycle-consolidation` (off `master`, rebuilt
 2026-10-18 after PR #10 merged — see note on `auto_enter` below).
@@ -778,6 +778,31 @@ working.
     config, `dax run`, `dax env restore` and `dax creds list` each print it
     and exit non-zero, and nothing is written.
 
+38. **`dax config` opens `~/.dax.yaml` in an editor, keeps the previous
+    version, and checks the result.** Decided 2026-10-20 (user: the
+    filename is awkward to type). Since decision 14 dropped `dax env set`,
+    hand-editing this file is the only way to change an env, so the command
+    earns its place by what it does around the edit, not the typing alone:
+    - Opens `$VISUAL`, else `$EDITOR`, else `vi`, on `~/.dax.yaml`. A
+      missing file is decision 37's message, never created.
+    - Before opening, copies the current file to `~/.dax.yaml.prev`
+      (overwritten each time), so a bad edit is one `cp` from undone.
+    - After the editor exits, parses the file the way every other command
+      does (ruamel round-trip, so duplicate keys are caught). On a parse
+      error, prints it and offers to reopen the editor (default yes). A
+      broken file otherwise breaks every dax command until fixed.
+    - Then runs the same quiet checks `dax run` does: decision 20's
+      unknown-key warning and, once step 7 lands, decision 36's old Claude
+      entries. Reported, never auto-fixed.
+    - Known caveat: inside a container `~/.dax.yaml` is a single-file bind
+      mount, where an editor that saves by write-then-rename can detach the
+      file from the host. The command prints a one-line warning when run
+      inside a dax container; on the host it's a non-issue.
+
+    The seventh top-level command (decision 4's six plus this), still down
+    from eleven. Built as step 8b, after step 8 and before step 6's docs
+    sweep, so the sweep documents it.
+
 ## The full env lifecycle, end to end
 
 Every stage, naming the exact command and the decision behind its shape.
@@ -823,8 +848,9 @@ Every stage, naming the exact command and the decision behind its shape.
    mount mismatches, the resolved derived credential name, whether the
    container's running right now, state tree size and age.
 
-4. **Edit.** Hand-edit `~/.dax.yaml` directly. No `dax env set` (decision
-   14) — this is already the real workflow, not a gap being left open.
+4. **Edit.** `dax config` (decision 38): `~/.dax.yaml` in your editor,
+   the previous version kept as `~/.dax.yaml.prev`, and the result
+   checked. No `dax env set` (decision 14).
 
 5. **Back up.** `dax env archive` (decision 3). Pick env(s) → "save to dax's
    managed backup location, or to a specific file?" → managed keeps today's
@@ -857,7 +883,7 @@ so `envs`/`process`/`tenant`/`tenants` are gone too, not just the things
 decided earlier.
 
 ```
-usage: dax [-t] {build,run,features,backup,creds,env} ...
+usage: dax [-t] {build,run,features,backup,creds,env,config} ...
 
   build                 Build the dax Docker image
   run                   Launch a dax container (bootstraps an unregistered
@@ -865,6 +891,7 @@ usage: dax [-t] {build,run,features,backup,creds,env} ...
                          else in an env's lifecycle)
   features              List available features
   backup                Back up dotfiles and config to backup/
+  config                Edit ~/.dax.yaml in $EDITOR, then check it
   creds                 Manage credentials
     add                   Add or update a credential in the global store
     list                  List registered credentials
@@ -885,8 +912,9 @@ usage: dax [-t] {build,run,features,backup,creds,env} ...
 Gone entirely: `dax init`, `dax process` (including `new` — folded into
 `dax run`'s bootstrap, decision 4), `dax envs` (folded into `dax env list`,
 decision 18), `dax env set`, `dax env accept-shared-files`, `dax tenant`,
-`dax tenants` (decision 19). No aliases for any of it (decision 16). Six
-top-level commands survive, down from eleven today.
+`dax tenants` (decision 19). No aliases for any of it (decision 16). Seven
+top-level commands (six survivors plus `dax config`, decision 38), down
+from eleven.
 
 ## Implementation plan
 
@@ -912,7 +940,7 @@ top-level commands survive, down from eleven today.
 - **Update `CLAUDE.md`'s progress note after every step**, commit or not.
   It's eight steps of uncommitted work, and a context compaction or outage
   mid-build shouldn't lose where things stand.
-- **Execution order is 1, 2, 3, 4, 5, 7, 8, 6.** Step 7 needs steps 3
+- **Execution order is 1, 2, 3, 4, 5, 7, 8, 8b, 6.** Step 7 needs steps 3
   and 4 in place, and step 6's doc sweep and grep gate can only pass once
   steps 7 and 8 have removed the old names. The step numbers are kept as
   labels.
@@ -1129,6 +1157,19 @@ single-target, cwd-based per decision 3).**
   check (the `cwd` guardrails per decision 8, name and state-tree collisions
   per decision 25, restore's empty-`cwd` check per decision 26) exits
   cleanly instead.
+
+**Step 8b — `dax config` (decision 38).**
+- New top-level `config` command in `dax.py`: copy to `~/.dax.yaml.prev`,
+  run the editor (`$VISUAL`/`$EDITOR`/`vi`, split with `shlex` so
+  `EDITOR="code -w"` works), parse via `load_dax_config`, offer to reopen on
+  a parse error, then print the unknown-key and old-Claude-entry warnings.
+  A missing file is decision 37's message. Warn once when run inside a dax
+  container (single-file bind mount).
+- Tests: the editor command is built from `$VISUAL`, then `$EDITOR`, then
+  `vi`; `.prev` matches the pre-edit file; a parse error re-offers the
+  editor and a decline exits non-zero; unknown keys are reported; a missing
+  config is never created. The editor is replaced by a script that edits
+  the file.
 
 **Step 6 — doc/example sweep (covers both halves of this doc).** **Run it
 last, after steps 7 and 8**, even though it keeps its number: until then

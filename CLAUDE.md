@@ -337,8 +337,8 @@ the shared mount, which is the intended fallback.
 
 - **`dax env` lifecycle consolidation** — full design in
   `docs/design/2026-10-18-env-bootstrap-consolidation.md`, branch
-  `feature/env-lifecycle-consolidation` (off `master`, nothing implemented
-  yet — scoping is complete, 37 decisions locked in, ready to build).
+  `feature/env-lifecycle-consolidation` (off `master`; steps 1–5 built,
+  38 decisions; see "Build progress" below).
   Decisions 25–37 came from a 2026-10-19 pre-implementation risk review:
   env-name collisions are fatal; restore only targets an empty,
   unregistered cwd and never overwrites anything (rollback = destroy, then
@@ -442,7 +442,22 @@ the shared mount, which is the intended fallback.
         wizard writes only that); step 8 drops the legacy `.dax-tenant` half.
       - A failed or interrupted `new-process.sh` lists the files it left and
         says to remove them before retrying (never auto-deleted).
-    - Awaiting the runbook's step 4 manual checks before step 5.
+    - Manual checks passed; committed as `f70ea2c`.
+  - **Step 5 built 2026-10-20, suite 716 (from 709):**
+    - `_q_confirm` passes `auto_enter=False` (decision 9, reapplied after
+      the earlier revert), after `_flush_stdin()`: the flush discards keys
+      typed before the prompt, and auto_enter=False stops one typed at it
+      from committing on its own.
+    - The bootstrap wizard opens by saying the env will be named after its
+      folder.
+    - Archive's summary is now a `_print_table`, like restore's and
+      bootstrap's.
+    - Awaiting the runbook's step 5 manual checks before step 7. (The
+      double-Enter check was dropped from the runbook as not hand-testable;
+      unit tests cover it.)
+  - **Decision 38 added 2026-10-20:** `dax config` (editor on
+    `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
+    saving), built as step 8b, before step 6's docs sweep.
   **Read that doc before touching `dax process`/`dax init`/`dax env`/
   `dax tenant`/`dax tenants` — large parts of all five are being deleted,
   not extended.**
