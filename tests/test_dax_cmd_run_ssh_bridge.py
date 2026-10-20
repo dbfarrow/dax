@@ -74,7 +74,7 @@ def _setup(tmp_path, monkeypatch, creds=None, credentials=None, features=None):
     repo = home / 'myenv'
     repo.mkdir(exist_ok=True)
 
-    project = {'dir': str(repo), 'creds': creds or []}
+    project = {'dir': str(repo), 'creds': creds or [], 'tenant': 'personal'}
     if features is not None:
         project['features'] = features
     with open(home / '.dax.yaml', 'w') as f:
@@ -126,7 +126,8 @@ def test_no_bridge_when_no_ssh_credential_configured(tmp_path, monkeypatch, caps
     cmd_run(_args())
 
     out = capsys.readouterr().out
-    assert '--add-host' not in out
+    # --add-host itself can still appear: the credential daemon for the
+    # env's implied Claude credential adds it too (decision 35).
     assert 'DAX_SSH_AGENT_TCP_PORT' not in out
 
 

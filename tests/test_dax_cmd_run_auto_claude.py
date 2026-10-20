@@ -22,7 +22,7 @@ def _setup(tmp_path, monkeypatch, features=None):
     repo = home / 'myproj'
     repo.mkdir()
 
-    project = {'dir': str(repo), 'creds': []}
+    project = {'dir': str(repo), 'creds': [], 'tenant': 'personal'}
     if features is not None:
         project['features'] = features
     with open(home / '.dax.yaml', 'w') as f:

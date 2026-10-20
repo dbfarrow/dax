@@ -1,4 +1,3 @@
-import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -126,86 +125,73 @@ def relogin_due(cred_name, config, now=None):
 CLAUDE_SHARED_FILES = ('CLAUDE.md', 'settings.json', 'settings.local.json')
 
 
-def _shared_files_manifest_path(tenant, project):
-    # A sibling of the tree, not inside it — anything under state_tree_path()
-    # is mounted straight into the container's ~/.claude, and this bookkeeping
-    # has no business showing up there.
+def shared_files_manifest_path(tenant, project):
+    """Where the retired drift-tracking sync kept its per-env manifest: a
+    sibling of the state tree. Nothing writes it any more; teardown still
+    deletes a leftover one, since real envs have them on disk."""
     return state_root() / tenant / '{}.shared-files.json'.format(project)
 
 
-def _load_shared_files_manifest(tenant, project):
-    path = _shared_files_manifest_path(tenant, project)
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
+def sync_claude_shared_files(tenant, project):
+    """Seed the host's CLAUDE_SHARED_FILES into <tenant>/<project>'s state
+    tree, once: each file is copied only if the tree doesn't have it yet, and
+    never touched again (decision 13). A tree's copy is its own state from
+    then on, like everything else in the tree.
 
-
-def _save_shared_files_manifest(tenant, project, manifest):
-    path = _shared_files_manifest_path(tenant, project)
-    path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
-
-
-def _sha256_bytes(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def sync_claude_shared_files(tenant, project, force=False):
-    """Copy the host's CLAUDE_SHARED_FILES into <tenant>/<project>'s state tree.
-
-    Three-way comparison against a small manifest (filename -> sha256 of what
-    was last synced in), because a plain host-vs-tree diff can't tell "host
-    moved on since last sync" (safe to overwrite) apart from "something changed
-    the tree's copy independently" (a container editing it directly, now that
-    it's a plain file and not a mount — exactly what should not be clobbered
-    silently). force=True (the `accept-shared-files` escape hatch) skips that
-    distinction and always takes the host's version.
-
-    Returns the list of filenames left alone because they'd drifted and
-    force was False — the caller's cue to warn.
+    Replaced a three-way drift check (host vs tree vs a last-synced
+    manifest) whose only trigger, a session under the retired shared
+    `claude` mount writing the real host file, no longer exists. Known gap,
+    deferred on purpose: a later edit to the host's global CLAUDE.md doesn't
+    reach an already-seeded tree (see decision 13's note).
     """
     host_claude = Path.home() / '.claude'
     tree = state_tree_path(tenant, project)
-    manifest = _load_shared_files_manifest(tenant, project)
-    warnings = []
-    changed = False
-
     for filename in CLAUDE_SHARED_FILES:
         host_file = host_claude / filename
-        if not host_file.is_file():
-            continue
-        host_bytes = host_file.read_bytes()
-        host_hash = _sha256_bytes(host_bytes)
         tree_file = tree / filename
-
-        if not tree_file.is_file():
+        # An empty file counts as missing: a 0-byte copy is never a real
+        # one (a failed nested-mount experiment left exactly that in a real
+        # tree), and with no drift tracking left, re-seeding it is the only
+        # repair. To refresh any other copy, delete it; the next launch
+        # re-seeds it.
+        if host_file.is_file() and (not tree_file.exists() or tree_file.stat().st_size == 0):
             tree.mkdir(parents=True, exist_ok=True)
-            tree_file.write_bytes(host_bytes)
-            manifest[filename] = host_hash
-            changed = True
-            continue
+            tree_file.write_bytes(host_file.read_bytes())
 
-        tree_bytes = tree_file.read_bytes()
-        tree_hash = _sha256_bytes(tree_bytes)
-        if tree_hash == host_hash:
-            if manifest.get(filename) != tree_hash:
-                manifest[filename] = tree_hash
-                changed = True
-            continue
 
-        if force or manifest.get(filename) == tree_hash:
-            tree_file.write_bytes(host_bytes)
-            manifest[filename] = host_hash
-            changed = True
-        else:
-            warnings.append(filename)
+# Per-env entries made redundant by Claude becoming a baseline feature with
+# an implied credential (decisions 35, 36): filtered out wherever an env's
+# `features:`/`creds:` are read, and reported until hand-removed.
+LEGACY_CLAUDE_FEATURES = ('claude', 'claude_tenant_state')
 
-    if changed:
-        _save_shared_files_manifest(tenant, project, manifest)
 
-    return warnings
+def is_claude_credential(config, cred_name):
+    """A bare `claude`, a name registered with provider claude, or an
+    unregistered `claude-...` name (e.g. from an archive made on another
+    machine, where it was registered). Registered names go by their
+    provider, never by spelling."""
+    if cred_name == 'claude':
+        return True
+    credentials = (config or {}).get('credentials') or {}
+    if cred_name in credentials:
+        return (credentials[cred_name] or {}).get('provider') == 'claude'
+    return cred_name.startswith('claude-')
+
+
+def legacy_claude_entries(config):
+    """{env name: ['<entry> (features)' / '<entry> (creds)', ...]} for every
+    env still listing a Claude feature or credential, which Claude being
+    automatic has made redundant. Envs with none are omitted."""
+    found = {}
+    for name, proj in (config.get('projects') or {}).items():
+        proj = proj or {}
+        entries = ['{} (features)'.format(f) for f in (proj.get('features') or [])
+                   if f in LEGACY_CLAUDE_FEATURES]
+        entries += ['{} (creds)'.format(c) for c in (proj.get('creds') or [])
+                    if is_claude_credential(config, c)]
+        if entries:
+            found[name] = entries
+    return found
 
 
 # Retired multi-tenant keys: outside ENV_FIELDS so they're still flagged, but
@@ -356,28 +342,32 @@ def derived_credential_name(provider, tenant, project):
     return f'{provider}-{tenant}-{project}'
 
 
-def resolve_credential_names(project, project_name):
-    """[(name, derived_provider)] for each entry in an env's `creds:` list.
+def resolve_credential_names(project, project_name, config=None):
+    """[(name, derived_provider)] for an env's credentials: always its
+    implied Claude credential, `claude-<tenant>-<env>` (decision 35), then
+    each non-Claude entry in its `creds:` list.
 
     `derived_provider` is the provider string when dax built the name, None
     when the user named the credential explicitly.
 
-    An explicitly named credential always wins over the convention, which keeps
-    existing configs working and leaves an escape hatch for deliberately
-    sharing one credential across two envs.
+    Claude entries in `creds:` (a bare `claude`, or an explicitly named
+    Claude credential) are redundant now and skipped (decision 36); `config`
+    is what identifies an explicit name as a Claude one. An env with no
+    tenant raises ValueError: there's no name to derive and no state tree to
+    mount, and pooling into a shared default is the isolation failure the
+    per-env naming exists to prevent.
     """
-    resolved = []
+    tenant = project.get('tenant')
+    if not tenant:
+        raise ValueError(
+            f"env '{project_name}' has no tenant. Every env needs one: its Claude "
+            f"credential is named claude-<tenant>-{project_name} and its Claude state "
+            f"lives under ~/.local/state/dax/tenants/<tenant>/. "
+            f"Add `tenant: <tenant>` to its entry in ~/.dax.yaml.")
+    resolved = [(derived_credential_name('claude', tenant, project_name), 'claude')]
     for entry in project.get('creds', []) or []:
-        if entry not in BARE_PROVIDER_CREDS:
+        if not is_claude_credential(config, entry):
             resolved.append((entry, None))
-            continue
-        tenant = project.get('tenant')
-        if not tenant:
-            raise ValueError(
-                f"env '{project_name}' asks for a '{entry}' credential by convention, "
-                f"but has no tenant — the name is derived as {entry}-<tenant>-<project>. "
-                f"Add `tenant: <tenant>` to its entry in ~/.dax.yaml.")
-        resolved.append((derived_credential_name(entry, tenant, project_name), entry))
     return resolved
 
 
@@ -412,7 +402,7 @@ def derived_credentials(config):
     found = {}
     for project_name, project in (config.get('projects') or {}).items():
         try:
-            resolved = resolve_credential_names(project, project_name)
+            resolved = resolve_credential_names(project, project_name, config)
         except ValueError:
             continue  # unresolvable; reported by `dax env show` and `dax run`
         for name, provider in resolved:
@@ -440,9 +430,13 @@ def credential_users(config, name):
     users = []
     for project_name, project in (config.get('projects') or {}).items():
         try:
-            resolved = resolve_credential_names(project, project_name)
+            resolved = resolve_credential_names(project, project_name, config)
         except ValueError:
-            continue
+            # No tenant, so no implied name, but the explicit non-Claude
+            # names it lists are still in use: without this, `dax creds
+            # remove` would delete a credential a tenantless env still names.
+            resolved = [(c, None) for c in (project.get('creds') or [])
+                        if not is_claude_credential(config, c)]
         if any(resolved_name == name for resolved_name, _ in resolved):
             users.append(project_name)
     return users
@@ -459,7 +453,7 @@ def get_project_credentials(config, project, project_name=None):
         return {name: registry[name] for name in project.get('creds', []) or []}
 
     creds = {}
-    for name, provider in resolve_credential_names(project, project_name):
+    for name, provider in resolve_credential_names(project, project_name, config):
         if name in registry:
             creds[name] = registry[name]
         elif provider:

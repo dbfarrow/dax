@@ -204,7 +204,7 @@ def test_remove_tears_down_only_after_confirmation(home, tmp_path, monkeypatch):
 
     removed = []
     monkeypatch.setattr('dax_creds.init.run_creds_remove',
-                        lambda cfg, cred_name: removed.append(cred_name))
+                        lambda cfg, cred_name, **k: removed.append(cred_name))
     monkeypatch.setattr('dax_creds.init._q_confirm', lambda *a, **k: True)
 
     _archive_envs(config, ['demo'], remove=True)

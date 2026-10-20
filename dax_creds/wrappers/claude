@@ -15,7 +15,7 @@
 #
 # Consequence worth keeping in mind: a refusal can no longer happen here, because
 # there is nothing left to resolve. `dax run` refuses instead, before the
-# container starts, when an env opting into claude_tenant_state has no tenant.
+# container starts, when an env has no tenant (Claude is baseline for every env).
 
 # Claude Code reads its state from CLAUDE_CONFIG_DIR when that is set and from
 # ~/.claude otherwise. The two layouts disagree about .claude.json: it lives

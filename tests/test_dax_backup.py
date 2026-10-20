@@ -131,7 +131,7 @@ def test_cmd_run_calls_backup_check_quietly(tmp_path, monkeypatch):
     repo = home / 'myproj'
     repo.mkdir()
     with open(home / '.dax.yaml', 'w') as f:
-        yaml.dump({'image': 'test/dax:latest', 'projects': {'myproj': {'dir': str(repo), 'creds': []}}}, f)
+        yaml.dump({'image': 'test/dax:latest', 'projects': {'myproj': {'dir': str(repo), 'creds': [], 'tenant': 'personal'}}}, f)
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.chdir(repo)
 

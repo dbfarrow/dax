@@ -123,8 +123,10 @@ def test_coding_project_registers_the_folder(home, monkeypatch):
     assert saved['dir'] == str(env_dir)
     assert saved['image'] == 'dax-base'
     assert saved['tenant'] == 'acme'
-    assert list(saved['creds']) == ['claude']
-    assert list(saved['features']) == ['claude_tenant_state']
+    # Claude is baseline with an implied credential (decision 35): neither
+    # appears on the entry.
+    assert list(saved['creds']) == []
+    assert 'features' not in saved
     assert entry['dir'] == str(env_dir)
 
 
@@ -158,7 +160,7 @@ def test_only_existing_non_claude_credentials_are_offered(home, monkeypatch):
     _bootstrap_env(load_dax_config(), env_dir)
 
     assert script.offered['credentials'] == ['github-me', 'ssh-me']
-    assert list(load_dax_config()['projects']['demo']['creds']) == ['github-me', 'claude']
+    assert list(load_dax_config()['projects']['demo']['creds']) == ['github-me']
 
 
 def test_no_credentials_means_no_checkbox(home, monkeypatch):
@@ -207,7 +209,7 @@ def test_process_runs_new_process_sh_after_confirm_and_registers(home, substrate
                                     '--type', 'ops', '--no-git']
     saved = load_dax_config()['projects']['proc']
     assert saved['substrate'] == str(substrate.resolve())
-    assert list(saved['features']) == ['substrate', 'claude_tenant_state']
+    assert list(saved['features']) == ['substrate']
     assert script.offered['Process type:'] == [('commitment', 'discernment'), ('ops', 'ops')]
 
 

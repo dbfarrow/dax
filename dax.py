@@ -13,6 +13,7 @@ import socket as _socket
 import subprocess
 import tarfile
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 import yaml
 
@@ -56,14 +57,15 @@ def _get_ca_cert_path():
 
 
 # Every env wants these, unconditionally — mounting the project itself,
-# dotfiles, and the webpreview server are not optional per-project choices.
+# dotfiles, the webpreview server, and Claude (its per-env state tree and
+# implied credential, decision 35) are not optional per-project choices.
 # Baked in here rather than sourced from ~/.dax.yaml's top-level `features:`
 # key (removed 2026-08) because that list was the actual cause of the
 # additive-only, no-opt-out problem: an env could never decline something
 # every other env also got by default. Per-env `features:` (on the project
 # entry, a cwd-local .dax.yaml, or `-f`) remain purely opt-in, which is fine —
 # nobody was ever trying to opt *out* of those.
-_ALWAYS_ON_FEATURES = ('workdir', 'dotfiles', 'webpreview')
+_ALWAYS_ON_FEATURES = ('workdir', 'dotfiles', 'webpreview', 'claude')
 
 
 def load_config():
@@ -106,11 +108,42 @@ def load_config():
 
     local_features = local.pop('features', [])
     defaults.update(local)
-    defaults['features'] = list(_ALWAYS_ON_FEATURES) + local_features
+    defaults['features'] = _merge_features(list(_ALWAYS_ON_FEATURES), local_features)
 
     return defaults
 
 
+
+
+def _merge_features(base, extra):
+    """`base` plus each feature in `extra` not already present, in order.
+
+    Every per-env feature source (an env's own `features:`, a cwd-local
+    .dax.yaml, `-f`) goes through here, so a feature listed twice is applied
+    once (a duplicate mount would fail the launch), and the retired names
+    `claude`/`claude_tenant_state` are dropped: Claude is baseline
+    (decisions 35, 36).
+    """
+    from dax_creds.config import LEGACY_CLAUDE_FEATURES
+    merged = list(base)
+    for feature in extra or []:
+        feature = feature.strip() if isinstance(feature, str) else feature
+        if not feature or feature in merged:
+            continue
+        if feature in LEGACY_CLAUDE_FEATURES:
+            continue  # `claude` is already in base (baseline); the rest are retired
+        merged.append(feature)
+    return merged
+
+
+def _warn_legacy_claude_entries(found):
+    """One line per env still listing a Claude feature or credential
+    (decision 36): redundant since Claude became automatic, ignored, and
+    reported until hand-removed."""
+    for env_name, entries in found.items():
+        dax_print('[!] ~/.dax.yaml: env {!r} still lists {} — Claude is automatic now; '
+                  'remove {}'.format(env_name, ', '.join(entries),
+                                     'it' if len(entries) == 1 else 'them'))
 
 
 def _exit_missing_config():
@@ -181,10 +214,6 @@ def feature_aws(config):
     return _add_volume(config, 'awsdir')
 
 
-def feature_claude(config):
-    return _add_volume(config, 'claudedir')
-
-
 # Mounted from the host's own ~/.claude into every state tree, nested at their
 # usual CLAUDE_CONFIG_DIR-relative paths (decision B2, which replaced decision
 # 11's four-directory `shared/` tree and its seeding copy).
@@ -221,12 +250,15 @@ _CLAUDE_HOST_SHARED_DIRS = ('commands', 'plugins')
 _CLAUDE_HOST_SHARED_FILES = CLAUDE_SHARED_FILES
 
 
-def feature_claude_tenant_state(config):
+def feature_claude(config):
     """Decision B: this env's state tree mounts at `~/.claude` itself.
 
-    The opt-in replacement for `feature_claude`'s wholesale `~/.claude` mount —
-    the two are mutually exclusive, since both target the same destination, and
-    `cmd_run` refuses rather than letting Docker fail on a duplicate mount point.
+    Always on (decision 35): one of `_ALWAYS_ON_FEATURES`. It was the opt-in
+    `claude_tenant_state` until the env-lifecycle consolidation, which
+    deleted the old `claude` feature (a wholesale mount of the host's
+    `~/.claude`, shared by every env) and gave this one its name. A per-env
+    `claude`/`claude_tenant_state` in `features:` is now redundant: filtered
+    out, and reported until removed (decision 36).
 
     `CLAUDE_CONFIG_DIR` is a **constant**, not a selector: no cwd resolution, no
     per-session computation. It is set only because it is what relocates
@@ -264,11 +296,14 @@ def feature_claude_tenant_state(config):
     unconditionally, removes the dependency on both Docker's
     platform-specific behavior and that incidental side effect.
     """
-    project_name = config['workdir_name']
+    # The registry name, which the credential name, destroy, archive and
+    # restore all use too. It equals the folder name for every env the
+    # wizard or restore registers (decision 5); a hand-edited entry where
+    # they differ would otherwise get two trees.
+    project_name = config.get('env_name') or config['workdir_name']
     tenant = config.get('tenant')
     if not tenant:
-        dax_print('[!] claude_tenant_state needs a tenant for {}, and none is '
-                  'declared.'.format(project_name))
+        dax_print('[!] {} needs a tenant, and none is declared.'.format(project_name))
         dax_print('    The state tree lives at '
                   '~/.local/state/dax/tenants/<tenant>/{}/, so there is nowhere'.format(
                       project_name))
@@ -309,13 +344,8 @@ def feature_claude_tenant_state(config):
             host_shared, os.path.join(cfg_dir, shared_dir)))
 
     # Copied in rather than mounted (see the comment on _CLAUDE_HOST_SHARED_FILES
-    # above) — a plain file write into the tree, picked up by the volume mount
-    # already assembled for `host_tree` further up.
-    for drifted in sync_claude_shared_files(tenant, project_name):
-        dax_print('[!] {}: {} in state tree differs from both host and '
-                  'last-synced copy — leaving it alone.'.format(project_name, drifted))
-        dax_print('    Run `dax env accept-shared-files {}` to adopt the host '
-                  'version, or inspect the diff yourself.'.format(project_name))
+    # above), once: a file the tree already has is never touched (decision 13).
+    sync_claude_shared_files(tenant, project_name)
 
     return opts
 
@@ -504,7 +534,7 @@ def feature_mounts(config):
     a host directory be mounted under a name other than its own basename,
     e.g. the host's own `~/.claude` mounted as `~/host-claude` to inspect its
     real content from inside a container without colliding with whatever
-    `claude_tenant_state` already mounted at `~/.claude` itself. A trailing
+    the `claude` feature already mounts at `~/.claude` itself. A trailing
     `:ro` (the default container name still applies, e.g. `~/discernment::ro`)
     marks that one mount read-only — the same trailing-`:ro` Docker's own
     `--volume` syntax uses, and the same convention `feature_dotfiles`
@@ -600,7 +630,8 @@ def _feature_names():
 def _print_features():
     dax_print("[!] available features:")
     for name in sorted(_feature_names()):
-        dax_print("\t{}".format(name))
+        note = '   (always on)' if name in _ALWAYS_ON_FEATURES else ''
+        dax_print("\t{}{}".format(name, note))
 
 
 def _get_version():
@@ -805,14 +836,14 @@ def _format_docker_cmd(cmd):
     return '\n  '.join(lines)
 
 
-def _sync_and_clear_claude_credential(config, features, project_creds):
-    """Write a `claude_tenant_state` env's live `.credentials.json` back to
+def _sync_and_clear_claude_credential(config, project_creds):
+    """Write an env's live `.credentials.json` back to
     Keychain when the container stops, then delete it from disk — restoring
     the property the Keychain design was originally built around
     (credentials don't sit on disk when nothing is running), which the
     persistent per-env state tree quietly broke: the tree survives a
-    container stop by design (that's the whole point of
-    `claude_tenant_state`), and nothing ever copied its refreshed token back
+    container stop by design (that's the whole point of the per-env
+    tree), and nothing ever copied its refreshed token back
     to Keychain, so it just sat there in plaintext indefinitely.
 
     Runs entirely host-side, in `cmd_run`'s existing teardown `finally:`
@@ -837,8 +868,6 @@ def _sync_and_clear_claude_credential(config, features, project_creds):
     file could survive a full stop/login/restart cycle untouched on that
     side too.
     """
-    if 'claude_tenant_state' not in features:
-        return
     cred_name = next((n for n, d in project_creds.items()
                        if d.get('provider') == 'claude'), None)
     if not cred_name:
@@ -848,7 +877,7 @@ def _sync_and_clear_claude_credential(config, features, project_creds):
     tenant = config.get('tenant')
     if not tenant:
         return
-    cred_file = state_tree_path(tenant, config['workdir_name']) / '.credentials.json'
+    cred_file = state_tree_path(tenant, config.get('env_name') or config['workdir_name']) / '.credentials.json'
     if not cred_file.is_file() or cred_file.stat().st_size == 0:
         return
 
@@ -877,6 +906,21 @@ def _sync_and_clear_claude_credential(config, features, project_creds):
             dax_print('[!] {} was not a usable Claude credentials blob (dead '
                       'refresh token) — cleared so the next launch can '
                       'inject from Keychain'.format(cred_file))
+            return
+        # The same one-grant-per-name rule login enforces (decision C6). A
+        # tree can hold a grant dax never tracked, e.g. an env that had a
+        # state tree before it had a Claude credential, and storing that
+        # under this name would share it with whichever name already holds
+        # it. Cleared rather than kept: the next launch logs this env in
+        # with a grant of its own.
+        from dax_creds.config import credential_names_for_provider
+        clash = provider.grant_collision(
+            cred_name, blob, credential_names_for_provider(config, 'claude'))
+        if clash:
+            cred_file.unlink()
+            dax_print('[!] {}: the credential in its state tree is the same grant as {!r} — '
+                      'not stored, and cleared; the next launch logs it in fresh'.format(
+                          cred_name, clash))
             return
         provider.store(cred_name, blob)
         cred_file.unlink()
@@ -930,6 +974,7 @@ def cmd_run(args):
         from dax_creds.config import (
             load_dax_config, find_named_project_by_dir, find_enclosing_project,
             get_project_credentials, unknown_env_keys, describe_unknown_env_keys,
+            legacy_claude_entries,
         )
         from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
         dax_config = load_dax_config()
@@ -939,6 +984,7 @@ def cmd_run(args):
         for _env, _keys in unknown_env_keys(dax_config).items():
             dax_print('[!] ~/.dax.yaml: env {!r} has {}'.format(
                 _env, describe_unknown_env_keys(_keys)))
+        _warn_legacy_claude_entries(legacy_claude_entries(dax_config))
         try:
             project_name, project = find_named_project_by_dir(dax_config, Path.cwd())
         except KeyError:
@@ -963,10 +1009,18 @@ def cmd_run(args):
         try:
             project_creds = get_project_credentials(dax_config, project, project_name)
         except ValueError as e:
-            # A bare provider token with no tenant to derive from. Refusing
+            # No tenant to derive the implied Claude credential from. Refusing
             # beats silently falling back to a shared credential, which is the
             # exact isolation failure this convention exists to prevent.
             dax_print(f'[!] {e}')
+            sys.exit(1)
+        except KeyError as e:
+            # An explicitly named credential with no definition. Left to the
+            # outer `except KeyError` this used to be swallowed, launching with
+            # no credential daemon and, once Claude became baseline, ending in
+            # a misleading "needs a tenant" from feature_claude.
+            dax_print(f"[!] env '{project_name}' lists credential {e.args[0]!r}, which "
+                      f'is not defined in ~/.dax.yaml (see `dax creds list`)')
             sys.exit(1)
 
         # Make synthesized definitions for derived names visible to everything
@@ -980,26 +1034,21 @@ def cmd_run(args):
         # Nothing needs persisting, so `dax run` stays a non-writer.
         for _name, _cdef in project_creds.items():
             dax_config.setdefault('credentials', {}).setdefault(_name, _cdef)
-        # Decision A: a declared grouping label on the env's entry. This is what
-        # feature_claude_tenant_state builds the state-tree path from — no
-        # `.dax-tenant` file, no cwd resolution.
+        # Decision A: a declared grouping label on the env's entry. With the
+        # registry name, this is what feature_claude builds the state-tree
+        # path from — no `.dax-tenant` file, no cwd resolution.
         config['tenant'] = project.get('tenant')
+        config['env_name'] = project_name
 
-        # Per-env feature opt-in, which was never actually wired up: features came
-        # only from the global `features:` list, a `.dax.yaml` in cwd, and `-f`.
-        # The design doc, CLAUDE.md, and feature_claude_tenant_state's own
-        # docstring all describe adding a feature to an env's own `features:` list
-        # — and doing so did nothing at all. Without this there is no per-env
-        # opt-in, so `claude_tenant_state` could only be switched on for every env
-        # at once or passed by hand on every launch.
-        for feature in project.get('features') or []:
-            if feature not in config['features']:
-                config['features'].append(feature)
+        # The env's own `features:` (per-env opt-ins on top of the always-on
+        # baseline), merged so nothing applies twice and the retired Claude
+        # names are dropped.
+        config['features'] = _merge_features(config['features'], project.get('features'))
 
         config['multi_tenant'] = bool(project.get('multi_tenant'))
         config['tenant_subdir'] = project.get('tenant_subdir', '')
 
-        # feature_mounts reads this the same way feature_claude_tenant_state
+        # feature_mounts reads this the same way feature_claude
         # reads config['tenant'] above — project entries aren't otherwise
         # promoted into the flat config feature functions see.
         config['mounts'] = project.get('mounts') or []
@@ -1072,6 +1121,13 @@ def cmd_run(args):
                 ssh_bridge_proc = None
         non_ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') != 'ssh'}
         missing = set()
+        # No logins from a preview (`-t` must not open a browser or mint a
+        # grant), and none without keyring: the login flow needs it and
+        # exits without it, and every env has a Claude credential now, so
+        # asking would turn every keyring-less launch into a dead end.
+        can_log_in = not args.test_only and _keyring_importable()
+        if not can_log_in:
+            non_ssh_creds = {}
         if non_ssh_creds:
             from dax_creds.init import ensure_project_credentials
             missing = ensure_project_credentials(dax_config, non_ssh_creds)
@@ -1081,7 +1137,7 @@ def cmd_run(args):
                 if answer in ('', 'y', 'yes'):
                     cmd_creds_login(cred_name, dax_config)
 
-        # Proactive relogin for claude_tenant_state envs. A credential already
+        # Proactive relogin, for every env since Claude is baseline. A credential already
         # in Keychain can still be a dead link in the refresh-token rotation
         # chain — the env's last session died before a teardown ever synced a
         # fresher token back — and there is no local signal on the blob
@@ -1094,41 +1150,27 @@ def cmd_run(args):
         # `missing` credentials are skipped: the loop above either just
         # logged them in or the user declined to, either way nothing further
         # to do here.
-        if 'claude_tenant_state' in config['features']:
-            from dax_creds.config import relogin_due
-            for cred_name, cred_def in non_ssh_creds.items():
-                if cred_def.get('provider') != 'claude' or cred_name in missing:
-                    continue
-                if relogin_due(cred_name, dax_config):
-                    dax_print(f'[+] {cred_name}: stale — running the Claude '
-                              'login flow before launch')
-                    cmd_creds_login(cred_name, dax_config)
-                else:
-                    dax_print(f'[-] {cred_name}: logged in recently — skipping relogin')
+        from dax_creds.config import relogin_due
+        for cred_name, cred_def in non_ssh_creds.items():
+            if cred_def.get('provider') != 'claude' or cred_name in missing:
+                continue
+            if relogin_due(cred_name, dax_config):
+                dax_print(f'[+] {cred_name}: stale — running the Claude '
+                          'login flow before launch')
+                cmd_creds_login(cred_name, dax_config)
+            else:
+                dax_print(f'[-] {cred_name}: logged in recently — skipping relogin')
     except (FileNotFoundError, KeyError):
         pass
 
     features = list(config['features'])
     if args.features:
-        features.extend(args.features.split(','))
+        features = _merge_features(features, args.features.split(','))
 
     if args.ports:
         config.setdefault('ports', []).extend(args.ports)
         if 'ports' not in features:
             features.append('ports')
-
-    if 'claude_tenant_state' in features and 'claude' in features:
-        # Both mount ~/.claude, so Docker would fail on a duplicate mount point
-        # with a message that says nothing about which feature to remove. The
-        # tenant-state tree is the *replacement* for the shared mount, not an
-        # addition to it (decision B).
-        dax_print('[!] features `claude` and `claude_tenant_state` both mount '
-                  '~/.claude — pick one.')
-        dax_print('    claude_tenant_state replaces the shared mount with this '
-                  'env\'s own state tree.')
-        dax_print('    Check this env\'s own `features:` list (and any -f flag) '
-                  'and drop one of the two.')
-        sys.exit(1)
 
     for feature in features:
         cmd.extend(_add_feature(feature, config))
@@ -1204,7 +1246,7 @@ def cmd_run(args):
             # nothing) - deleting the real credential file as a side effect
             # of a dry run would be a bad surprise, so this is the one
             # teardown step in this block that's skipped for it.
-            _sync_and_clear_claude_credential(config, features, project_creds)
+            _sync_and_clear_claude_credential(config, project_creds)
 
 
 _LOGIN_PROVIDERS = {
@@ -1334,12 +1376,21 @@ def cmd_creds_login(cred_name, config):
     home = str(Path.home())
     port = _find_free_port()
 
+    # Claude logs in into a fresh, private folder mounted at the container's
+    # ~/.claude, never the host's real ~/.claude (decision 32): the login
+    # used to land the token there and leave it behind, so the host always
+    # held a plaintext copy of the newest env grant. Made before the daemon
+    # starts, so a failure here can't leave a daemon running.
+    login_dir = _claude_login_dir() if provider == 'claude' else None
+
     # Start daemon in TCP mode (avoids Docker Desktop Unix socket permission issues)
     creds_for_daemon = {cred_name: cred_def}
     daemon_proc = _start_login_daemon(creds_for_daemon, port)
     if not _wait_for_tcp('127.0.0.1', port):
         dax_print('[!] credential daemon did not start')
         daemon_proc.terminate()
+        if login_dir is not None:
+            shutil.rmtree(login_dir, ignore_errors=True)
         sys.exit(1)
 
     cmd = [
@@ -1354,7 +1405,10 @@ def cmd_creds_login(cred_name, config):
     for mount in provider_cfg['mounts']:
         host_path = os.path.expanduser(mount)
         container_path = host_path.replace(home, f'/home/{_get_username()}')
-        Path(host_path).mkdir(parents=True, exist_ok=True)
+        if login_dir is not None and mount == '~/.claude':
+            host_path = str(login_dir)
+        else:
+            Path(host_path).mkdir(parents=True, exist_ok=True)
         cmd += ['-v', f'{host_path}:{container_path}']
 
     cmd += [image, '/bin/sh', '-c', provider_cfg['auth_command']]
@@ -1365,21 +1419,46 @@ def cmd_creds_login(cred_name, config):
     # abandoned login silently stored the pre-existing shared credential under
     # the new name, producing two Keychain entries backed by one OAuth grant.
     # That is the exact sharing the per-env naming exists to prevent, and it
-    # presented as success. Observed 2026-07-30.
-    before = _disk_token_for(cred_def, provider)
+    # presented as success. Observed 2026-07-30. For Claude the folder starts
+    # empty, so "nothing written" is simply "no file".
+    before = None if login_dir is not None else _disk_token_for(cred_def, provider)
 
     dax_print(f'[+] dax creds login: starting auth flow for {cred_name} ({provider})')
     try:
-        subprocess.run(cmd)
-    finally:
-        daemon_proc.terminate()
-        dax_print(f'[-] login daemon log: {daemon_proc._dax_log_path}')
+        try:
+            subprocess.run(cmd)
+        finally:
+            daemon_proc.terminate()
+            dax_print(f'[-] login daemon log: {daemon_proc._dax_log_path}')
 
-    # Post-login: import token to Keychain
-    _post_login_import(cred_name, cred_def, config, provider, before=before)
+        # Post-login: import token to Keychain
+        _post_login_import(
+            cred_name, cred_def, config, provider, before=before,
+            credentials_file=(login_dir / '.credentials.json') if login_dir is not None else None)
+    finally:
+        if login_dir is not None:
+            shutil.rmtree(login_dir, ignore_errors=True)
 
     from dax_creds.config import record_login
     record_login(cred_name)
+
+
+def _claude_login_dir():
+    """A fresh 0700 folder for one Claude login to write into, under
+    ~/.local/state/dax/login/ (inside /Users on macOS, which Docker Desktop
+    always shares, unlike Python's default /var/folders temp location).
+    Folders left by a run killed before cleanup are swept first, but only
+    ones over an hour old, so two logins at once can't delete each other's."""
+    base = Path.home() / '.local' / 'state' / 'dax' / 'login'
+    base.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - 3600
+    for stale in base.iterdir():
+        try:
+            if stale.is_dir() and stale.stat().st_mtime < cutoff:
+                shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            continue
+    return Path(tempfile.mkdtemp(prefix='claude-', dir=str(base)))
 
 
 def _disk_token_for(cred_def, provider):
@@ -1408,7 +1487,8 @@ def _report_grant_collision(cred_name, other_name):
         dax_print(f'    {line}')
 
 
-def _post_login_import(cred_name, cred_def, config, provider, before=None):
+def _post_login_import(cred_name, cred_def, config, provider, before=None,
+                       credentials_file=None):
     """Store whatever the auth flow just wrote to disk into Keychain.
 
     `before` is what that same on-disk location held beforehand. When the flow
@@ -1441,7 +1521,7 @@ def _post_login_import(cred_name, cred_def, config, provider, before=None):
         from dax_creds.config import credential_names_for_provider
         from dax_creds.providers.claude import ClaudeProvider
         provider_obj = ClaudeProvider()
-        token = provider_obj.import_from_disk(cred_def)
+        token = provider_obj.import_from_disk(cred_def, credentials_file=credentials_file)
         if token:
             # The `before` comparison above only answers whether the file
             # changed, not whether the grant did — a Claude Code token refresh
@@ -1583,7 +1663,7 @@ def _resolve_env_name(config, explicit):
 
 def cmd_env(args):
     from dax_creds.config import load_dax_config
-    from dax_creds.init import run_env_accept_shared_files, run_env_show
+    from dax_creds.init import run_env_show
 
     try:
         config = load_dax_config()
@@ -1611,8 +1691,6 @@ def cmd_env(args):
     try:
         if args.env_command == 'show':
             run_env_show(config, _resolve_env_name(config, args.name))
-        elif args.env_command == 'accept-shared-files':
-            run_env_accept_shared_files(config, _resolve_env_name(config, args.name))
         elif args.env_command == 'destroy':
             _run_env_destroy(config, args)
         elif args.env_command == 'archive':
@@ -2005,10 +2083,10 @@ def _bootstrap_env(config, env_dir):
             process = {'substrate': substrate_root, 'title': title, 'type': process_type,
                        'skill': skill, 'git': git, 'script': script}
 
-        # Until step 7 makes Claude baseline, the Claude credential and state
-        # tree still have to be spelled out on the entry.
-        creds = list(selected) + ['claude']
-        features = (['substrate', 'claude_tenant_state'] if process else ['claude_tenant_state'])
+        # Claude is baseline with an implied credential (decision 35), so
+        # neither appears on the entry.
+        creds = list(selected)
+        features = ['substrate'] if process else []
 
         rows = [
             ('env', name),
@@ -2060,8 +2138,9 @@ def _bootstrap_env(config, env_dir):
                 dax_print('    Remove them, then run `dax run` here again.')
             sys.exit(1)
 
-    entry = {'dir': str(env_dir), 'image': image, 'creds': creds, 'tenant': tenant,
-             'features': features}
+    entry = {'dir': str(env_dir), 'image': image, 'creds': creds, 'tenant': tenant}
+    if features:
+        entry['features'] = features
     if process:
         entry['substrate'] = str(process['substrate'])
     config.setdefault('projects', {})[name] = entry
@@ -2300,17 +2379,17 @@ def _uncommitted_git_note(dir_path):
     return '! {} uncommitted git change(s)'.format(len(changed))
 
 
-def _derived_creds_for(project, name):
-    """[derived credential name, ...] for one project — never an
-    explicitly-named/shared credential, only ones dax itself derived for
-    this env specifically (see BARE_PROVIDER_CREDS)."""
+def _derived_creds_for(project, name, config=None):
+    """[derived credential name, ...] for one project: its implied Claude
+    credential and any other per-env name dax derived for it, never an
+    explicitly named one it merely lists. `config` lets resolution tell an
+    explicit Claude entry (redundant, skipped) from a genuine explicit one."""
     from dax_creds.config import resolve_credential_names
     try:
-        resolved = resolve_credential_names(project, name)
+        resolved = resolve_credential_names(project, name, config)
     except ValueError:
-        # A bare provider entry with no tenant to derive from — already
-        # broken in a way `dax run`/`env show` would refuse on, and not
-        # this command's job to fix. Nothing resolvable to clean up.
+        # No tenant, so nothing was ever derived for it — already broken in
+        # a way `dax run`/`env show` refuse on. Nothing to clean up.
         return []
     return [cred_name for cred_name, provider in resolved if provider]
 
@@ -2325,7 +2404,7 @@ def _teardown_process(config, name, project):
     once per name inside its own loop while `archive --remove` batches the
     registry edits and saves once after the whole set.
     """
-    from dax_creds.config import state_tree_path, _shared_files_manifest_path
+    from dax_creds.config import state_tree_path, shared_files_manifest_path
     from dax_creds.init import run_creds_remove
 
     dir_path = Path(project.get('dir', '')).expanduser()
@@ -2340,13 +2419,18 @@ def _teardown_process(config, name, project):
         if state.exists():
             shutil.rmtree(state)
             dax_print('[-]   removed {}'.format(state))
-        manifest = _shared_files_manifest_path(tenant, name)
+        # Leftover of the retired drift-tracking shared-files sync: real envs
+        # still have one beside their tree.
+        manifest = shared_files_manifest_path(tenant, name)
         if manifest.exists():
             manifest.unlink()
 
-    for cred_name in _derived_creds_for(project, name):
+    for cred_name in _derived_creds_for(project, name, config):
         try:
-            run_creds_remove(config, cred_name)
+            # The env being torn down doesn't count as still using its own
+            # credential, which matters when the implied name is also
+            # explicitly registered (e.g. `ot`'s claude-ysecurity-ot).
+            run_creds_remove(config, cred_name, ignore_users=(name,))
         except Exception as e:
             dax_print('[!] could not remove credential {}: {}'.format(cred_name, e))
 
@@ -2459,7 +2543,7 @@ def _run_env_destroy(config, args):
         else:
             state_cell = '(no tenant declared)'
 
-        derived = _derived_creds_for(project, name)
+        derived = _derived_creds_for(project, name, config)
         cred_cell = ', '.join(derived) if derived else '(none derived)'
 
         rows.append((name, dir_cell, state_cell, cred_cell))
@@ -2587,7 +2671,7 @@ def _archive_envs(config, names, remove=False, out_path=None):
                 state_cell = _home_relative(state)
         else:
             state_cell = '(no tenant declared)'
-        derived = _derived_creds_for(project, name)
+        derived = _derived_creds_for(project, name, config)
         cred_cell = ', '.join(derived) if derived else '(none derived)'
         rows.append((name, dir_cell, state_cell, cred_cell))
 
@@ -2878,47 +2962,33 @@ def _extract_env_archive(archive, manifest, env_dir, dest_state):
     return stripped_credential
 
 
-def _is_claude_credential(config, cred_name):
-    if cred_name == 'claude':
-        return True
-    definition = (config.get('credentials') or {}).get(cred_name) or {}
-    return definition.get('provider') == 'claude'
-
-
-def _restored_entry(config, manifest, env_dir, tenant, renamed):
+def _restored_entry(config, manifest, env_dir, tenant):
     """The registry entry a restore writes, built in memory so it's saved
     once (decision 31), plus notes for the summary.
 
     - Features dax no longer has are written as commented-out `#- <name>`
       list entries, matching ~/.dax.yaml's own toggle convention, so the
       record of what the env used to have survives without being active.
-    - On a renamed restore, explicitly named Claude credentials become bare
-      `claude` (decision 33), so the copy derives its own credential name
-      instead of sharing the original's grant.
+    - Claude entries are dropped silently, not commented out: the archived
+      `claude`/`claude_tenant_state` features and any Claude credential in
+      `creds:` are what Claude being baseline with an implied credential
+      replaced (decisions 35, 36), so nothing is lost. This also covers a
+      renamed restore: the copy's implied name follows its own folder name,
+      so it never shares the original's grant (decision 33).
     """
+    from dax_creds.config import LEGACY_CLAUDE_FEATURES, is_claude_credential
     from ruamel.yaml.comments import CommentedMap, CommentedSeq
     from ruamel.yaml.error import CommentMark
     from ruamel.yaml.tokens import CommentToken
 
     known_features = _feature_names()
-    features = list(manifest.get('features') or [])
+    features = [f for f in (manifest.get('features') or []) if f not in LEGACY_CLAUDE_FEATURES]
     kept = [f for f in features if f in known_features]
     dropped = [f for f in features if f not in known_features]
 
-    # A bare `claude` derives `claude-<tenant>-<env>`, so without a tenant
-    # there's nothing to swap to (dax run refuses a tenantless bare token);
-    # the explicit name stays, and the summary says the grant is shared.
     creds = []
-    swapped = []
-    shared = []
     for cred in manifest.get('creds') or []:
-        if renamed and cred != 'claude' and _is_claude_credential(config, cred):
-            if tenant:
-                swapped.append(cred)
-                cred = 'claude'
-            else:
-                shared.append(cred)
-        if cred not in creds:
+        if not is_claude_credential(config, cred) and cred not in creds:
             creds.append(cred)
 
     entry = CommentedMap()
@@ -2942,17 +3012,14 @@ def _restored_entry(config, manifest, env_dir, tenant, renamed):
     if manifest.get('substrate'):
         entry['substrate'] = manifest['substrate']
 
-    return entry, {'dropped_features': dropped, 'swapped_creds': swapped,
-                   'shared_creds': shared}
+    return entry, {'dropped_features': dropped}
 
 
-def _print_restore_login_reminders(creds, tenant, name):
-    if not creds:
-        return
+def _print_restore_login_reminders(config, creds, tenant, name):
     from dax_creds.config import resolve_credential_names
     try:
         resolved_names = [n for n, _p in resolve_credential_names(
-            {'creds': creds, 'tenant': tenant}, name)]
+            {'creds': creds, 'tenant': tenant}, name, config)]
     except ValueError as e:
         dax_print('[!] {}'.format(e))
         resolved_names = creds
@@ -3068,12 +3135,14 @@ def _run_env_restore(config, args):
             sys.exit(1)
         manifest = _read_archive_manifest(archive)
 
+        # Every env needs a tenant (decision 35); an archive from before that
+        # rule may not record one, so ask, like the bootstrap wizard does.
         tenant = manifest.get('tenant')
-        if manifest.get('had_state_tree') and not tenant:
-            dax_print('[!] this archive has a Claude state tree but no tenant recorded — '
-                      'nowhere to put it')
-            sys.exit(1)
-        dest_state = state_tree_path(tenant, name) if tenant else None
+        if not tenant:
+            print()
+            print('This archive records no tenant, and every env needs one now.')
+            tenant = _prompt_tenant(env_dir, _known_tenant_names())
+        dest_state = state_tree_path(tenant, name)
         if dest_state is not None and dest_state.exists():
             dax_print('[!] {} already exists — leftover Claude state with no env registered.'.format(
                 dest_state))
@@ -3081,7 +3150,7 @@ def _run_env_restore(config, args):
             sys.exit(1)
 
         renamed = name != manifest.get('name')
-        entry, notes = _restored_entry(config, manifest, env_dir, tenant, renamed)
+        entry, notes = _restored_entry(config, manifest, env_dir, tenant)
 
         rows = [
             ('archive', '{}{}'.format(archive, '  ({})'.format(archive_date) if archive_date else '')),
@@ -3091,15 +3160,9 @@ def _run_env_restore(config, args):
             ('tenant', tenant or '(none)'),
             ('state tree', str(dest_state) if manifest.get('had_state_tree') else '(none in archive)'),
             ('image', entry['image']),
-            ('creds', ', '.join(entry['creds']) or '(none)'),
+            ('claude', 'claude-{}-{} (its own; logs in fresh)'.format(tenant, name)),
+            ('creds', ', '.join(entry['creds']) or '(none besides Claude)'),
         ]
-        if notes['swapped_creds']:
-            rows.append(('', 'replaced {} with claude, so this copy gets its own credential'.format(
-                ', '.join(notes['swapped_creds']))))
-        if notes['shared_creds']:
-            rows.append(('', 'WARNING: {} is shared with the original env (no tenant to derive '
-                             'a separate one); add a tenant to give this copy its own'.format(
-                                 ', '.join(notes['shared_creds']))))
         if 'features' in entry:
             rows.append(('features', ', '.join(entry['features']) or '(none active)'))
         if notes['dropped_features']:
@@ -3128,7 +3191,7 @@ def _run_env_restore(config, args):
     if stripped:
         dax_print('[!] this archive contained a Claude credential; it was not restored. '
                   'Consider deleting {}'.format(archive))
-    _print_restore_login_reminders(list(entry['creds']), tenant, name)
+    _print_restore_login_reminders(config, list(entry['creds']), tenant, name)
     dax_print('    then `dax run` from {} to launch it.'.format(env_dir))
 
 
@@ -3265,7 +3328,7 @@ def _run_backup(config, verbose=True, backup_dir=None):
     remote, but it was solving the wrong half of the problem: it's not
     reliably persistent. Only paths a container's own feature functions
     explicitly bind-mount survive that container's teardown (the project's
-    own workdir, dotfiles, ~/.claude via claude_tenant_state/claude) -
+    own workdir, dotfiles, ~/.claude via the claude feature) -
     ~/.local/state/dax/backup is not one of those, so on dax's own
     self-hosted dev loop (this repo, developed from inside a dax container)
     it would quietly vanish on every rebuild. The project's own workdir does
@@ -3517,11 +3580,6 @@ def main():
         '--explain', action='store_true',
         help='Describe how restore works and what it never does, then exit')
 
-    env_accept_p = env_sub.add_parser(
-        'accept-shared-files',
-        help="Force-adopt the host's CLAUDE.md/settings.json/settings.local.json "
-             "into this env's state tree, resolving a drift warning from `dax run`")
-    env_accept_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
 
     tenant_p = subparsers.add_parser('tenant', help='Manage tenant declarations')
     tenant_sub = tenant_p.add_subparsers(dest='tenant_command', required=True)

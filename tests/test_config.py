@@ -69,7 +69,7 @@ def test_load_config_baseline_features_present_with_no_top_level_features_key(
 
     config = load_config()
 
-    assert set(config['features']) == {'workdir', 'dotfiles', 'webpreview'}
+    assert set(config['features']) == {'workdir', 'dotfiles', 'webpreview', 'claude'}
 
 
 def test_load_config_ignores_a_legacy_top_level_features_list(tmp_path, monkeypatch):
@@ -84,9 +84,9 @@ def test_load_config_ignores_a_legacy_top_level_features_list(tmp_path, monkeypa
 
     config = load_config()
 
-    assert 'claude' not in config['features']
     assert 'ssh' not in config['features']
-    assert {'workdir', 'dotfiles', 'webpreview'} <= set(config['features'])
+    assert config['features'].count('claude') == 1  # baseline, not from the old list
+    assert {'workdir', 'dotfiles', 'webpreview', 'claude'} <= set(config['features'])
 
 
 def test_load_config_warns_about_a_legacy_top_level_features_list(

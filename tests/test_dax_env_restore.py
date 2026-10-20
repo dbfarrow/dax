@@ -103,11 +103,15 @@ def _destroy(name, tenant=None):
         shutil.rmtree(state_tree_path(tenant, name), ignore_errors=True)
 
 
-def _restore(monkeypatch, cwd, source=None, selects=(), confirm=True, path=None):
+def _restore(monkeypatch, cwd, source=None, selects=(), confirm=True, path=None,
+             tenant='acme'):
     """Run the wizard from `cwd` with scripted answers. Returns the list of
-    (prompt, default) pairs each select was shown with."""
+    (prompt, default) pairs each select was shown with. `tenant` answers the
+    tenant prompt an archive with no recorded tenant now gets."""
     cwd.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(cwd)
+    monkeypatch.setattr('dax._known_tenant_names', lambda: set())
+    monkeypatch.setattr('dax._prompt_tenant', lambda subdir, known, **k: tenant)
     selects = list(selects)
     shown = []
 
@@ -372,8 +376,11 @@ def test_refuses_a_bad_archive(home, monkeypatch, capsys, tmp_path):
     assert 'not a dax archive' in capsys.readouterr().out
 
 
-def test_refuses_a_state_tree_with_no_tenant(home, monkeypatch, capsys, tmp_path):
-    """Defensive: a real archive never has a state tree without a tenant."""
+def test_a_state_tree_archive_with_no_tenant_asks_rather_than_refusing(
+        home, monkeypatch, capsys, tmp_path):
+    """It used to refuse (nowhere to put the tree); now every env needs a
+    tenant anyway, so restore asks for one. Declining at the summary still
+    changes nothing."""
     archive = tmp_path / 'no-tenant.tar.gz'
     manifest = json.dumps({'name': 'demo', 'tenant': None, 'had_state_tree': True}).encode()
     with tarfile.open(archive, 'w:gz') as tar:
@@ -381,13 +388,11 @@ def test_refuses_a_state_tree_with_no_tenant(home, monkeypatch, capsys, tmp_path
         info.size = len(manifest)
         tar.addfile(info, io.BytesIO(manifest))
 
-    with pytest.raises(SystemExit):
-        _restore(monkeypatch, home / 'demo', source=str(archive))
+    _restore(monkeypatch, home / 'demo', source=str(archive), confirm=False)
 
-    assert 'no tenant recorded' in capsys.readouterr().out
-
-
-# --- renamed restores ----------------------------------------------------
+    out = capsys.readouterr().out
+    assert 'records no tenant' in out and 'acme' in out
+    assert 'demo' not in load_dax_config()['projects']
 
 def test_side_by_side_restore_leaves_the_original_alone(home, monkeypatch):
     env_dir, _ = _archive(home, 'demo', tenant='acme')
@@ -424,65 +429,42 @@ def test_renamed_restore_rekeys_all_three_claude_records(home, monkeypatch):
     assert projects == ['/home/dfarrow/demo-check', '/home/dfarrow/other', '/home/dfarrow/demo/sub']
 
 
-def test_renamed_restore_swaps_an_explicit_claude_credential(home, monkeypatch, capsys):
-    """Decision 33: the copy must not share the original's grant."""
+def test_claude_entries_in_an_archive_are_dropped_on_restore(home, monkeypatch, capsys):
+    """Decisions 35-36: the restored env's Claude credential is implied by
+    its own folder name, so the archive's Claude entries (a bare `claude`,
+    an explicitly named Claude credential, the old feature names) are
+    dropped, not carried over. That also stops a renamed copy sharing the
+    original's grant (decision 33)."""
     config = load_dax_config()
     config['credentials'] = {
         'claude-acme-ot': {'provider': 'claude'},
         'github-me': {'provider': 'github'},
     }
     _save(config)
-    _archive(home, 'ot', tenant='acme', creds=['claude-acme-ot', 'github-me'])
+    _archive(home, 'ot', tenant='acme', creds=['claude-acme-ot', 'claude', 'github-me'],
+             features=['claude_tenant_state', 'claude', 'mounts'])
 
     _restore(monkeypatch, home / 'ot-check', source='ot')
 
-    assert load_dax_config()['projects']['ot-check']['creds'] == ['claude', 'github-me']
+    entry = load_dax_config()['projects']['ot-check']
+    assert list(entry['creds']) == ['github-me']
+    assert list(entry['features']) == ['mounts']
+    assert '#- claude' not in _yaml_text(home)  # dropped, not kept commented out
     out = capsys.readouterr().out
-    assert 'replaced claude-acme-ot with claude' in out
+    assert 'claude-acme-ot-check (its own; logs in fresh)' in out
     assert 'dax creds login claude-acme-ot-check' in out
 
 
-def test_renamed_restore_without_a_tenant_keeps_the_explicit_credential_and_warns(
-        home, monkeypatch, capsys):
-    """A bare `claude` with no tenant can't derive a name and `dax run`
-    refuses it, so swapping would register a copy that can't launch."""
-    config = load_dax_config()
-    config['credentials'] = {'claude-fre': {'provider': 'claude'}}
-    _save(config)
-    _archive(home, 'fabric', creds=['claude-fre'])
+def test_an_archive_with_no_tenant_asks_for_one(home, monkeypatch, capsys):
+    """Every env needs a tenant now; an archive from before that rule may
+    not record one."""
+    env_dir, _ = _archive(home, 'demo')
+    _destroy('demo')
 
-    _restore(monkeypatch, home / 'fabric-check', source='fabric')
+    _restore(monkeypatch, env_dir, source='demo', tenant='newco')
 
-    assert load_dax_config()['projects']['fabric-check']['creds'] == ['claude-fre']
-    assert 'claude-fre is shared with the original env' in capsys.readouterr().out
-
-
-@pytest.mark.parametrize('old,new,key_old,key_new', [
-    ('my_env', 'my_env2', '-home-dfarrow-my-env', '-home-dfarrow-my-env2'),
-    ('my_env', 'my_env2', '-home-dfarrow-my_env', '-home-dfarrow-my_env2'),
-    ('app.v1', 'app.v2', '-home-dfarrow-app-v1', '-home-dfarrow-app-v2'),
-])
-def test_relocate_matches_the_session_key_whichever_way_it_was_mangled(
-        tmp_path, old, new, key_old, key_new):
-    tree = tmp_path / 'state'
-    (tree / 'projects' / key_old).mkdir(parents=True)
-
-    _relocate_claude_project_key(tree, '/Users/x/' + old, '/Users/x/' + new)
-
-    assert (tree / 'projects' / key_new).is_dir()
-    assert not (tree / 'projects' / key_old).exists()
-
-
-def test_same_name_restore_keeps_an_explicit_claude_credential(home, monkeypatch):
-    config = load_dax_config()
-    config['credentials'] = {'claude-acme-ot': {'provider': 'claude'}}
-    _save(config)
-    env_dir, _ = _archive(home, 'ot', tenant='acme', creds=['claude-acme-ot'])
-    _destroy('ot', tenant='acme')
-
-    _restore(monkeypatch, env_dir, source='ot')
-
-    assert load_dax_config()['projects']['ot']['creds'] == ['claude-acme-ot']
+    assert 'records no tenant' in capsys.readouterr().out
+    assert load_dax_config()['projects']['demo']['tenant'] == 'newco'
 
 
 # --- credentials, features, the single save ------------------------------
@@ -693,6 +675,8 @@ def test_cmd_env_restore_runs_from_an_unregistered_cwd(home, monkeypatch):
     env_dir.mkdir()
     monkeypatch.chdir(env_dir)
     monkeypatch.setattr('dax_creds.init._q_confirm', lambda *a, **k: True)
+    monkeypatch.setattr('dax._known_tenant_names', lambda: set())
+    monkeypatch.setattr('dax._prompt_tenant', lambda subdir, known, **k: 'acme')
 
     dax.cmd_env(argparse.Namespace(env_command='restore', source='demo', explain=False))
 

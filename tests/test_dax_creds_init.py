@@ -67,17 +67,17 @@ def test_creds_remove_also_drops_the_config_entry(tmp_path, monkeypatch):
 
 def test_creds_remove_refuses_when_a_project_still_references_it(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
-    kr = FakeKeyring({('dax-creds', 'claude-fre'): 'blob'})
-    config = {'credentials': {'claude-fre': {'provider': 'claude'}},
-              'projects': {'fabric': {'creds': ['claude-fre']},
-                           'dax': {'creds': ['claude-fre']}}}
+    kr = FakeKeyring({('dax-creds', 'gh-shared'): 'blob'})
+    config = {'credentials': {'gh-shared': {'provider': 'github'}},
+              'projects': {'fabric': {'tenant': 't', 'creds': ['gh-shared']},
+                           'dax': {'tenant': 't', 'creds': ['gh-shared']}}}
 
     with pytest.raises(ValueError, match='dax, fabric'):
-        run_creds_remove(config, 'claude-fre', keyring=kr)
+        run_creds_remove(config, 'gh-shared', keyring=kr)
 
     # Refusal must leave both stores untouched, not half-remove it.
-    assert 'claude-fre' in config['credentials']
-    assert kr.get_password('dax-creds', 'claude-fre') == 'blob'
+    assert 'gh-shared' in config['credentials']
+    assert kr.get_password('dax-creds', 'gh-shared') == 'blob'
     assert not (tmp_path / '.dax.yaml').exists()
 
 

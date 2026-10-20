@@ -72,23 +72,41 @@ def test_writes_to_keychain_and_deletes_the_file(home, fake_keyring):
 
     _sync_and_clear_claude_credential(
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {'claude-acme-myproc': {'provider': 'claude'}})
 
     assert fake_keyring.get_password('dax-creds', 'claude-acme-myproc') == VALID_BLOB
     assert not cred_file.exists()
 
 
-def test_noop_when_claude_tenant_state_not_in_features(home, fake_keyring):
+def test_runs_whatever_the_features_list_says(home, fake_keyring):
+    """Claude is baseline (decision 35), so every env's tree is synced: the
+    old `claude_tenant_state` gate is gone."""
     cred_file = _write_cred_file(home, 'acme', 'myproc')
 
     _sync_and_clear_claude_credential(
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        [],  # claude_tenant_state not active
         {'claude-acme-myproc': {'provider': 'claude'}})
 
-    assert fake_keyring.stored == {}
-    assert cred_file.exists()
+    assert fake_keyring.get_password('dax-creds', 'claude-acme-myproc') == VALID_BLOB
+    assert not cred_file.exists()
+
+
+def test_a_tree_credential_sharing_another_names_grant_is_cleared_not_stored(
+        home, fake_keyring, capsys):
+    """E.g. `a-priest-and-an-imam`: a state tree from before the env had a
+    Claude credential, holding a grant dax never tracked. Storing it would
+    put a second name on one grant (decision C6)."""
+    fake_keyring.set_password('dax-creds', 'claude-acme-other', VALID_BLOB)
+    cred_file = _write_cred_file(home, 'acme', 'myproc')
+    config = {'tenant': 'acme', 'workdir_name': 'myproc',
+              'projects': {'other': {'dir': '/x', 'tenant': 'acme'},
+                           'myproc': {'dir': '/y', 'tenant': 'acme'}}}
+
+    _sync_and_clear_claude_credential(config, {'claude-acme-myproc': {'provider': 'claude'}})
+
+    assert fake_keyring.get_password('dax-creds', 'claude-acme-myproc') is None
+    assert not cred_file.exists()
+    assert "same grant as 'claude-acme-other'" in capsys.readouterr().out
 
 
 def test_noop_when_no_claude_credential_in_project_creds(home, fake_keyring):
@@ -96,7 +114,6 @@ def test_noop_when_no_claude_credential_in_project_creds(home, fake_keyring):
 
     _sync_and_clear_claude_credential(
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {})  # no creds at all for this run
 
     assert fake_keyring.stored == {}
@@ -109,7 +126,6 @@ def test_noop_when_no_credential_file_exists(home, fake_keyring):
 
     _sync_and_clear_claude_credential(
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {'claude-acme-myproc': {'provider': 'claude'}})
 
     assert fake_keyring.stored == {}
@@ -122,7 +138,6 @@ def test_noop_on_a_zero_byte_credential_file(home, fake_keyring):
 
     _sync_and_clear_claude_credential(
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {'claude-acme-myproc': {'provider': 'claude'}})
 
     assert fake_keyring.stored == {}
@@ -132,7 +147,6 @@ def test_noop_on_a_zero_byte_credential_file(home, fake_keyring):
 def test_noop_when_no_tenant(home, fake_keyring):
     _sync_and_clear_claude_credential(
         {'tenant': None, 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {'claude-acme-myproc': {'provider': 'claude'}})
 
     assert fake_keyring.stored == {}
@@ -155,7 +169,6 @@ def test_malformed_credential_file_is_deleted_not_preserved(home, fake_keyring, 
 
     _sync_and_clear_claude_credential(
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {'claude-acme-myproc': {'provider': 'claude'}})
 
     assert fake_keyring.stored == {}
@@ -180,7 +193,6 @@ def test_blanked_token_credential_file_is_deleted_not_preserved(home, fake_keyri
 
     _sync_and_clear_claude_credential(
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {'claude-acme-myproc': {'provider': 'claude'}})
 
     assert fake_keyring.stored == {}
@@ -207,7 +219,6 @@ def test_keyring_failure_is_reported_not_raised(home, monkeypatch, capsys):
 
     _sync_and_clear_claude_credential(  # must not raise
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {'claude-acme-myproc': {'provider': 'claude'}})
 
     assert 'could not sync' in capsys.readouterr().out
@@ -220,7 +231,6 @@ def test_picks_the_claude_credential_out_of_multiple_providers(home, fake_keyrin
 
     _sync_and_clear_claude_credential(
         {'tenant': 'acme', 'workdir_name': 'myproc'},
-        ['claude_tenant_state'],
         {
             'github-dbfarrow': {'provider': 'github'},
             'claude-acme-myproc': {'provider': 'claude'},
@@ -278,14 +288,14 @@ def test_cmd_run_calls_the_sync_on_teardown(tmp_path, monkeypatch):
 
     calls = []
     monkeypatch.setattr(dax, '_sync_and_clear_claude_credential',
-                        lambda config, features, project_creds: calls.append(
-                            (features, project_creds)))
+                        lambda config, project_creds: calls.append(
+                            (config['features'], project_creds)))
 
     cmd_run(argparse.Namespace(features=None, ports=None, test_only=False))
 
     assert len(calls) == 1
     features, project_creds = calls[0]
-    assert 'claude_tenant_state' in features
+    assert 'claude' in features
     assert any(d.get('provider') == 'claude' for d in project_creds.values())
 
 

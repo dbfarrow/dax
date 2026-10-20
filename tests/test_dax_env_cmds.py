@@ -5,9 +5,9 @@ import pytest
 
 from dax_creds.config import (
     load_dax_config, state_tree_path,
-    sync_claude_shared_files, unknown_env_keys, describe_unknown_env_keys,
+    unknown_env_keys, describe_unknown_env_keys,
 )
-from dax_creds.init import run_env_accept_shared_files, run_env_show, save_config
+from dax_creds.init import run_env_show, save_config
 
 
 CONFIG = """\
@@ -143,8 +143,7 @@ def test_show_flags_a_derived_name_that_is_not_registered(home, capsys):
     run_env_show(load_dax_config(), 'fabric')
 
     out = capsys.readouterr().out
-    assert '-> claude-ysecurity-fabric' in out
-    assert 'not registered yet' in out
+    assert '-> claude-ysecurity-fabric   [implied]' in out
 
 
 def test_show_explains_a_bare_token_that_cannot_resolve(home, capsys):
@@ -255,36 +254,30 @@ def test_show_does_not_flag_substrate_when_the_feature_is_active(home, capsys):
 
 # --- env accept-shared-files -------------------------------------------------
 #
-# The escape hatch for the drift warning `sync_claude_shared_files` prints at
-# `dax run` time: resolving it is always an explicit act, never automatic.
-
-def test_accept_shared_files_requires_a_tenant(home):
-    with pytest.raises(ValueError, match='no tenant'):
-        run_env_accept_shared_files(load_dax_config(), 'fabric')
-
-
-def test_accept_shared_files_unknown_env_raises(home):
-    with pytest.raises(KeyError, match='fabric'):
-        run_env_accept_shared_files(load_dax_config(), 'nope')
-
-
-def test_accept_shared_files_adopts_the_host_version_over_drift(home):
-    _set(load_dax_config(), 'fabric', 'tenant', 'personal')
-    (home / '.claude').mkdir()
-    (home / '.claude' / 'CLAUDE.md').write_text('v1')
-    sync_claude_shared_files('personal', 'fabric')
-
-    tree_file = state_tree_path('personal', 'fabric') / 'CLAUDE.md'
-    tree_file.write_text('edited independently in a container')
-    (home / '.claude' / 'CLAUDE.md').write_text('v2')
-
-    run_env_accept_shared_files(load_dax_config(), 'fabric')
-
-    assert tree_file.read_text() == 'v2'
-
-
 def test_describe_unknown_env_keys_separates_typos_from_retired_keys():
     assert describe_unknown_env_keys(['tennant']) == 'unknown key(s) tennant — ignored (typo?)'
     assert describe_unknown_env_keys(['multi_tenant']) == 'retired key(s) multi_tenant — remove them'
     assert describe_unknown_env_keys(['tennant', 'tenant_subdir']) == (
         'unknown key(s) tennant — ignored (typo?); retired key(s) tenant_subdir — remove them')
+
+
+def test_show_notes_old_claude_entries(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['features'] = ['claude_tenant_state']
+    config['projects']['fabric']['creds'] = ['claude']
+    config['projects']['fabric']['tenant'] = 'personal'
+
+    run_env_show(config, 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'still lists claude_tenant_state (features), claude (creds)' in out
+
+
+def test_show_displays_the_implied_credential_with_nothing_in_creds(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['creds'] = []
+    config['projects']['fabric']['tenant'] = 'personal'
+
+    run_env_show(config, 'fabric')
+
+    assert '-> claude-personal-fabric   [implied]' in capsys.readouterr().out

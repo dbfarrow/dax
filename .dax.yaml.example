@@ -37,9 +37,6 @@ image: dax:latest
 # container's foreground process, and (docker run --rm) tears the container
 # down. No shell left behind and nothing to reattach to, by design.
 
-claudedir:
-  mount: ~/.claude
-
 auggiedir:
   mount: ~/.augment
 

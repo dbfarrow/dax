@@ -24,3 +24,38 @@ def _isolate_home(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp('home')
     monkeypatch.setenv('HOME', str(home))
     return home
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        'markers',
+        'real_claude_login: let `dax run` look up and refresh the implied Claude '
+        'credential for real, instead of the default stand-in (see '
+        '_implied_claude_credential_is_logged_in)')
+
+
+@pytest.fixture(autouse=True)
+def _implied_claude_credential_is_logged_in(request, monkeypatch):
+    """Every env has an implied Claude credential since Claude became a
+    baseline feature (decision 35). In a test, Keychain is empty, so
+    `dax run` would stop at "not in Keychain, log in now?" and, on a fresh
+    name, start the real login flow, in every test that runs `cmd_run` for
+    reasons unrelated to credentials.
+
+    So by default the Claude credential counts as stored and recently logged
+    in. Tests about that path itself (missing credentials, relogin) opt out
+    with `@pytest.mark.real_claude_login`.
+    """
+    if request.node.get_closest_marker('real_claude_login'):
+        return
+    import dax_creds.config as config_mod
+    import dax_creds.init as init_mod
+
+    real_ensure = init_mod.ensure_project_credentials
+
+    def _ensure(config, project_creds, keyring=None):
+        missing = real_ensure(config, project_creds, keyring=keyring)
+        return [n for n in missing if (project_creds.get(n) or {}).get('provider') != 'claude']
+
+    monkeypatch.setattr(init_mod, 'ensure_project_credentials', _ensure)
+    monkeypatch.setattr(config_mod, 'relogin_due', lambda *a, **k: False)

@@ -33,12 +33,21 @@ def test_derived_name_shape():
     assert derived_credential_name('claude', 'ysecurity', 'onboard') == 'claude-ysecurity-onboard'
 
 
-def test_explicit_name_wins_over_the_convention():
-    """Backward compatibility, and a deliberate escape hatch for sharing one
-    credential across two envs."""
+def test_an_explicit_claude_credential_is_redundant_and_skipped():
+    """Decision 36: the implied name is the env's Claude credential; an
+    explicitly named one in `creds:` is ignored (`config` identifies it)."""
     project = dict(FABRIC, creds=['claude-fre'])
+    config = {'credentials': {'claude-fre': {'provider': 'claude'}}}
 
-    assert resolve_credential_names(project, 'fabric') == [('claude-fre', None)]
+    assert resolve_credential_names(project, 'fabric', config) == [
+        ('claude-personal-fabric', 'claude')]
+
+
+def test_an_explicit_non_claude_name_is_kept_as_named():
+    project = dict(FABRIC, creds=['github-dfarrow'])
+
+    assert resolve_credential_names(project, 'fabric', REGISTRY) == [
+        ('claude-personal-fabric', 'claude'), ('github-dfarrow', None)]
 
 
 def test_bare_token_without_a_tenant_is_refused():
@@ -162,3 +171,84 @@ def test_find_named_project_by_dir_returns_the_name(tmp_path):
 def test_find_named_project_by_dir_raises_when_absent(tmp_path):
     with pytest.raises(KeyError):
         find_named_project_by_dir({'projects': {}}, tmp_path)
+
+
+# --- the implied credential reaches every caller (decision 35) -------------
+#
+# Found by the independent review: every credential lookup derives from an
+# env's `creds:` list, so resolving the implied name only in `cmd_run` would
+# have left login, destroy, `creds list` and the grant-collision check blind
+# to it. It lives in resolve_credential_names, so each caller sees it.
+
+EMPTY_ENV = {'credentials': {}, 'projects': {
+    'fabric': {'dir': '/src/fabric', 'tenant': 'personal', 'creds': []}}}
+
+
+def test_every_env_has_its_implied_claude_credential():
+    assert resolve_credential_names(EMPTY_ENV['projects']['fabric'], 'fabric', EMPTY_ENV) == [
+        ('claude-personal-fabric', 'claude')]
+
+
+def test_derived_credentials_lists_the_implied_name():
+    assert 'claude-personal-fabric' in derived_credentials(EMPTY_ENV)
+
+
+def test_credential_users_finds_the_env_behind_an_implied_name():
+    assert credential_users(EMPTY_ENV, 'claude-personal-fabric') == ['fabric']
+
+
+def test_the_grant_collision_name_set_includes_implied_names():
+    from dax_creds.config import credential_names_for_provider
+    assert 'claude-personal-fabric' in credential_names_for_provider(EMPTY_ENV, 'claude')
+
+
+def test_creds_list_shows_the_implied_credential(capsys):
+    from dax_creds.init import run_creds_list
+    run_creds_list(EMPTY_ENV)
+    assert 'claude-personal-fabric' in capsys.readouterr().out
+
+
+def test_an_env_without_a_tenant_has_no_resolvable_credentials():
+    with pytest.raises(ValueError, match="env 'fabric' has no tenant"):
+        resolve_credential_names({'creds': []}, 'fabric', {})
+
+
+# --- old Claude entries (decision 36) ----------------------------------------
+
+def test_legacy_claude_entries_finds_features_and_creds():
+    from dax_creds.config import legacy_claude_entries
+    config = {
+        'credentials': {'claude-fre': {'provider': 'claude'}, 'gh': {'provider': 'github'}},
+        'projects': {
+            'a': {'features': ['claude_tenant_state', 'mounts'], 'creds': ['claude', 'gh']},
+            'b': {'features': ['claude'], 'creds': ['claude-fre']},
+            'clean': {'features': ['mounts'], 'creds': ['gh']},
+        },
+    }
+
+    assert legacy_claude_entries(config) == {
+        'a': ['claude_tenant_state (features)', 'claude (creds)'],
+        'b': ['claude (features)', 'claude-fre (creds)'],
+    }
+
+
+# --- fixes from step 7's /code-review ------------------------------------------
+
+def test_a_tenantless_envs_explicit_credentials_still_count_as_used():
+    """Otherwise `dax creds remove` would delete a credential it still lists."""
+    config = {'credentials': {'gh': {'provider': 'github'}},
+              'projects': {'old': {'creds': ['gh']}}}
+    assert credential_users(config, 'gh') == ['old']
+
+
+@pytest.mark.parametrize('name,registered,expected', [
+    ('claude', None, True),
+    ('claude-personal-foo', None, True),        # unregistered: e.g. from another machine's archive
+    ('claude-personal-foo', 'github', False),   # registered: the provider decides, not the spelling
+    ('claude-fre', 'claude', True),
+    ('github-me', None, False),
+])
+def test_is_claude_credential(name, registered, expected):
+    from dax_creds.config import is_claude_credential
+    config = {'credentials': {name: {'provider': registered}}} if registered else {}
+    assert is_claude_credential(config, name) is expected

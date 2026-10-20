@@ -82,11 +82,12 @@ def test_claude_never_asks_for_a_credential_name(config, answers):
 
 def test_claude_offers_the_login_that_mints_the_grant(config, answers):
     answers.selects = ['claude', 'fabric']
-    answers.confirms = [True, True]    # add to creds list, then run login
+    answers.confirms = [True]          # run the login now?
 
     _, pending = _run_creds_add(config, cwd='/repos/fabric')
 
     assert pending == 'claude-personal-fabric'
+    assert answers.confirms == []
 
 
 def test_declining_the_login_still_saves_and_says_how(config, answers, capsys):
@@ -99,23 +100,17 @@ def test_declining_the_login_still_saves_and_says_how(config, answers, capsys):
     assert 'dax creds login claude-personal-dax' in capsys.readouterr().out
 
 
-def test_claude_adds_the_bare_token_to_an_env_that_lacks_it(config, answers):
+def test_claude_never_edits_the_envs_creds_list(config, answers):
+    """Every env uses its implied Claude credential automatically
+    (decision 35), so there is nothing to add to `creds:` and no question
+    about it: the only confirm is the login hand-off."""
     answers.selects = ['claude', 'fabric']
-    answers.confirms = [True, False]
-
-    _run_creds_add(config, cwd='/repos/fabric')
-
-    assert config['projects']['fabric']['creds'] == ['github-dbfarrow', 'claude']
-
-
-def test_declining_that_leaves_the_creds_list_alone(config, answers, capsys):
-    answers.selects = ['claude', 'fabric']
-    answers.confirms = [False, False]
+    answers.confirms = [False]
 
     _run_creds_add(config, cwd='/repos/fabric')
 
     assert config['projects']['fabric']['creds'] == ['github-dbfarrow']
-    assert 'go unused' in capsys.readouterr().out
+    assert answers.confirms == []
 
 
 def test_an_env_that_already_uses_it_is_not_asked_again(config, answers):
@@ -145,7 +140,7 @@ def test_tenant_is_asked_when_the_env_has_none(config, answers):
     falling back to a shared credential."""
     answers.selects = ['claude', 'untenanted']
     answers.texts = ['acme']
-    answers.confirms = [True, True]
+    answers.confirms = [True]
 
     _, pending = _run_creds_add(config, cwd='/repos/untenanted')
 

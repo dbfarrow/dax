@@ -13,7 +13,7 @@ import subprocess
 import pytest
 
 from dax import _run_env_destroy
-from dax_creds.config import load_dax_config, state_tree_path, _shared_files_manifest_path
+from dax_creds.config import load_dax_config, state_tree_path, shared_files_manifest_path
 
 
 @pytest.fixture
@@ -69,10 +69,10 @@ def test_destroy_single_name_removes_everything(home, monkeypatch):
     process_dir, config = _register(home, 'demo')
     removed = []
     monkeypatch.setattr('dax_creds.init.run_creds_remove',
-                        lambda cfg, cred_name: removed.append(cred_name))
+                        lambda cfg, cred_name, **k: removed.append(cred_name))
 
     state = state_tree_path('acme', 'demo')
-    manifest = _shared_files_manifest_path('acme', 'demo')
+    manifest = shared_files_manifest_path('acme', 'demo')
     manifest.write_text('{}')
 
     _run_env_destroy(config, _args(['demo']))
@@ -204,12 +204,43 @@ def test_explicit_credential_is_never_auto_removed(home, monkeypatch):
 
     removed = []
     monkeypatch.setattr('dax_creds.init.run_creds_remove',
-                        lambda cfg, cred_name: removed.append(cred_name))
+                        lambda cfg, cred_name, **k: removed.append(cred_name))
 
     _run_env_destroy(config, _args(['demo']))
 
-    assert removed == []
+    # Only the env's own implied Claude credential goes; the explicitly named
+    # github one it merely listed is never touched.
+    assert removed == ['claude-acme-demo']
     assert 'github-dfarrow' in load_dax_config().get('credentials', {})
+
+
+def test_an_implied_name_that_is_also_registered_is_removed_without_refusing(home, monkeypatch):
+    """`ot`'s shape: its implied name, claude-acme-ot, is also an explicit
+    registry entry listed in its own creds. Destroying `ot` must not refuse
+    because `ot` itself still "uses" it, and must clear both stores."""
+    from dax_creds.init import save_config
+
+    class FakeKeyring:
+        def __init__(self):
+            self.stored = {('dax-creds', 'claude-acme-ot'): 'blob'}
+
+        def get_password(self, service, name):
+            return self.stored.get((service, name))
+
+        def delete_password(self, service, name):
+            del self.stored[(service, name)]
+
+    kr = FakeKeyring()
+    monkeypatch.setattr('dax_creds.init._keyring_module', kr)
+    process_dir, config = _register(home, 'ot', creds=['claude-acme-ot'])
+    config.setdefault('credentials', {})['claude-acme-ot'] = {'provider': 'claude'}
+    save_config(config)
+
+    _run_env_destroy(load_dax_config(), _args(['ot']))
+
+    assert kr.stored == {}
+    assert 'claude-acme-ot' not in (load_dax_config().get('credentials') or {})
+    assert 'ot' not in load_dax_config().get('projects', {})
 
 
 # --- reached through `dax env` ---------------------------------------------

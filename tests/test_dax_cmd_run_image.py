@@ -36,7 +36,7 @@ def _setup(tmp_path, monkeypatch, project, top_level_image=None, defaults_image=
     home.mkdir()
     repo = home / 'myenv'
     repo.mkdir()
-    project = dict(project, dir=str(repo), creds=[])
+    project = dict({'tenant': 'personal'}, **project, dir=str(repo), creds=[])
 
     config = {'projects': {'myenv': project}}
     if top_level_image is not None:

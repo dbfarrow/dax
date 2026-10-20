@@ -7,7 +7,7 @@ from dax_creds.config import (
     BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
     credential_users, derived_credentials,
     last_login_at, relogin_due, resolve_credential_names, state_tree_path,
-    state_trees, sync_claude_shared_files, unknown_env_keys,
+    state_trees, unknown_env_keys, legacy_claude_entries,
     describe_unknown_env_keys,
 )
 from dax_creds.providers.ssh import SshProvider
@@ -427,14 +427,8 @@ def _add_per_env_credential(config, provider, cwd=None):
     cred_name = derived_credential_name(provider, tenant, env_name)
     print(f'\n  -> {cred_name}')
 
-    creds = project.setdefault('creds', [])
-    if provider not in creds and cred_name not in creds:
-        print(f'  {env_name} does not use it yet.')
-        if _q_confirm(f'Add `{provider}` to {env_name}\'s creds list?', default=True):
-            creds.append(provider)
-        else:
-            print(f'  leaving {env_name}\'s creds list alone — the credential will '
-                  f'exist but go unused.')
+    # No creds-list edit: every env uses its implied Claude credential
+    # automatically (decision 35), so there is nothing to opt into.
 
     # Browser and profile belong to the human authenticating, not to the env, so
     # they live in one `credential_defaults` block covering every derived
@@ -493,27 +487,17 @@ def _cred_status(config, name, cred_def):
         try:
             from dax_creds.providers.claude import ClaudeProvider
             claude_provider = ClaudeProvider()
-            # Checked per env, not once against a single fixed location: a
-            # claude_tenant_state env's live credential lives in its own
-            # state tree, not the shared `~/.claude/.credentials.json` this
-            # used to check unconditionally — which meant the warning was
-            # checking a path a tenant-state env never writes to at all, and
-            # silently missing the one it actually uses. An env with no
-            # claude_tenant_state (the plain shared `claude` mount, or no
-            # feature info at all) still checks the shared path, since
-            # that's genuinely where its copy would be.
+            # Checked per env, in each env's own state tree: that's where its
+            # live credential sits while a container runs (every env has one
+            # since Claude became baseline, decision 35).
             found = False
             for env_name in envs:
                 proj = config.get('projects', {}).get(env_name, {})
                 tenant = proj.get('tenant')
-                if 'claude_tenant_state' in (proj.get('features') or []) and tenant:
+                if tenant:
                     tree_file = state_tree_path(tenant, env_name) / '.credentials.json'
                     if claude_provider.has_disk_copy(cred_def, disk_locations=[tree_file]):
                         found = True
-                elif claude_provider.has_disk_copy(cred_def):
-                    found = True
-            if not envs and claude_provider.has_disk_copy(cred_def):
-                found = True
             if found:
                 warnings.append('[!] key on disk')
         except ImportError:
@@ -579,8 +563,8 @@ def run_creds_list(config):
             detail = browser_label(cred_def.get('browser', 'default'), cred_def.get('chrome_profile'))
         else:
             detail = ''
-        # Only meaningful for a claude credential actually used by a
-        # claude_tenant_state env — that's the only case `dax run` consults
+        # Only meaningful for a claude credential some env actually uses —
+        # that's the only case `dax run` consults
         # the cooldown for at all (see CLAUDE.md's "found live, 2026-10"
         # entry). "stored: yes" above says nothing about this: it is true
         # for a well-formed Keychain blob whose refresh token Anthropic has
@@ -588,9 +572,7 @@ def run_creds_list(config):
         # closes — not a shape check, a "when did the flow last actually run"
         # one, since no local shape check can tell the two apart.
         relogin_col = '-'
-        if provider == 'claude' and any(
-                'claude_tenant_state' in (config.get('projects', {}).get(e, {}).get('features') or [])
-                for e in envs):
+        if provider == 'claude' and envs:
             last = last_login_at(name)
             if last is None:
                 relogin_col = 'never'
@@ -707,11 +689,10 @@ def run_env_show(config, name):
     print(f'  image    {proj.get("image", "?")}')
     print(f'  creds    {", ".join(creds) or "(none)"}')
 
-    # Shown even when empty: whether this env opted into claude_tenant_state is
-    # the difference between its Claude state being its own and being shared with
-    # every other env, and nothing else in this output would reveal it.
+    # Shown even when empty, so it's clear nothing is opted in beyond the
+    # always-on baseline (workdir, dotfiles, webpreview, claude).
     env_features = proj.get('features') or []
-    print(f'  features {", ".join(env_features) or "(none beyond the global list)"}')
+    print(f'  features {", ".join(env_features) or "(none beyond the always-on baseline)"}')
 
     env_mounts = proj.get('mounts') or []
     if env_mounts:
@@ -725,18 +706,16 @@ def run_env_show(config, name):
         if 'substrate' not in env_features:
             print('           note: "substrate" feature not in features list above — inactive')
 
-    # A bare provider token in `creds:` is a request for a per-env credential
-    # whose name dax derives. Showing the resolved name keeps the convention
-    # visible rather than magic — and surfaces the "no tenant" error here,
-    # where it is cheap, rather than at launch.
-    if any(c in BARE_PROVIDER_CREDS for c in creds):
-        try:
-            for resolved, derived_provider in resolve_credential_names(proj, name):
-                if derived_provider:
-                    registered = '' if resolved in config.get('credentials', {}) else '   [not registered yet]'
-                    print(f'           -> {resolved}{registered}')
-        except ValueError as e:
-            print(f'           -> unresolved: {e.args[0]}')
+    # Every env's Claude credential is implied (decision 35), so show the
+    # resolved names rather than leave the convention invisible, and surface
+    # the "no tenant" error here, where it is cheap, rather than at launch.
+    try:
+        for resolved, derived_provider in resolve_credential_names(proj, name, config):
+            if derived_provider:
+                print(f'           -> {resolved}   [implied]' if derived_provider == 'claude'
+                      else f'           -> {resolved}')
+    except ValueError as e:
+        print(f'           -> unresolved: {e.args[0]}')
 
     container = _container_name_for(dir_path)
     if container:
@@ -758,31 +737,13 @@ def run_env_show(config, name):
     if unknown:
         print()
         print(f'  note: {describe_unknown_env_keys(unknown)}')
+    legacy = legacy_claude_entries(
+        {'projects': {name: proj}, 'credentials': config.get('credentials')}).get(name)
+    if legacy:
+        print()
+        print(f'  note: still lists {", ".join(legacy)} — Claude is automatic now; '
+              'remove them')
     print()
-
-
-def run_env_accept_shared_files(config, name):
-    """Force-adopt the host's CLAUDE.md/settings.json/settings.local.json into
-    one env's state tree, resolving a `dax run`-time drift warning.
-
-    The deliberate escape hatch for `sync_claude_shared_files`'s drift check:
-    that check refuses to guess whether a tree's copy diverged because it's
-    stale or because something meant to change it, so resolving it is always
-    an explicit act, never automatic.
-    """
-    projects = config.get('projects', {})
-    if name not in projects:
-        known = ', '.join(sorted(projects)) or '(none registered)'
-        raise KeyError(f'no env named {name!r}. Known envs: {known}')
-
-    tenant = projects[name].get('tenant')
-    if not tenant:
-        raise ValueError(
-            f'{name!r} has no tenant declared, so it has no state tree — '
-            f'add `tenant: <name>` to its entry in ~/.dax.yaml')
-
-    sync_claude_shared_files(tenant, name, force=True)
-    print(f'  [{name}] CLAUDE.md/settings.json/settings.local.json now match the host.')
 
 
 def run_envs_list(config):
@@ -857,7 +818,7 @@ def run_envs_list(config):
     print()
 
 
-def run_creds_remove(config, name, keyring=None):
+def run_creds_remove(config, name, keyring=None, ignore_users=()):
     """Remove a credential from both Keychain and ~/.dax.yaml.
 
     Used to clear only the Keychain secret, leaving the definition in the
@@ -879,7 +840,7 @@ def run_creds_remove(config, name, keyring=None):
         # would strand the project pointing at it with no error until its next
         # launch. Derived names are exempt — the reference is the *convention*,
         # which survives removal and simply re-mints.
-        referenced = sorted(credential_users(config, name))
+        referenced = sorted(u for u in credential_users(config, name) if u not in ignore_users)
         if referenced:
             raise ValueError(
                 f'{name} is still used by: {", ".join(referenced)}. Detach it first '
