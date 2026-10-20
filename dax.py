@@ -1588,6 +1588,19 @@ def cmd_env(args):
     try:
         config = load_dax_config()
     except FileNotFoundError:
+        config = None
+
+    # --explain works with no ~/.dax.yaml at all, so it's routed before the
+    # missing-config exit below.
+    if getattr(args, 'explain', False):
+        explain_fn = {
+            'archive': _env_archive_explain_text,
+        }.get(args.env_command)
+        if explain_fn:
+            print(explain_fn(config))
+            return
+
+    if config is None:
         dax_print('[!] no ~/.dax.yaml found — run `dax init` first')
         sys.exit(1)
 
@@ -1602,6 +1615,8 @@ def cmd_env(args):
             run_env_accept_shared_files(config, _resolve_env_name(config, args.name))
         elif args.env_command == 'destroy':
             _run_env_destroy(config, args)
+        elif args.env_command == 'archive':
+            _run_env_archive(config, args)
     except (KeyError, ValueError) as e:
         dax_print('[!] {}'.format(e.args[0] if e.args else e))
         sys.exit(1)
@@ -2026,21 +2041,60 @@ def _export_tar_filter(tarinfo):
     return tarinfo
 
 
-def _state_tree_tar_filter(include_credential):
-    """Excludes .credentials.json unless --include-credential was passed.
+def _state_tree_tar_filter(tarinfo):
+    """Never archives `.credentials.json` (decision 29). A stopped env's
+    tree normally has none anyway, since teardown syncs it back to Keychain
+    and deletes it, so a file found here is a crash leftover or a dead
+    credential, which should never travel. backup_dir is also often
+    cloud-synced, where a plaintext refresh token would outlive the archive.
 
     The sibling shared-files manifest (<tenant>/<project>.shared-files.json)
-    needs no explicit exclusion here at all - it lives beside
-    state_tree_path(), never inside it, so it is never part of what gets
-    handed to tar.add() in the first place. Carrying it over would risk a
-    false drift warning on the destination's first `dax run` anyway, since
-    "host" there means a different machine's global CLAUDE.md/settings.json.
+    needs no exclusion: it lives beside state_tree_path(), never inside it.
     """
-    def filt(tarinfo):
-        if not include_credential and Path(tarinfo.name).name == '.credentials.json':
-            return None
-        return tarinfo
-    return filt
+    if Path(tarinfo.name).name == '.credentials.json':
+        return None
+    return tarinfo
+
+
+# Archive manifest member names. Written as ARCHIVE_MANIFEST since the
+# env-lifecycle consolidation (decision 23); every archive made before that
+# carries the legacy name, and those must stay restorable forever, since
+# these files exist for disaster recovery.
+ARCHIVE_MANIFEST = 'dax-env-manifest.json'
+_LEGACY_ARCHIVE_MANIFEST = 'dax-export-manifest.json'
+
+
+def _archive_manifest_member(tar):
+    """The manifest TarInfo in an open archive, new name first, legacy name
+    as fallback, or None if it's not a dax archive at all."""
+    for member_name in (ARCHIVE_MANIFEST, _LEGACY_ARCHIVE_MANIFEST):
+        try:
+            return tar.getmember(member_name)
+        except KeyError:
+            continue
+    return None
+
+
+def _verify_archive(path):
+    """None if `path` reads back as a usable dax archive (a manifest that
+    parses, and a `project/` member), else a one-line reason it doesn't.
+
+    Run between "written" and "remove" (decision 34): removal deletes the
+    only other copy, so an archive that can't be read back must stop it.
+    Uses the same manifest lookup restore does, so "verified" means
+    "restore can read it".
+    """
+    try:
+        with tarfile.open(path) as tar:
+            member = _archive_manifest_member(tar)
+            if member is None:
+                return 'no manifest found'
+            json.loads(tar.extractfile(member).read())
+            if not any(n == 'project' or n.startswith('project/') for n in tar.getnames()):
+                return 'no project/ directory in the archive'
+    except (tarfile.TarError, OSError, EOFError, ValueError) as e:
+        return 'unreadable ({})'.format(e)
+    return None
 
 
 def _extractall_permissive(tar, path):
@@ -2091,7 +2145,7 @@ def _dir_size_excluding(path, skip_dirs):
 
 
 def _default_backup_dir(config=None):
-    """The base directory `dax backup` and `dax process archive`/`restore`
+    """The base directory `dax backup` and `dax env archive`/`restore`
     write into. A top-level `backup_dir:` in ~/.dax.yaml overrides it;
     otherwise this falls back to backup/ under this repo checkout.
 
@@ -2125,15 +2179,16 @@ def _archive_path_for(backup_dir, name, today=None):
     return backup_dir / 'daily' / '{}-{}.tar.gz'.format(name, today)
 
 
-def _write_process_archive(config, name, out_path, include_credential=False):
-    """Build the manifest and tarball for one registered env — the shared
-    core of `process export` and `process archive`. Returns the manifest
-    dict so the caller can print its own summary.
+def _write_env_archive(config, name, out_path):
+    """Build the manifest and tarball for one registered env, the core
+    `dax env archive` writes with for both destinations (dax's managed
+    backups or a specific file). Returns the manifest dict.
 
     Resolves the project/tenant/state-tree lookups itself rather than
-    taking them from the caller, so it stays a single self-contained unit
-    reusable from both commands regardless of whatever richer preview each
-    one prints beforehand.
+    taking them from the caller, so it stays one self-contained unit.
+    Credentials never travel (decision 29): the state tree is filtered, and
+    every other provider's secret was Keychain-only to begin with.
+    substrate/mounts travel as bare path strings, not their contents.
     """
     from dax_creds.config import state_tree_path
 
@@ -2167,113 +2222,30 @@ def _write_process_archive(config, name, out_path, include_credential=False):
 
     out_path = Path(out_path).expanduser().resolve()
     with tempfile.TemporaryDirectory() as tmp:
-        manifest_path = Path(tmp) / 'dax-export-manifest.json'
+        manifest_path = Path(tmp) / ARCHIVE_MANIFEST
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with tarfile.open(out_path, 'w:gz') as tar:
-            tar.add(manifest_path, arcname='dax-export-manifest.json')
+            tar.add(manifest_path, arcname=ARCHIVE_MANIFEST)
             tar.add(process_dir, arcname='project', filter=_export_tar_filter)
             if has_state:
-                tar.add(state_dir, arcname='state',
-                        filter=_state_tree_tar_filter(include_credential))
+                tar.add(state_dir, arcname='state', filter=_state_tree_tar_filter)
 
     return manifest
 
 
-def _run_process_export(config, args):
-    """Package one registered env's project directory and Claude state tree
-    (if any) into a tarball for moving to another machine.
-
-    Deliberately excludes the live Claude credential unless
-    --include-credential is passed. Keychain-issued OAuth grants are per
-    machine by design (see the credential-isolation decisions this whole
-    project is built around) - copying the refresh token to a second
-    machine while the first still exists means one grant authenticating
-    from two places, with no local guard able to catch the collision, since
-    Keychain never leaves the source machine for this to check against.
-    Every *other* credential (github, gmail, auggie, ssh) never lived in
-    either archived directory to begin with - they are Keychain-only, so
-    the destination needs its own login for all of them regardless of this
-    flag, not just the Claude one.
-
-    substrate/mounts travel as the bare path strings from the registry
-    entry, not their contents - the destination machine is expected to
-    already have equivalent paths there, same as it needs its own logins.
-    """
-    from dax_creds.config import state_tree_path
-    from dax_creds.init import _tree_stats, _human_size
-
-    projects = config.get('projects') or {}
-    name = args.name
-    if name not in projects:
-        known = ', '.join(sorted(projects)) or '(none registered)'
-        dax_print('[!] no env named {!r}. Known envs: {}'.format(name, known))
-        sys.exit(1)
-    project = projects[name]
-
-    process_dir = Path(project.get('dir', '')).expanduser().resolve()
-    if not process_dir.is_dir():
-        dax_print('[!] {} does not exist — nothing to export'.format(process_dir))
-        sys.exit(1)
-
-    tenant = project.get('tenant')
-    state_dir = state_tree_path(tenant, name) if tenant else None
-    has_state = bool(state_dir and state_dir.is_dir())
-    has_claude_cred = has_state and (state_dir / '.credentials.json').exists()
-
-    out_path = Path(args.out).expanduser().resolve() if args.out else \
-        Path.cwd() / '{}-dax-export.tar.gz'.format(name)
-
-    dir_size = _dir_size_excluding(process_dir, _EXPORT_SKIP_DIRS)
-    state_size = _tree_stats(state_dir)[0] if has_state else 0
-
-    creds = project.get('creds') or []
-
-    print()
-    print('About to export {}:'.format(name))
-    print('  directory    {}   [{}]'.format(process_dir, _human_size(dir_size)))
-    if has_state:
-        print('  state tree   {}   [{}]'.format(state_dir, _human_size(state_size)))
-        if has_claude_cred:
-            if args.include_credential:
-                print('  credential   included (--include-credential) — the live Claude '
-                      'OAuth grant travels with this archive')
-            else:
-                print('  credential   excluded — `dax creds login` will be needed for it '
-                      'on the destination')
-    else:
-        print('  state tree   (none — claude_tenant_state not in use)')
-    if creds:
-        print('  creds        {}   (Keychain-only — none of these travel; '
-              're-authenticate all of them on the destination)'.format(', '.join(creds)))
-    if project.get('substrate'):
-        print('  substrate    {}   (path only — not its contents)'.format(project['substrate']))
-    if project.get('mounts'):
-        print('  mounts       {}   (paths only — not their contents)'.format(
-            ', '.join(project['mounts'])))
-    print('  output       {}'.format(out_path))
-    print()
-
-    if args.dry_run:
-        dax_print('[-]   dry run — nothing written')
-        return
-
-    _write_process_archive(config, name, out_path, include_credential=args.include_credential)
-    dax_print('[+] exported {} to {}'.format(name, out_path))
-
-
 def _run_process_import(config, args):
-    """Unpack an archive built by `dax process export` and register it as a
+    """Unpack an archive built by `dax env archive` (or the old `export`) and register it as a
     new env on this machine.
 
     Runs the same _check_process_dir guardrails `process new` uses -
     landing an imported project outside $HOME or nested inside/around an
     already-registered project is exactly as bad here as it is there. Never
     pre-populates any credential beyond whatever the archive itself
-    literally carried (nothing, unless the export side used
-    --include-credential) - every provider needs its own fresh login here
-    regardless, since Keychain never travels.
+    literally carried (nothing from current archives; only an old one made
+    with the since-removed --include-credential could) - every provider
+    needs its own fresh login here regardless, since Keychain never travels.
 
     Reads just the manifest out of the tar first (no full extraction) so a
     bad archive or a name collision fails immediately rather than after
@@ -2288,9 +2260,8 @@ def _run_process_import(config, args):
         sys.exit(1)
 
     with tarfile.open(archive) as tar:
-        try:
-            manifest_member = tar.getmember('dax-export-manifest.json')
-        except KeyError:
+        manifest_member = _archive_manifest_member(tar)
+        if manifest_member is None:
             dax_print('[!] {} is not a dax export archive (no manifest found)'.format(archive))
             sys.exit(1)
         manifest = json.loads(tar.extractfile(manifest_member).read())
@@ -2425,7 +2396,7 @@ def _derived_creds_for(project, name):
 def _teardown_process(config, name, project):
     """Delete one registered process's directory, Claude state tree (plus
     its sibling shared-files manifest), and any per-env derived credential —
-    the shared core of `env destroy` and `process archive --remove`.
+    the shared core of `env destroy` and `env archive`'s removal.
 
     Deliberately does not touch config['projects'] or call save_config: the
     caller owns the registry edit and when to save, since destroy saves
@@ -2483,7 +2454,7 @@ def _print_table(headers, rows):
 
 def _print_teardown_table(rows):
     """rows: [(name, directory_cell, state_tree_cell, credential_cell), ...].
-    Shared by `env destroy` and `process archive --remove`, which tear
+    Shared by `env destroy` and `env archive`'s removal, which tear
     down the same four things."""
     _print_table(('name', 'directory', 'state tree', 'credential'), rows)
 
@@ -2591,57 +2562,35 @@ def _run_env_destroy(config, args):
         dax_print('[+] destroyed {}'.format(name))
 
 
-def _run_process_archive(config, args):
-    """Snapshot one or more registered processes into
-    backup_dir/daily/<name>-<date>.tar.gz — the BCP/DR backup mechanism
-    itself, not a tidiness convenience (see
-    docs/design/2026-08-22-process-archive-restore.md). Archiving is always
-    non-destructive; `--remove` additionally tears each env down afterward,
-    but only once every archive in the batch has already succeeded, and
-    only after one combined confirmation covering the whole batch.
+def _archive_envs(config, names, remove=False, out_path=None):
+    """Archive `names` and, if `remove`, tear them down afterwards. The
+    non-interactive core of `dax env archive`; the wizard
+    (`_run_env_archive`) only gathers these arguments.
 
-    Output is a single status line per target under one header, rather
-    than a separate "about to..." preview followed by a repeated "archived
-    X to Y" line — with backup_dir a shared prefix across every target,
-    printing the full destination path twice per target was mostly noise;
-    now it prints once, in the header.
+    `out_path` set: exactly one env, written to that file, never removed
+    (the old `export`). Unset: each env goes to dax's managed
+    backup_dir/daily/<name>-<date>.tar.gz (the old `archive`), the BCP/DR
+    mechanism itself (see docs/design/2026-08-22-process-archive-restore.md).
+
+    Removal only ever happens after every archive in the batch was written
+    *and read back* successfully (decision 34), then one combined
+    confirmation. A missing directory skips that one target rather than
+    aborting the batch, since "back up everything" must not be taken down by
+    one stale registry entry.
     """
     from dax_creds.config import state_tree_path
     from dax_creds.init import (
-        _q_checkbox, _q_confirm, _container_name_for, _is_container_running,
+        _q_confirm, _container_name_for, _is_container_running,
         _tree_stats, _human_size, _human_age, _home_relative, save_config,
     )
-    import questionary
 
     projects = config.get('projects') or {}
-
-    if args.all:
-        names = sorted(projects)
-        if not names:
-            dax_print('[!] no registered envs to archive')
-            return
-    else:
-        names = list(args.name or [])
-        if not names:
-            if not projects:
-                dax_print('[!] no registered envs to archive')
-                return
-            choices = []
-            for pname, project in sorted(projects.items()):
-                tenant = project.get('tenant')
-                label = '{}   [{}{}]'.format(
-                    pname, project.get('dir', '?'),
-                    ', tenant {}'.format(tenant) if tenant else ', no tenant')
-                choices.append(questionary.Choice(label, value=pname))
-            names = _q_checkbox('Select processes to archive (nothing pre-checked):', choices)
-            if not names:
-                dax_print('[-]   nothing selected')
-                return
-
     unknown = [n for n in names if n not in projects]
     if unknown:
         dax_print('[!] not registered: {}'.format(', '.join(unknown)))
         sys.exit(1)
+    if out_path is not None and (len(names) != 1 or remove):
+        raise ValueError('a specific-file archive is one env, never removed')
 
     def _dir_for(name):
         return Path(projects[name].get('dir', '')).expanduser()
@@ -2649,24 +2598,13 @@ def _run_process_archive(config, args):
     def _has_dir(name):
         return _dir_for(name).is_dir()
 
-    # A stale/moved directory must skip that one target, not abort the
-    # whole batch — this is the BCP mechanism ("back up everything on the
-    # machine in one call"), so one bad registry entry can't be allowed to
-    # take every other env's backup down with it. Checked up front (not
-    # deep inside _write_process_archive, which used to hard sys.exit(1)
-    # and take the whole batch with it) so --dry-run reports the same
-    # outcome the real run would have.
     if not any(_has_dir(n) for n in names):
         dax_print('[!] nothing left to archive — every selected env is missing its directory')
         return
 
-    # Same batch-atomicity guard as `destroy`: checked for every candidate
-    # with a directory before any archive is written, so a bad --remove
-    # target doesn't get discovered only after the rest of the batch
-    # already succeeded. A target already missing its directory skips on
-    # its own below regardless, so it's excluded here rather than treated
-    # as "running".
-    if args.remove:
+    # Checked for every candidate before any archive is written, so a bad
+    # removal target isn't discovered only after the rest of the batch.
+    if remove:
         for name in names:
             if not _has_dir(name):
                 continue
@@ -2678,39 +2616,45 @@ def _run_process_archive(config, args):
 
     backup_dir = _default_backup_dir(config)
     today = datetime.date.today().isoformat()
-    daily_dir = backup_dir / 'daily'
-    out_paths = {name: _archive_path_for(backup_dir, name, today=today) for name in names}
+    if out_path is not None:
+        out_paths = {names[0]: Path(out_path).expanduser().resolve()}
+        header = 'Archiving {} to {}:'.format(names[0], out_paths[names[0]])
+    else:
+        out_paths = {name: _archive_path_for(backup_dir, name, today=today) for name in names}
+        header = 'Archiving {} env(s) to {} ({}):'.format(len(names), backup_dir / 'daily', today)
 
     name_width = max(len(n) for n in names)
-
     print()
-    print('Archiving {} process(es) to {} ({}):'.format(len(names), daily_dir, today))
+    print(header)
+    written = []
     for name in names:
         padded = name.ljust(name_width)
         if not _has_dir(name):
             dax_print('  [!] {}   directory not found ({}), skipping'.format(
                 padded, _dir_for(name)))
             continue
-        if not args.dry_run:
-            _write_process_archive(config, name, out_paths[name],
-                                   include_credential=args.include_credential)
+        _write_env_archive(config, name, out_paths[name])
+        written.append(name)
         dax_print('  [+] {}   {}'.format(padded, _dir_for(name)))
 
-    available = [n for n in names if _has_dir(n)]
+    if not remove:
+        return
 
-    if not args.remove:
-        if args.dry_run:
-            print()
-            dax_print('[-]   dry run — nothing written')
+    failed = [(n, _verify_archive(out_paths[n])) for n in written]
+    failed = [(n, why) for n, why in failed if why]
+    if failed:
+        print()
+        for name, why in failed:
+            dax_print('[!] {}: archive {} did not read back: {}'.format(
+                name, out_paths[name], why))
+        dax_print('[-]   nothing removed — every archive must verify before any env is removed')
         return
 
     rows = []
-    for name in available:
+    for name in written:
         project = projects[name]
-        dir_path = _dir_for(name)
         tenant = project.get('tenant')
-
-        dir_cell = _home_relative(dir_path)
+        dir_cell = _home_relative(_dir_for(name))
         if tenant:
             state = state_tree_path(tenant, name)
             if state.exists():
@@ -2723,30 +2667,117 @@ def _run_process_archive(config, args):
             state_cell = '(no tenant declared)'
         derived = _derived_creds_for(project, name)
         cred_cell = ', '.join(derived) if derived else '(none derived)'
-
         rows.append((name, dir_cell, state_cell, cred_cell))
 
     print()
-    if args.dry_run:
-        print('Would then remove (after every archive above succeeds), pending one '
-              'combined confirmation:')
-        _print_teardown_table(rows)
-        dax_print('[-]   dry run — nothing written')
-        return
-
-    print('All archives above succeeded — already backed up. About to remove:')
+    print('All archives above were written and read back — already backed up. About to remove:')
     _print_teardown_table(rows)
 
-    if not _q_confirm('Remove {} archived process(es) now?'.format(len(available)), default=False):
+    try:
+        confirmed = _q_confirm('Remove {} archived env(s) now?'.format(len(written)),
+                               default=False)
+    except KeyboardInterrupt:
+        confirmed = False
+    if not confirmed:
         dax_print('[-]   archived only — nothing removed')
         return
 
-    for name in available:
+    for name in written:
         _teardown_process(config, name, projects[name])
         del config['projects'][name]
     save_config(config)
-    for name in available:
+    for name in written:
         dax_print('[+] removed {}'.format(name))
+
+
+# Sentinel for the picker's "every registered env" row. A plain object
+# rather than a string, so it can never collide with a real env name.
+_ARCHIVE_ALL = object()
+
+
+def _run_env_archive(config, args):
+    """`dax env archive [name ...]`: a wizard over `_archive_envs`.
+
+    Merges the old `process archive` and `process export` (decision 3).
+    Their flags (--all, --remove, --include-credential, --dry-run) became
+    prompts or were removed (decisions 6, 29, 30). Flow: env(s), named or
+    picked (with an "every env" row) → for a single env, dax's managed
+    backups or a specific file → for managed, also remove afterwards? →
+    summary → confirm.
+    """
+    from dax_creds.init import _q_checkbox, _q_confirm, _q_select, _q_path
+    import questionary
+
+    projects = config.get('projects') or {}
+    if not projects:
+        dax_print('[!] no registered envs to archive')
+        return
+
+    try:
+        names = list(args.name or [])
+        if not names:
+            choices = [questionary.Choice('(every registered env)', value=_ARCHIVE_ALL)]
+            for pname, project in sorted(projects.items()):
+                tenant = project.get('tenant')
+                label = '{}   [{}{}]'.format(
+                    pname, project.get('dir', '?'),
+                    ', tenant {}'.format(tenant) if tenant else ', no tenant')
+                choices.append(questionary.Choice(label, value=pname))
+            picked = _q_checkbox('Select envs to archive (nothing pre-checked):', choices)
+            if not picked:
+                dax_print('[-]   nothing selected')
+                return
+            names = sorted(projects) if any(p is _ARCHIVE_ALL for p in picked) else picked
+
+        unknown = [n for n in names if n not in projects]
+        if unknown:
+            dax_print('[!] not registered: {}'.format(', '.join(unknown)))
+            sys.exit(1)
+
+        backup_dir = _default_backup_dir(config)
+        out_path = None
+        if len(names) == 1:
+            where = _q_select(
+                'Where should the archive go?',
+                [questionary.Choice("dax's managed backups ({})".format(backup_dir / 'daily'),
+                                    value='managed'),
+                 questionary.Choice('A specific file', value='file')])
+            if where == 'file':
+                filename = '{}-{}.tar.gz'.format(names[0], datetime.date.today().isoformat())
+                out_path = _q_path('Archive file:', default=str(Path.cwd() / filename))
+                # Tab completion makes "a directory, then Enter" an easy
+                # answer; put the archive inside it rather than crash trying
+                # to open a directory as a file.
+                if Path(out_path).expanduser().is_dir() or out_path.endswith(os.sep):
+                    out_path = str(Path(out_path).expanduser() / filename)
+                if Path(out_path).expanduser().exists() and not _q_confirm(
+                        '{} already exists — overwrite it?'.format(out_path), default=False):
+                    dax_print('[-]   cancelled — nothing archived')
+                    return
+
+        remove = False
+        if out_path is None:
+            remove = _q_confirm(
+                'Also remove {} after {} archive is written and verified?'.format(
+                    'it' if len(names) == 1 else 'them',
+                    'its' if len(names) == 1 else 'each one\'s'),
+                default=False)
+
+        print()
+        print('About to archive: {}'.format(', '.join(names)))
+        print('  to       {}'.format(out_path or (backup_dir / 'daily')))
+        print('  then     {}'.format(
+            'remove each one (asks again before removing)' if remove else 'nothing else'))
+        print()
+        if not _q_confirm('Proceed?', default=True):
+            dax_print('[-]   cancelled — nothing archived')
+            return
+    except KeyboardInterrupt:
+        print()
+        dax_print('[-]   cancelled — nothing archived')
+        return
+
+    _archive_envs(config, names, remove=remove, out_path=out_path)
 
 
 _ARCHIVE_FILENAME_RE = re.compile(r'^(?P<name>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.tar\.gz$')
@@ -2773,9 +2804,8 @@ def _available_archives(backup_dir):
 
 def _read_archive_manifest(archive):
     with tarfile.open(archive) as tar:
-        try:
-            member = tar.getmember('dax-export-manifest.json')
-        except KeyError:
+        member = _archive_manifest_member(tar)
+        if member is None:
             dax_print('[!] {} is not a dax archive (no manifest found)'.format(archive))
             sys.exit(1)
         return json.loads(tar.extractfile(member).read())
@@ -3205,7 +3235,7 @@ def _run_process_restore_interactive(config, available, args):
 
 
 def _run_process_restore(config, args):
-    """Restore one or more processes from `dax process archive`'s backups —
+    """Restore one or more processes from `dax env archive`'s backups —
     the recovery half of the BCP/DR mechanism (see
     docs/design/2026-08-22-process-archive-restore.md).
 
@@ -3250,7 +3280,7 @@ def _run_process_restore(config, args):
     _run_process_restore_interactive(config, available, args)
 
 
-def _process_archive_explain_text(config):
+def _env_archive_explain_text(config):
     """`config` is None when ~/.dax.yaml doesn't exist — --explain must work
     with zero setup, same contract as `dax backup --explain`."""
     have_config = config is not None
@@ -3266,69 +3296,57 @@ def _process_archive_explain_text(config):
         "registered to archive yet.\n")
 
     return f"""\
-dax process archive
+dax env archive
 {config_note}
-The BCP/DR backup mechanism: a point-in-time, dated snapshot of one or more
-registered dax envs ("processes") — their directory, Claude state tree, and
-registry metadata — not an ongoing dotfile mirror. In most cases this
-replaces GitHub as the real backup store for a process, since it captures
-the Claude session state and registry entry GitHub never would.
+The BCP/DR backup mechanism: a point-in-time snapshot of one or more
+registered dax envs (their directory, Claude state tree, and registry
+metadata), not an ongoing dotfile mirror. In most cases this replaces
+GitHub as the real backup store for an env, since it captures the Claude
+session state and registry entry GitHub never would.
     currently: {registered} env(s) registered in ~/.dax.yaml
 
 If you're looking to back up dotfiles/config instead (.zshrc, .gitconfig,
 CLAUDE.md, ...), you want `dax backup` instead — run `dax backup --explain`
 to see what that does.
 
-What one archive run captures per env, into
-backup_dir/daily/<name>-<date>.tar.gz:
-  - The env's own directory (dir: in ~/.dax.yaml), tarred whole.
-  - Its Claude state tree, if it has one (transcripts, auto-memory,
-    .credentials.json's *absence* is normal — see below).
+What one archive captures per env:
+  - The env's own directory (dir: in ~/.dax.yaml), tarred whole, minus
+    rebuildable junk directories.
+  - Its Claude state tree, if it has one (transcripts, auto-memory).
   - A manifest: name, dir, tenant, image, creds, features, mounts,
-    substrate, and whether a state tree existed — everything `restore`
-    needs to recreate the registry entry later, since the env itself is
-    deleted (if --remove) or may simply be gone by the time you restore.
+    substrate, and whether a state tree existed — everything a restore
+    needs to recreate the registry entry later.
 
-What it deliberately leaves out, by default:
-  - The live Claude OAuth credential. Writing a secret into a plain file on
-    disk is exactly what Keychain-backed credentials exist to avoid; pass
-    --include-credential to include it anyway if you specifically need a
-    fully self-contained snapshot (e.g. moving to a machine with no
-    Keychain access to re-derive it).
+What it never captures: credentials. The Claude credential
+(.credentials.json) is always left out of the state tree, and every other
+credential lives only in Keychain. A restored env logs in fresh.
 
-Selecting targets:
-  - Name one or more envs on the command line, pass --all for every
-    registered env, or omit both for an interactive checkbox picker over
-    everything registered (nothing pre-checked).
-  - One target with a missing/moved directory is skipped, reported, and
-    does not abort the rest of the batch — this command's whole point is
-    "back up everything in one call," so one stale registry entry can't
-    take the others down with it.
+How it runs — a short wizard, no flags:
+  1. Which env(s): named on the command line, or picked from a checkbox
+     list (nothing pre-checked; the first row selects every env). One env
+     with a missing directory is skipped and reported, never fatal to the
+     rest of the batch.
+  2. Where (for a single env): dax's managed backups,
+     backup_dir/daily/<name>-<date>.tar.gz, or a specific file you name.
+     Several envs always go to the managed backups.
+  3. For the managed backups: whether to also remove the env(s) afterwards.
+     Removal happens only once every archive in the batch has been written
+     *and read back* successfully, and asks once more, for the whole
+     batch, before deleting each env's directory, state tree, derived
+     credential, and ~/.dax.yaml entry. Refused up front if any target's
+     container is running.
+  4. A summary, then a confirm. Declining changes nothing.
 
-Archiving alone (no --remove) is always non-destructive: nothing is
-deleted, nothing is stopped, the registry is untouched. Run it as often as
-you like.
+Archiving alone is always non-destructive: nothing deleted, nothing
+stopped, the registry untouched. Run it as often as you like.
 
---remove additionally tears each env down, but only after every archive in
-the batch has already succeeded, and only after one combined confirmation
-covering the whole batch: deletes the env's directory, its Claude state
-tree, any derived credential, and its ~/.dax.yaml entry. Refuses up front
-if any target's container is currently running (stop it first) — checked
-for every candidate before anything is torn down, so a bad target is
-caught before the rest of the batch is affected.
-
---dry-run previews exactly what --remove alone would print — what gets
-archived, and what would then be removed — without writing or deleting
-anything.
-
-Where it writes: backup_dir/daily/, the same backup_dir: ~/.dax.yaml
-setting `dax backup` uses (defaults to backup/ inside this repo checkout,
-survives a container rebuild; point it at real off-site/BCP media if
-that's what you need).
+Where it writes: backup_dir/daily/, the same backup_dir: setting
+`dax backup` uses (defaults to backup/ inside this repo checkout; point it
+at real off-site/BCP media if that's what you need).
     backup_dir: currently {configured_backup_dir}
     resolves right now to: {resolved_backup_dir}
 
-The recovery half is `dax process restore` — see
+The recovery half is restore — see
 docs/design/2026-08-22-process-archive-restore.md for the full design.
 """
 
@@ -3341,26 +3359,14 @@ def cmd_process(args):
     except FileNotFoundError:
         config = None
 
-    if getattr(args, 'explain', False):
-        explain_fn = {
-            'archive': _process_archive_explain_text,
-        }.get(args.process_command)
-        if explain_fn:
-            print(explain_fn(config))
-            return
-
     if config is None:
         dax_print('[!] no ~/.dax.yaml found — run `dax init` first')
         sys.exit(1)
 
     if args.process_command == 'new':
         _run_process_new(config, args)
-    elif args.process_command == 'export':
-        _run_process_export(config, args)
     elif args.process_command == 'import':
         _run_process_import(config, args)
-    elif args.process_command == 'archive':
-        _run_process_archive(config, args)
     elif args.process_command == 'restore':
         _run_process_restore(config, args)
 
@@ -3486,8 +3492,8 @@ def _backup_explain_text(config):
 dax backup
 {config_note}
 If you're looking to back up a working process (a registered dax env's own
-directory and state), you want `dax process archive` instead — run
-`dax process archive --explain` to see what that does. This command only
+directory and state), you want `dax env archive` instead — run
+`dax env archive --explain` to see what that does. This command only
 copies dotfiles/config, described below.
 
 Copies a fixed list of host files into backup/ inside this repo checkout
@@ -3520,8 +3526,8 @@ Where it writes, and why that's safe:
     copied here, including dotfiles that may carry secrets, can ever be
     `git add`ed or pushed, regardless of what lands in it.
       resolves right now to: {resolved_backup_dir}
-  - A `backup_dir:` override in ~/.dax.yaml points this — and `dax process
-    archive`/`restore`, which share the same base directory — somewhere
+  - A `backup_dir:` override in ~/.dax.yaml points this — and `dax env
+    archive` and restore, which share the same base directory — somewhere
     else entirely: real off-site/BCP media. That trades away the
     survives-a-rebuild guarantee on purpose. Your call, never assumed.
       currently: {configured_backup_dir}
@@ -3531,7 +3537,7 @@ aren't reported then, a failure there is a warning and never blocks the
 container launch) — running `dax backup` by hand just does the same pass
 and shows every file's status, including the unchanged ones.
 
-Not the same thing as `dax process archive`/`restore`: this is an ongoing,
+Not the same thing as `dax env archive` and restore: this is an ongoing,
 incremental dotfile mirror; archive/restore is the deliberate, dated,
 point-in-time snapshot-and-restore mechanism for an entire process
 directory, meant to replace GitHub as the backup store for BCP/DR.
@@ -3612,6 +3618,17 @@ def main():
         'name', nargs='*',
         help='Env name(s) to destroy (omit for an interactive picker over every registered env)')
 
+    env_archive_p = env_sub.add_parser(
+        'archive',
+        help="Snapshot one or more envs to dax's managed backups, or one env to a "
+             'specific file (a short wizard; run with --explain for details)')
+    env_archive_p.add_argument(
+        'name', nargs='*',
+        help='Env name(s) to archive (omit for an interactive picker)')
+    env_archive_p.add_argument(
+        '--explain', action='store_true',
+        help='Describe what archive captures and where it writes, then exit')
+
     env_accept_p = env_sub.add_parser(
         'accept-shared-files',
         help="Force-adopt the host's CLAUDE.md/settings.json/settings.local.json "
@@ -3653,25 +3670,9 @@ def main():
         help='Resolve every field and print the full-path summary, then exit '
              'without creating or registering anything')
 
-    process_export_p = process_sub.add_parser(
-        'export',
-        help='Package a registered process/env (project dir + Claude state tree) '
-             'into a tarball for moving to another machine')
-    process_export_p.add_argument('name', help='Env name to export')
-    process_export_p.add_argument(
-        '--out', help='Output path (default: <name>-dax-export.tar.gz in the cwd)')
-    process_export_p.add_argument(
-        '--include-credential', action='store_true',
-        help='Include the live Claude OAuth credential from the state tree. '
-             'Off by default — Keychain grants are per machine by design; only pass '
-             'this if you are retiring the source machine, not adding a second one')
-    process_export_p.add_argument(
-        '--dry-run', action='store_true',
-        help='Print the summary of what would be exported, then exit without writing anything')
-
     process_import_p = process_sub.add_parser(
         'import',
-        help='Unpack a `dax process export` archive and register it as a new env here')
+        help='Unpack a `dax env archive` specific-file archive and register it as a new env here')
     process_import_p.add_argument('archive', help='Path to the exported .tar.gz')
     process_import_p.add_argument('--dir', required=True, help='Destination directory on this host')
     process_import_p.add_argument('--name', help='Env name to register (default: the exported name)')
@@ -3680,30 +3681,6 @@ def main():
     process_import_p.add_argument(
         '--dry-run', action='store_true',
         help='Print the summary of what would be imported, then exit without changing anything')
-
-    process_archive_p = process_sub.add_parser(
-        'archive',
-        help='Snapshot one or more processes into a permanent backup — the BCP/DR '
-             'mechanism (see docs/design/2026-08-22-process-archive-restore.md)')
-    process_archive_p.add_argument(
-        'name', nargs='*',
-        help='Env name(s) to archive (omit for an interactive picker over every registered env)')
-    process_archive_p.add_argument(
-        '--all', action='store_true', help='Archive every registered env, no picker')
-    process_archive_p.add_argument(
-        '--remove', action='store_true',
-        help='Also remove each env after every archive in the batch succeeds '
-             '(default: snapshot only, non-destructive)')
-    process_archive_p.add_argument(
-        '--include-credential', action='store_true',
-        help='Include the live Claude OAuth credential in each state tree snapshot')
-    process_archive_p.add_argument(
-        '--dry-run', action='store_true',
-        help='Print what would be archived (and removed, if --remove), then exit '
-             'without writing anything')
-    process_archive_p.add_argument(
-        '--explain', action='store_true',
-        help='print what this command does, then exit (reads nothing, writes nothing)')
 
     process_restore_p = process_sub.add_parser(
         'restore',

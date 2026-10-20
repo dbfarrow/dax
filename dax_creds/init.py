@@ -113,6 +113,17 @@ def _q_confirm(prompt, default=False):
     return result
 
 
+def _q_path(prompt, default=None):
+    """A path prompt with tab completion; ~ is expanded in the result."""
+    import questionary
+    _flush_stdin()
+    result = questionary.path(prompt, default=default or '').ask()
+    if result is None:
+        raise KeyboardInterrupt
+    result = result.strip() or default
+    return os.path.expanduser(result) if result else result
+
+
 def _q_checkbox(prompt, choices):
     import questionary
     _flush_stdin()

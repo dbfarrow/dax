@@ -24,7 +24,7 @@ import tarfile
 
 from dax import (
     _RESTORE_CANCEL, _extractall_permissive, _relocate_claude_project_key,
-    _run_process_archive, _run_process_restore,
+    _archive_envs, _run_process_restore,
 )
 from dax_creds.config import load_dax_config, state_tree_path
 
@@ -66,8 +66,7 @@ def _archive(home, backup_dir, name, **register_kwargs):
     whatever restore scenario it's testing)."""
     process_dir, config = _register(home, name, **register_kwargs)
     config['backup_dir'] = str(backup_dir)
-    _run_process_archive(config, argparse.Namespace(
-        name=[name], all=False, remove=False, include_credential=False, dry_run=False))
+    _archive_envs(config, [name])
     return process_dir
 
 
@@ -99,6 +98,45 @@ def test_restore_unregistered_name_lands_at_the_archived_dir(home, tmp_path):
 
     assert (process_dir / 'f.txt').read_text() == 'original'
     assert load_dax_config()['projects']['demo']['dir'] == str(process_dir)
+
+
+def _relabel_manifest_as_legacy(archive):
+    """Rewrite an archive so its manifest carries the pre-consolidation
+    name, dax-export-manifest.json, exactly as every archive made before
+    decision 23 does."""
+    import io
+    rebuilt = archive.with_suffix('.rebuilt')
+    with tarfile.open(archive) as src, tarfile.open(rebuilt, 'w:gz') as dst:
+        for member in src.getmembers():
+            data = src.extractfile(member) if member.isfile() else None
+            if member.name == 'dax-env-manifest.json':
+                payload = data.read()
+                member.name = 'dax-export-manifest.json'
+                data = io.BytesIO(payload)
+            dst.addfile(member, data)
+    rebuilt.replace(archive)
+
+
+def test_restore_reads_an_archive_with_the_legacy_manifest_name(home, tmp_path):
+    """Decision 23: every archive already in backup_dir/daily/ predates the
+    rename. They exist for disaster recovery, so they must stay restorable."""
+    backup_dir = tmp_path / 'backup'
+    process_dir = _archive(home, backup_dir, 'demo')
+    archive = next((backup_dir / 'daily').glob('demo-*.tar.gz'))
+    _relabel_manifest_as_legacy(archive)
+    with tarfile.open(archive) as tar:
+        assert 'dax-export-manifest.json' in tar.getnames()
+        assert 'dax-env-manifest.json' not in tar.getnames()
+    _deregister('demo')
+    import shutil
+    shutil.rmtree(process_dir)
+
+    config = load_dax_config()
+    config['backup_dir'] = str(backup_dir)
+    _run_process_restore(config, _args(['demo']))
+
+    assert (process_dir / 'f.txt').read_text() == 'original'
+    assert 'demo' in load_dax_config()['projects']
 
 
 def test_dry_run_unregistered_writes_nothing(home, tmp_path):
@@ -499,8 +537,7 @@ def test_move_restore_end_to_end_rekeys_the_project_session_directory(
 
     backup_dir = tmp_path / 'backup'
     config['backup_dir'] = str(backup_dir)
-    _run_process_archive(config, argparse.Namespace(
-        name=['fabric'], all=False, remove=False, include_credential=False, dry_run=False))
+    _archive_envs(config, ['fabric'])
 
     picks = iter(['fabric', 'move'])
     monkeypatch.setattr('dax_creds.init._q_select', lambda *a, **k: next(picks))
