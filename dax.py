@@ -1045,9 +1045,6 @@ def cmd_run(args):
         # names are dropped.
         config['features'] = _merge_features(config['features'], project.get('features'))
 
-        config['multi_tenant'] = bool(project.get('multi_tenant'))
-        config['tenant_subdir'] = project.get('tenant_subdir', '')
-
         # feature_mounts reads this the same way feature_claude
         # reads config['tenant'] above — project entries aren't otherwise
         # promoted into the flat config feature functions see.
@@ -1624,17 +1621,6 @@ def cmd_creds(args):
             sys.exit(1)
 
 
-def cmd_envs(args):
-    from dax_creds.config import load_dax_config
-    from dax_creds.init import run_envs_list
-    try:
-        config = load_dax_config()
-    except FileNotFoundError:
-        _exit_missing_config()
-    if args.envs_command == 'list':
-        run_envs_list(config)
-
-
 def _resolve_env_name(config, explicit):
     """The name given on the command line, or the env that contains cwd.
 
@@ -1663,7 +1649,7 @@ def _resolve_env_name(config, explicit):
 
 def cmd_env(args):
     from dax_creds.config import load_dax_config
-    from dax_creds.init import run_env_show
+    from dax_creds.init import run_env_list, run_env_show
 
     try:
         config = load_dax_config()
@@ -1689,7 +1675,9 @@ def cmd_env(args):
     # inspection but wrong for `destroy`, whose no-argument form is a picker
     # over every env and is normally run from somewhere that isn't one.
     try:
-        if args.env_command == 'show':
+        if args.env_command == 'list':
+            run_env_list(config)
+        elif args.env_command == 'show':
             run_env_show(config, _resolve_env_name(config, args.name))
         elif args.env_command == 'destroy':
             _run_env_destroy(config, args)
@@ -1707,30 +1695,17 @@ def cmd_features(args):
 
 
 def _known_tenant_names():
-    """Every tenant name declared anywhere across every registered project on
-    this host - the pick-list for the classification prompt below."""
+    """Every tenant any registered env declares in its `tenant:` field: the
+    pick-list `_prompt_tenant` offers, so one tenant isn't split into two by
+    a typo ('Ysecurity' vs 'ysecurity')."""
     from dax_creds.config import load_dax_config
-    from dax_creds.tenant import all_tenant_projects
 
     try:
         dax_config = load_dax_config()
     except FileNotFoundError:
         return set()
-
-    # Every env's own `tenant:` field (what the bootstrap wizard writes),
-    # plus whatever legacy `.dax-tenant` files still say until step 8 of the
-    # env-lifecycle consolidation retires them.
-    names = {p.get('tenant') for p in (dax_config.get('projects') or {}).values()
-             if (p or {}).get('tenant')}
-    for project_cfg in dax_config.get('projects', {}).values():
-        proj_dir = Path(project_cfg.get('dir', '')).expanduser()
-        if not proj_dir.is_dir():
-            continue
-        multi_tenant = bool(project_cfg.get('multi_tenant'))
-        tenant_subdir = project_cfg.get('tenant_subdir', '')
-        for tenant, _ in all_tenant_projects(proj_dir, multi_tenant, tenant_subdir):
-            names.add(tenant)
-    return names
+    return {p.get('tenant') for p in (dax_config.get('projects') or {}).values()
+            if (p or {}).get('tenant')}
 
 
 _NEW_TENANT_CHOICE = '(new tenant)'
@@ -1777,133 +1752,6 @@ def _prompt_tenant(subdir, known_tenants, default=None, _select=None, _text=None
         if result.strip():
             return result.strip()
         dax_print('[!] a tenant is required')
-
-
-def _ensure_tenants_classified(config, reclassify_all=False):
-    """Interactively fill in (or, with reclassify_all, revise) tenant
-    assignments for a claude_tenant_state project: the repo root, and every
-    immediate child under tenant_subdir if multi-tenant.
-
-    Runs at `dax run` time (Gate A), before mounts are computed - which is
-    what makes doing this interactively safe here: nothing needs Docker to
-    add a mount to an already-running container after the fact. A brand-new
-    subdirectory discovered *mid-session* still just hard-refuses
-    (dax_creds/tenant.py's resolve_tenant) - this function only ever runs
-    before a container exists at all.
-
-    reclassify_all=False (the automatic dax-run-time check): silently skips
-    anything already declared - zero friction on routine use.
-    reclassify_all=True (`dax tenant classify`): prompts for everything,
-    defaulting to the current value, so pressing Enter keeps it and typing
-    something new changes it.
-    """
-    from dax_creds.tenant import _read_tenant_label, TENANT_FILE, _NOT_A_PROJECT_SUBDIR
-
-    repo_root = Path(config['cwd'])
-    multi_tenant = bool(config.get('multi_tenant'))
-    tenant_subdir = config.get('tenant_subdir', '')
-    known = _known_tenant_names()
-
-    def _classify(subdir):
-        current = _read_tenant_label(subdir / TENANT_FILE)
-        if current and not reclassify_all:
-            return
-        tenant = _prompt_tenant(subdir, known, default=current)
-        (subdir / TENANT_FILE).write_text(tenant)
-        known.add(tenant)
-
-    _classify(repo_root)
-
-    if multi_tenant:
-        tenant_base = (repo_root / tenant_subdir) if tenant_subdir else repo_root
-        if tenant_base.is_dir():
-            for child in sorted(tenant_base.iterdir()):
-                if not child.is_dir() or child.name in _NOT_A_PROJECT_SUBDIR:
-                    continue
-                _classify(child)
-
-
-def cmd_tenant(args):
-    if args.tenant_command == 'set':
-        subdir = Path(args.subdir)
-        if not subdir.is_dir():
-            dax_print("[!] {} is not a directory".format(subdir))
-            sys.exit(1)
-        (subdir / '.dax-tenant').write_text(args.tenant)
-        dax_print("[+] {}/.dax-tenant set to '{}'".format(subdir, args.tenant))
-    elif args.tenant_command == 'classify':
-        from dax_creds.config import load_dax_config, find_project_by_dir
-        dax_config = load_dax_config()
-        try:
-            project = find_project_by_dir(dax_config, Path.cwd())
-        except KeyError:
-            dax_print("[!] {} is not a registered dax project - run `dax run` there "
-                      "first".format(Path.cwd()))
-            sys.exit(1)
-        config = {
-            'cwd': str(Path.cwd()),
-            'multi_tenant': bool(project.get('multi_tenant')),
-            'tenant_subdir': project.get('tenant_subdir', ''),
-        }
-        _ensure_tenants_classified(config, reclassify_all=True)
-
-
-def cmd_tenants(args):
-    # Registry- and declaration-driven, not state-tree-driven: this re-derives
-    # the live (tenant, project) set from ~/.dax.yaml's projects plus whatever
-    # .dax-tenant files actually say right now, the same way dax run would -
-    # so every declared tenant shows up immediately, not only ones that have
-    # had a session, and a stale/renamed declaration can never show something
-    # that no longer resolves that way.
-    from dax_creds.config import load_dax_config, dir_basename
-    from dax_creds.tenant import all_tenant_projects
-
-    try:
-        dax_config = load_dax_config()
-    except FileNotFoundError:
-        dax_print("[-] no ~/.dax.yaml found")
-        return
-
-    state_root = Path(os.path.expanduser('~/.local/state/dax/tenants'))
-    rows = []  # (tenant, project, session, path) - matches display column order
-
-    for project_cfg in dax_config.get('projects', {}).values():
-        proj_dir = Path(project_cfg.get('dir', '')).expanduser()
-        if not proj_dir.is_dir():
-            continue
-        multi_tenant = bool(project_cfg.get('multi_tenant'))
-        tenant_subdir = project_cfg.get('tenant_subdir', '')
-        tenant_base = (proj_dir / tenant_subdir) if (multi_tenant and tenant_subdir) else proj_dir
-        reponame = dir_basename(proj_dir)
-
-        for tenant, project in all_tenant_projects(proj_dir, multi_tenant, tenant_subdir):
-            # project == reponame identifies the repo root's own entry (both
-            # single-tenant and, since 2026-07-28, a multi-tenant repo's own
-            # root project) - everything else is a labeled child under
-            # tenant_base.
-            path = proj_dir if project == reponame else (tenant_base / project)
-            state_dir = state_root / tenant / project
-            used = (state_dir / '.claude.json').exists() or (state_dir / '.credentials.json').exists()
-            rows.append((tenant, project, 'yes' if used else 'no', str(path)))
-
-    if not rows:
-        dax_print("[-] no projects resolve to a tenant yet")
-        return
-
-    rows.sort(key=lambda r: (r[0], r[1]))
-
-    headers = ('TENANT', 'PROJECT', 'SESSION', 'PATH')
-    widths = [max(len(headers[i]), max(len(r[i]) for r in rows)) for i in range(4)]
-    fmt = '  '.join('{{:<{}}}'.format(w) for w in widths)
-    print()
-    print(fmt.format(*headers))
-    previous_tenant = None
-    for row in rows:
-        if previous_tenant is not None and row[0] != previous_tenant:
-            print()
-        print(fmt.format(*row))
-        previous_tenant = row[0]
-    print()
 
 
 def _read_process_types(substrate_root):
@@ -2438,7 +2286,7 @@ def _teardown_process(config, name, project):
 def _print_table(headers, rows):
     """Generic aligned-table printer: header row, dashed separator,
     per-column width computed from headers+data, left-justified cells.
-    Same convention `dax envs list` (`run_envs_list`) already established.
+    Same convention `dax env list` (`run_env_list`) already established.
     Standing preference (2026-08-30): any CLI output listing multiple
     records that each carry the same set of fields renders this way, not
     as repeated per-record "label   value" paragraphs — scanning N records'
@@ -3535,16 +3383,15 @@ def main():
     login_p = creds_sub.add_parser('login', help='Authenticate a credential via its first-party auth flow')
     login_p.add_argument('name', help='Credential name to authenticate')
 
-    envs_p = subparsers.add_parser('envs', help='Manage environments')
-    envs_sub = envs_p.add_subparsers(dest='envs_command', required=True)
-    envs_sub.add_parser('list', help='List registered environments')
-
-    # Singular `env` acts on one environment, plural `envs` lists them — the
-    # same split the existing `tenant`/`tenants` pair uses.
+    # One noun, every verb: `dax env list` lists envs and the rest act on one
+    # or more of them, the same shape as `dax creds` (decision 18).
     env_p = subparsers.add_parser(
         'env', help='Inspect or remove environments',
         description='Edit an env by hand-editing its entry in ~/.dax.yaml.')
     env_sub = env_p.add_subparsers(dest='env_command', required=True)
+
+    env_sub.add_parser('list', help='List registered environments, and Claude state '
+                                    'trees no env claims')
 
     env_show_p = env_sub.add_parser('show', help="Show one env's configuration")
     env_show_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
@@ -3581,18 +3428,6 @@ def main():
         help='Describe how restore works and what it never does, then exit')
 
 
-    tenant_p = subparsers.add_parser('tenant', help='Manage tenant declarations')
-    tenant_sub = tenant_p.add_subparsers(dest='tenant_command', required=True)
-    tenant_set_p = tenant_sub.add_parser('set', help='Declare the tenant for a subdirectory')
-    tenant_set_p.add_argument('subdir', help='Directory to declare (writes its .dax-tenant file)')
-    tenant_set_p.add_argument('tenant', help='Tenant name to declare')
-    tenant_sub.add_parser(
-        'classify',
-        help='Walk through every subdirectory needing a tenant (run from the project root); '
-             're-prompts even already-declared ones, defaulting to the current value')
-
-    subparsers.add_parser('tenants', help='List known tenants and their projects')
-
     args = parser.parse_args()
 
     if args.command == 'build':
@@ -3605,14 +3440,8 @@ def main():
         cmd_backup(args)
     elif args.command == 'creds':
         cmd_creds(args)
-    elif args.command == 'envs':
-        cmd_envs(args)
     elif args.command == 'env':
         cmd_env(args)
-    elif args.command == 'tenant':
-        cmd_tenant(args)
-    elif args.command == 'tenants':
-        cmd_tenants(args)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-"""Tests for the merged `dax envs list`.
+"""Tests for the merged `dax env list`.
 
 It outer-joins ~/.dax.yaml's projects against a walk of
 ~/.local/state/dax/tenants/, because an env can be orphaned from either
@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from dax_creds.init import _human_age, run_envs_list
+from dax_creds.init import _human_age, run_env_list
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def _config(home, **overrides):
 
 
 def test_tenant_column_comes_from_the_registry(home, capsys):
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     out = capsys.readouterr().out
     assert 'tenant' in out and 'personal' in out
@@ -53,13 +53,13 @@ def test_tenant_column_comes_from_the_registry(home, capsys):
 def test_state_size_shown_when_the_tree_exists(home, capsys):
     _tree(home, 'personal', 'fabric', size=2048)
 
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     assert '2K' in capsys.readouterr().out
 
 
 def test_missing_tree_shows_a_dash_not_an_orphan(home, capsys):
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     out = capsys.readouterr().out
     assert '[?]' not in out
@@ -68,7 +68,7 @@ def test_missing_tree_shows_a_dash_not_an_orphan(home, capsys):
 def test_matched_tree_is_claimed_and_not_listed_twice(home, capsys):
     _tree(home, 'personal', 'fabric')
 
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     out = capsys.readouterr().out
     assert len(_rows(out)) == 1
@@ -78,7 +78,7 @@ def test_matched_tree_is_claimed_and_not_listed_twice(home, capsys):
 def test_orphaned_tree_is_surfaced(home, capsys):
     _tree(home, 'ysecurity', 'acme-process')
 
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     out = capsys.readouterr().out
     assert 'acme-process' in out
@@ -90,7 +90,7 @@ def test_env_without_a_tenant_cannot_claim_a_tree(home, capsys):
     """No declared tenant means no path to look under, so the tree is unattributed."""
     _tree(home, 'personal', 'fabric')
 
-    run_envs_list(_config(home))  # no tenant
+    run_env_list(_config(home))  # no tenant
 
     rows = _rows(capsys.readouterr().out)
     assert len(rows) == 2  # the registry row, plus the tree it could not claim
@@ -101,20 +101,20 @@ def test_orphans_are_listed_even_when_the_registry_is_empty(home, capsys):
     """Deregistering everything is exactly when every tree becomes an orphan."""
     _tree(home, 'personal', 'gone')
 
-    run_envs_list({'projects': {}})
+    run_env_list({'projects': {}})
 
     out = capsys.readouterr().out
     assert 'gone' in out and '[?]' in out
 
 
 def test_reports_nothing_at_all_when_there_is_nothing(home, capsys):
-    run_envs_list({'projects': {}})
+    run_env_list({'projects': {}})
 
     assert 'No environments registered' in capsys.readouterr().out
 
 
 def test_legend_only_lists_markers_actually_present(home, capsys):
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     out = capsys.readouterr().out
     assert 'orphaned state tree' not in out
@@ -126,7 +126,7 @@ def test_legend_only_lists_markers_actually_present(home, capsys):
 def test_recently_touched_tree_reads_as_fresh(home, capsys):
     _tree(home, 'personal', 'fabric')
 
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     out = capsys.readouterr().out
     assert 'used' in out
@@ -138,7 +138,7 @@ def test_old_tree_reports_its_age(home, capsys):
     old = time.time() - 30 * 86400
     os.utime(tree / '.claude.json', (old, old))
 
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     assert '4w' in capsys.readouterr().out
 
@@ -151,14 +151,14 @@ def test_age_uses_newest_file_not_the_directory(home, capsys):
     os.utime(tree / '.claude.json', (old, old))
     (tree / 'recent.jsonl').write_text('x')
 
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     row = [l for l in _rows(capsys.readouterr().out) if 'mixed' in l][0]
     assert row.rstrip().endswith('now'), row
 
 
 def test_env_without_a_tree_shows_no_age(home, capsys):
-    run_envs_list(_config(home, tenant='personal'))
+    run_env_list(_config(home, tenant='personal'))
 
     row = [l for l in _rows(capsys.readouterr().out) if 'fabric' in l][0]
     assert row.rstrip().endswith('-')
@@ -182,7 +182,46 @@ def test_human_age_of_never_used_tree():
 
 
 def test_missing_project_directory_is_flagged(home, capsys):
-    run_envs_list(_config(home, dir=str(home / 'src' / 'vanished')))
+    run_env_list(_config(home, dir=str(home / 'src' / 'vanished')))
 
     out = capsys.readouterr().out
     assert '[!]' in out and 'directory missing' in out
+
+
+# --- the CLI surface after step 8 -------------------------------------------
+
+def _cli(home, *argv, module=False):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, HOME=str(home), PYTHONPATH=str(repo))
+    cmd = ([sys.executable, '-m', 'dax_creds.cli'] if module
+           else [sys.executable, str(repo / 'dax.py')])
+    return subprocess.run(cmd + list(argv), capture_output=True, text=True, env=env, cwd=str(home))
+
+
+def test_env_list_runs_through_cmd_env(home, monkeypatch, capsys):
+    import argparse
+    import dax
+    (home / '.dax.yaml').write_text(
+        'projects:\n  fabric: {dir: %s, tenant: personal}\n' % (home / 'src' / 'fabric'))
+    monkeypatch.chdir(home)  # not an env: list must work from anywhere
+
+    dax.cmd_env(argparse.Namespace(env_command='list', explain=False))
+
+    assert 'fabric' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('argv', [('envs', 'list'), ('tenant', 'set', 'x', 'y'), ('tenants',)])
+def test_envs_tenant_and_tenants_are_gone(home, argv):
+    result = _cli(home, *argv)
+    assert result.returncode == 2
+    assert "invalid choice: '{}'".format(argv[0]) in result.stderr
+
+
+def test_dax_creds_resolve_tenant_is_gone(home):
+    result = _cli(home, 'resolve-tenant', module=True)
+    assert result.returncode == 1
+    assert "unknown subcommand 'resolve-tenant'" in result.stderr

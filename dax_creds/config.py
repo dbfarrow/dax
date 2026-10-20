@@ -194,9 +194,9 @@ def legacy_claude_entries(config):
     return found
 
 
-# Retired multi-tenant keys: outside ENV_FIELDS so they're still flagged, but
-# described as retired rather than "ignored", because the multi-tenant code
-# that reads them survives until the env-lifecycle consolidation's step 8.
+# Retired multi-tenant keys (the model was abandoned 2026-07-29 and its code
+# deleted in the env-lifecycle consolidation's step 8). Outside ENV_FIELDS,
+# and named separately in the warning so they don't read as typos.
 RETIRED_ENV_KEYS = ('multi_tenant', 'tenant_subdir')
 
 
@@ -209,7 +209,7 @@ def describe_unknown_env_keys(keys):
     if other:
         parts.append('unknown key(s) {} — ignored (typo?)'.format(', '.join(other)))
     if retired:
-        parts.append('retired key(s) {} — remove them'.format(', '.join(retired)))
+        parts.append('retired key(s) {} — ignored; remove them'.format(', '.join(retired)))
     return '; '.join(parts)
 
 
@@ -315,8 +315,8 @@ def find_enclosing_project(config, cwd):
 
     Distinct from `find_project_by_dir`'s exact-match lookup: this catches
     the case where `dax run` is invoked from *inside* an already-registered
-    project (e.g. a multi-tenant repo's tenant_subdir child) rather than
-    from its root. Returns `(name, project)` or `None`.
+    project (any subdirectory of it) rather than from its root. Returns
+    `(name, project)` or `None`.
     """
     cwd = Path(cwd)
     for name, project in config.get('projects', {}).items():

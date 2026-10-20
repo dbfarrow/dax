@@ -441,7 +441,7 @@ def _cli(home, *argv):
 
 
 @pytest.mark.parametrize('argv', [
-    ('-t', 'run'), ('env', 'restore'), ('envs', 'list'), ('creds', 'list'), ('backup',),
+    ('-t', 'run'), ('env', 'restore'), ('env', 'list'), ('creds', 'list'), ('backup',),
 ])
 def test_a_missing_config_exits_with_instructions_and_writes_nothing(tmp_path, argv):
     home = tmp_path / 'empty-home'

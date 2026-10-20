@@ -746,7 +746,7 @@ def run_env_show(config, name):
     print()
 
 
-def run_envs_list(config):
+def run_env_list(config):
     # No early return on an empty registry: deregistering every project is
     # precisely when every state tree becomes an orphan, and bailing here would
     # hide them all.

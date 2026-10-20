@@ -77,8 +77,7 @@ def test_show_flags_retired_multi_tenant_fields_as_retired(home, capsys):
     run_env_show(load_dax_config(), 'legacy')
 
     out = capsys.readouterr().out
-    assert 'retired key(s) multi_tenant, tenant_subdir' in out
-    assert 'ignored' not in out  # still read until the multi-tenant code goes
+    assert 'retired key(s) multi_tenant, tenant_subdir — ignored; remove them' in out
 
 
 def test_show_flags_a_typo_d_key(home, capsys):
@@ -256,9 +255,10 @@ def test_show_does_not_flag_substrate_when_the_feature_is_active(home, capsys):
 #
 def test_describe_unknown_env_keys_separates_typos_from_retired_keys():
     assert describe_unknown_env_keys(['tennant']) == 'unknown key(s) tennant — ignored (typo?)'
-    assert describe_unknown_env_keys(['multi_tenant']) == 'retired key(s) multi_tenant — remove them'
+    assert describe_unknown_env_keys(['multi_tenant']) == (
+        'retired key(s) multi_tenant — ignored; remove them')
     assert describe_unknown_env_keys(['tennant', 'tenant_subdir']) == (
-        'unknown key(s) tennant — ignored (typo?); retired key(s) tenant_subdir — remove them')
+        'unknown key(s) tennant — ignored (typo?); retired key(s) tenant_subdir — ignored; remove them')
 
 
 def test_show_notes_old_claude_entries(home, capsys):

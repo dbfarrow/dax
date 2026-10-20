@@ -75,7 +75,7 @@ def test_the_launch_still_proceeds(tmp_path, monkeypatch, capsys):
     assert 'docker' in out  # test_only prints the assembled docker command
 
 
-def test_retired_multi_tenant_keys_are_called_retired_not_ignored(tmp_path, monkeypatch, capsys):
+def test_retired_multi_tenant_keys_are_named_as_retired(tmp_path, monkeypatch, capsys):
     _setup(tmp_path, monkeypatch, extra_projects={
         'old': {'dir': str(tmp_path / 'old'), 'multi_tenant': True},
     })
@@ -83,4 +83,4 @@ def test_retired_multi_tenant_keys_are_called_retired_not_ignored(tmp_path, monk
     cmd_run(_args())
 
     out = capsys.readouterr().out
-    assert "env 'old' has retired key(s) multi_tenant — remove them" in out
+    assert "env 'old' has retired key(s) multi_tenant — ignored; remove them" in out
