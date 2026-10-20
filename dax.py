@@ -1938,6 +1938,9 @@ def _bootstrap_env(config, env_dir):
 
     try:
         print()
+        print('This env will be named {!r}, after its folder. To name it something else,'.format(name))
+        print('Ctrl-C now, rename the folder, and run `dax run` again.')
+        print()
         image = _q_text('Image:', default=config.get('defaults', {}).get('image', 'dax-base'))
 
         tenant = _prompt_tenant(env_dir, _known_tenant_names())
@@ -2682,12 +2685,11 @@ def _run_env_archive(config, args):
                     'its' if len(names) == 1 else 'each one\'s'),
                 default=False)
 
-        print()
-        print('About to archive: {}'.format(', '.join(names)))
-        print('  to       {}'.format(out_path or (backup_dir / 'daily')))
-        print('  then     {}'.format(
-            'remove each one (asks again before removing)' if remove else 'nothing else'))
-        print()
+        _print_table(('field', 'value'), [
+            ('archive', ', '.join(names)),
+            ('to', str(out_path or (backup_dir / 'daily'))),
+            ('then', 'remove each one (asks again before removing)' if remove else 'nothing else'),
+        ])
         if not _q_confirm('Proceed?', default=True):
             dax_print('[-]   cancelled — nothing archived')
             return

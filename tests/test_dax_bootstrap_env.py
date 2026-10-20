@@ -128,6 +128,29 @@ def test_coding_project_registers_the_folder(home, monkeypatch):
     assert entry['dir'] == str(env_dir)
 
 
+def test_the_wizard_opens_by_naming_the_env_after_its_folder(home, monkeypatch, capsys):
+    env_dir = _env_dir(home, 'my-proj')
+    Script(monkeypatch, select=['coding'], confirm=[True])
+
+    _bootstrap_env(load_dax_config(), env_dir)
+
+    out = capsys.readouterr().out
+    assert "This env will be named 'my-proj', after its folder." in out
+    assert out.index("named 'my-proj'") < out.index('field')  # before the summary
+
+
+def test_the_summary_is_a_table(home, monkeypatch, capsys):
+    env_dir = _env_dir(home)
+    Script(monkeypatch, select=['coding'], confirm=[True])
+
+    _bootstrap_env(load_dax_config(), env_dir)
+
+    lines = capsys.readouterr().out.splitlines()
+    header = next(i for i, l in enumerate(lines) if l.startswith('field'))
+    assert set(lines[header + 1].replace(' ', '')) == {'-'}
+    assert any(l.startswith('tenant') and 'acme' in l for l in lines[header:])
+
+
 def test_only_existing_non_claude_credentials_are_offered(home, monkeypatch):
     env_dir = _env_dir(home)
     script = Script(monkeypatch, select=['coding'], confirm=[True], checkbox=['github-me'])

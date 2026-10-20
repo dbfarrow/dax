@@ -282,6 +282,7 @@ def test_flush_stdin_calls_termios_tcflush_when_available(monkeypatch):
     ('_q_select', 'select', 'picked'),
     ('_q_confirm', 'confirm', True),
     ('_q_checkbox', 'checkbox', ['a']),
+    ('_q_path', 'path', '/some/where'),
 ])
 def test_prompt_wrappers_flush_stdin_before_asking(monkeypatch, wrapper, method, value):
     """Each interactive prompt wrapper must flush stdin before it asks —

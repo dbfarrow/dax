@@ -327,6 +327,20 @@ def test_wizard_single_env_to_managed_backups(home, tmp_path, monkeypatch):
     assert process_dir.is_dir()
 
 
+def test_wizard_summary_is_a_table(home, tmp_path, monkeypatch, capsys):
+    _, config = _register(home, 'demo')
+    _with_backup_dir(config, tmp_path)
+    _script(monkeypatch, confirms=[False, True], select='managed')
+
+    _run_env_archive(config, _args(['demo']))
+
+    lines = capsys.readouterr().out.splitlines()
+    header = next(i for i, l in enumerate(lines) if l.startswith('field'))
+    assert set(lines[header + 1].replace(' ', '')) == {'-'}
+    assert any(l.startswith('archive') and 'demo' in l for l in lines[header:])
+    assert any(l.startswith('then') and 'nothing else' in l for l in lines[header:])
+
+
 def test_wizard_single_env_to_a_specific_file(home, tmp_path, monkeypatch):
     _, config = _register(home, 'demo')
     backup_dir = _with_backup_dir(config, tmp_path)

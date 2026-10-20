@@ -98,7 +98,13 @@ def _q_select(prompt, choices, default=None):
 def _q_confirm(prompt, default=False):
     import questionary
     _flush_stdin()
-    result = questionary.confirm(prompt, default=default).ask()
+    # questionary's own default (auto_enter=True) commits a y/n answer on the
+    # keypress alone, with no Enter and no moment to reconsider, so a single
+    # stray or too-fast keypress could advance a multi-step wizard with no
+    # recovery (found live, 2026-10). Waiting for Enter complements the
+    # stdin flush above: the flush discards keys typed *before* the prompt,
+    # this stops one typed *at* it from committing on its own.
+    result = questionary.confirm(prompt, default=default, auto_enter=False).ask()
     if result is None:
         raise KeyboardInterrupt
     return result
