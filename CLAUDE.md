@@ -452,9 +452,45 @@ the shared mount, which is the intended fallback.
       folder.
     - Archive's summary is now a `_print_table`, like restore's and
       bootstrap's.
-    - Awaiting the runbook's step 5 manual checks before step 7. (The
-      double-Enter check was dropped from the runbook as not hand-testable;
-      unit tests cover it.)
+    - Manual checks passed; committed as `82c9543`. (The double-Enter
+      check was dropped from the runbook as not hand-testable; unit tests
+      cover it.)
+  - **Step 7 built 2026-10-20, suite 737 (from 716):**
+    - Claude is a baseline feature. `feature_claude_tenant_state` became
+      `feature_claude` in `_ALWAYS_ON_FEATURES`; the old shared-mount
+      `feature_claude`, the mutual-exclusion check and `claudedir` are gone.
+    - The implied `claude-<tenant>-<env>` credential is resolved centrally
+      in `resolve_credential_names(project, name, config)`, which now
+      raises when an env has no tenant. Every caller sees it: login,
+      destroy, `creds list`, grant collision and `env show`.
+    - `cmd_run` reports an undefined credential by name rather than failing
+      later with a misleading "needs a tenant".
+    - `_merge_features` drops `claude`/`claude_tenant_state` from every
+      feature source and de-duplicates.
+    - `legacy_claude_entries` drives the `dax run` warning and an
+      `env show` note. `dax creds add` no longer edits `creds:`.
+    - `sync_claude_shared_files` is now copy-once.
+      `accept-shared-files` is gone; teardown still deletes the old sidecar
+      manifest.
+    - Claude logins use a 0700 folder under `~/.local/state/dax/login/`,
+      swept after an hour and removed in a `finally`.
+    - Teardown sync refuses and clears a tree grant that collides with
+      another name.
+    - Restore drops Claude entries from archives and asks for a tenant when
+      an archive has none. The bootstrap wizard writes neither entry.
+    - New test-wide fixture `_implied_claude_credential_is_logged_in`
+      (opt out with `@pytest.mark.real_claude_login`).
+    - The high-effort `/code-review` found ten issues, all fixed:
+      - `-t` and keyring-less runs never log in;
+      - the tree path uses the registry name (`config['env_name']`);
+      - an empty seeded file is re-seeded (delete a tree copy to refresh it);
+      - an unregistered `claude-...` name counts as Claude;
+      - a tenantless env's explicit creds still count as in use;
+      - the login folder is made before the daemon and cleaned on its
+        failure;
+      - the meaningless "key on disk" fallback is gone;
+      - plus dead code and stale text.
+    - Awaiting the runbook's step 7 manual checks before step 8.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.

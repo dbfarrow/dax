@@ -12,8 +12,11 @@ container, which can't reach the macOS **Keychain**, **Docker**, the real
 `backup_dir`, or Finder's `.DS_Store`. Every one of those is touched by this
 branch. The suite proves the logic; this proves the wiring.
 
-**Where things run.** Every command below is a **host** (macOS) command
-unless marked *container*.
+**Where things run.** Every command below is a **host** (macOS) command,
+run in a plain terminal, not inside a dax container. A container has no
+Keychain and no Docker, and it sees your files at different paths.
+Keychain checks use `python3 -c "import keyring; ..."`, the same library and
+service name dax uses.
 
 **Your `dax` is the branch.** The host's `dax` is an editable install of
 the repo at **`~/fatsec/dax`** (that's the host path; `/home/dfarrow/dax`
@@ -348,16 +351,17 @@ ls -A ~/.local/state/dax/login/                 # still empty
 | `dax creds list` | has a `claude-dxt-dxt-f` row |
 | `cd ~/test/dxt-f && dax run`, then `claude` | starts logged in (the wrapper injected the new grant from Keychain) |
 | an existing real env's tree, e.g. `ls -l ~/.local/state/dax/tenants/personal/fabric/CLAUDE.md` | mtime unchanged by any of this |
-| `dax features` | `claude` marked always-on alongside `workdir`/`dotfiles`/`webpreview`; no `claude_tenant_state`; `auto_claude` still listed |
+| `dax features` | `claude` marked `(always on)` alongside `workdir`/`dotfiles`/`webpreview`; no `claude_tenant_state`; `auto_claude` still listed |
+| `dax -t run` in `~/test/dxt-f` | prints the docker command with the state-tree mount; never opens a browser or asks to log in |
 | `cd ~/test/dxt-b && dax run` (`dxt-b` still lists `claude_tenant_state` and `creds: [claude]`) | a warning listing every env with old Claude entries: `dxt-b`; `dxt-b2`, `dxt-d` and `dxt-e`, which were written before step 7; and all 14 of your real envs (`discernment`'s old `claude` included) until you clean them up. Claude applied once (no duplicate-mount error) |
 | remove those two lines from `dxt-b`, `dax run` again | `dxt-b` no longer in the warning (the real envs still are); still starts with Claude logged in |
-| edit `dxt-a` to remove its `tenant:`, `dax run` there | refused with a clear "needs a tenant" message, not an unknown-credential error; put it back |
+| edit `dxt-a` to remove its `tenant:`, `dax run` there | refused before launch with "env 'dxt-a' has no tenant…" and how to add one; put it back |
 
 **Destroy removes the implied credential from Keychain:**
 
 ```bash
 cd ~ && dax env destroy dxt-f                                  # type DESTROY
-security find-generic-password -s dax-creds -a claude-dxt-dxt-f   # must say "could not be found"
+python3 -c "import keyring; print(keyring.get_password('dax-creds', 'claude-dxt-dxt-f'))"   # must print None
 ```
 
 ---
@@ -433,7 +437,10 @@ dax env destroy <each dxt-* name>               # dirs, trees, derived creds, re
 rm -rf ~/.local/state/dax/tenants/dxt            # safety net for any orphaned tree
 ls -A ~/.local/state/dax/login/                  # must be empty
 for n in $(dax creds list | awk '/dxt/{print $1}'); do echo "left: $n"; done   # no output
-security dump-keychain 2>/dev/null | grep -c '"claude-dxt-'                         # 0: no dxt Keychain entries left
+for n in claude-dxt-dxt-a claude-dxt-dxt-b claude-dxt-dxt-b2 claude-dxt-dxt-c claude-dxt-dxt-d \
+         claude-dxt-dxt-f claude-personal-dxt-e claude-personal-dxt-old; do
+  python3 -c "import keyring,sys; v=keyring.get_password('dax-creds', sys.argv[1]); v and print('left:', sys.argv[1])" $n
+done                                                                                   # no output: no dxt Keychain entries left
 #    edit ~/.dax.yaml: restore backup_dir to the real value from setup
 diff ~/.dax.yaml ~/.dax.yaml.bak                 # no output: config back to its pre-test state
 rm -rf ~/test/dax-test-backups ~/test/tmp-x ~/test/dxt-full ~/test/dxt-a2 ~/test/dxt-g   # folders never registered
