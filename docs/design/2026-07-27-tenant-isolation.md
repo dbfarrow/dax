@@ -21,6 +21,18 @@ mount) and the multi-day refresh-token rotation soak.
 **Motivation:** hygiene today; anticipated contractual obligation later; existing
 obligation to delete customer data when a relationship ends
 
+> **Historical record only, from here to the "Redesign 2026-07-29" heading.**
+> The Problem, Verified findings, and decisions 1–12 below describe the
+> original multi-tenant design. Its code (`dax_creds/tenant.py`, `dax tenant`
+> / `dax tenants`, `.dax-tenant` files, `dax-creds resolve-tenant`, the
+> `multi_tenant`/`tenant_subdir` keys) was deleted in the env-lifecycle
+> consolidation's step 8 (2026-10-20; see
+> `docs/design/2026-10-18-env-bootstrap-consolidation.md`, decisions 19 and
+> 24). Kept for the reasoning, not as a description of current code. The
+> "Redesign 2026-07-29" section onward still describes the live
+> architecture, with `claude_tenant_state` since renamed to the always-on
+> `claude` feature (decision 35 there).
+
 ## Problem
 
 `~/.dax.yaml` sets `workdir.container: work`, so every project — whatever its host

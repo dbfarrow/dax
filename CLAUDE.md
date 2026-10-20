@@ -490,7 +490,21 @@ the shared mount, which is the intended fallback.
         failure;
       - the meaningless "key on disk" fallback is gone;
       - plus dead code and stale text.
-    - Awaiting the runbook's step 7 manual checks before step 8.
+    - Manual checks passed; committed as `22c7cf1`.
+  - **Step 8 built 2026-10-20, suite 675 (from 737; 76 multi-tenant tests
+    deleted):**
+    - `dax env list` replaces `dax envs list` (`run_envs_list` is now
+      `run_env_list`).
+    - Deleted: `dax tenant`/`dax tenants` (`cmd_tenant`, `cmd_tenants`,
+      `_ensure_tenants_classified`), `dax_creds/tenant.py`,
+      `dax-creds resolve-tenant`, and `cmd_run`'s
+      `multi_tenant`/`tenant_subdir` promotion.
+    - `_known_tenant_names` reads only the registry's `tenant:` fields. Its
+      tests and `_prompt_tenant`'s moved to `tests/test_dax_prompt_tenant.py`.
+    - Retired keys are now reported as "ignored; remove them".
+    - The tenant-isolation doc's pre-redesign half is marked historical
+      (decision 24).
+    - Awaiting the runbook's step 8 manual checks before step 8b.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.
