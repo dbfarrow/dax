@@ -95,10 +95,11 @@ def _q_text(prompt, default=None):
     return result.strip() or default
 
 
-def _q_select(prompt, choices):
+def _q_select(prompt, choices, default=None):
+    """`default` pre-highlights the choice with that value."""
     import questionary
     _flush_stdin()
-    result = questionary.select(prompt, choices=choices).ask()
+    result = questionary.select(prompt, choices=choices, default=default).ask()
     if result is None:
         raise KeyboardInterrupt
     return result

@@ -9,7 +9,7 @@ style tests/test_dax_tenant_cmds.py already uses for `_prompt_tenant` rather
 than mocking questionary internals directly.
 
 Every process directory used below lives under the fake $HOME
-(`home / 'proc'`, never a bare `tmp_path / 'proc'`): `_check_process_dir`
+(`home / 'proc'`, never a bare `tmp_path / 'proc'`): `_check_bootstrap_dir`
 refuses anything outside $HOME, the same way `dax run` would refuse to
 launch it later.
 """
