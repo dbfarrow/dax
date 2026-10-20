@@ -24,8 +24,11 @@ go sideways: `cd ~/fatsec/dax && git stash -u && git checkout master` gets maste
 work (`git checkout feature/env-lifecycle-consolidation && git stash pop`
 resumes).
 
-**Scratch envs only.** Everything here uses envs named `dxt-*`, so cleanup
-can find them by name. Real envs are only touched at the very end (a plain
+**Scratch envs only.** Everything here uses envs named `dxt-*`, in folders
+under `~/test/` (e.g. `~/test/dxt-a`), so cleanup can find them by name.
+Inside the container each one still mounts at `/home/dfarrow/<name>`:
+dax mounts by folder name only, so the parent folder doesn't matter, and
+the container paths in the checks below are unaffected. Real envs are only touched at the very end (a plain
 restart of `fabric`).
 
 **Answer `n` to login prompts unless the check needs Claude.** Each real
@@ -56,13 +59,13 @@ cp ~/.dax.yaml ~/.dax.yaml.bak
 
 # 3. Point backup_dir at a scratch folder so no test archive reaches OneDrive.
 grep -n '^backup_dir:' ~/.dax.yaml      # note the real value
-mkdir -p ~/dax-test-backups
-#    edit ~/.dax.yaml: backup_dir: /Users/dfarrow/dax-test-backups
+mkdir -p ~/test/dax-test-backups
+#    edit ~/.dax.yaml: backup_dir: /Users/dfarrow/test/dax-test-backups
 
 # 4. Baselines to compare against later.
 ls -l ~/.claude/.credentials.json  2>/dev/null   # note mtime (or "absent")
-dax creds list > ~/dax-test-backups/creds-before.txt
-dax envs list  > ~/dax-test-backups/envs-before.txt   # step 8 compares against this
+dax creds list > ~/test/dax-test-backups/creds-before.txt
+dax envs list  > ~/test/dax-test-backups/envs-before.txt   # step 8 compares against this
 docker info > /dev/null && echo docker-ok
 ```
 
@@ -85,7 +88,7 @@ still goes through the old `dax init` wizard; that's expected here.
 
 ```bash
 # dxt-a: no credentials. Used for most checks; mints no grants.
-mkdir ~/dxt-a && cd ~/dxt-a && echo hello > notes.txt
+mkdir ~/test/dxt-a && cd ~/test/dxt-a && echo hello > notes.txt
 dax run        # wizard: default image, tenant "dxt", select NO credentials
                 # inside the container: exit
 
@@ -94,7 +97,7 @@ dax run        # wizard: default image, tenant "dxt", select NO credentials
 # Don't pick claude in the old wizard: its inline credential loop imports
 # whatever token sits in the host's ~/.claude (the path decision 32
 # removes). Register with no creds, then add one so dax run's own login runs.
-mkdir ~/dxt-b && cd ~/dxt-b
+mkdir ~/test/dxt-b && cd ~/test/dxt-b
 dax run        # wizard: default image, tenant "dxt", select NO credentials; exit
                 # edit ~/.dax.yaml: under dxt-b, CHANGE the existing
                 #     creds: []            →  creds: [claude]
@@ -129,7 +132,7 @@ dax process --help        # process still exists until step 4; destroy must be g
 | `process --help` | no `destroy` |
 
 **Unknown-key warning:** edit `~/.dax.yaml`, add `bogus: 1` under
-`dxt-a`. Then `cd ~/dxt-b && dax run` (a *different* env), then `exit`.
+`dxt-a`. Then `cd ~/test/dxt-b && dax run` (a *different* env), then `exit`.
 
 | Check | Pass |
 |---|---|
@@ -139,7 +142,7 @@ dax process --help        # process still exists until step 4; destroy must be g
 **Destroy:** make a throwaway third env, then destroy it.
 
 ```bash
-mkdir ~/dxt-c && cd ~/dxt-c && dax run    # no creds, tenant dxt; exit
+mkdir ~/test/dxt-c && cd ~/test/dxt-c && dax run    # no creds, tenant dxt; exit
                                            # edit ~/.dax.yaml: under dxt-c add
                                            #     features: [claude_tenant_state]
 dax run                                    # creates its state tree (no login: no creds); exit
@@ -150,7 +153,7 @@ dax env destroy dxt-c --dry-run           # flag no longer exists
 
 | Check | Pass |
 |---|---|
-| destroy from `~` | shows the picker (doesn't exit for "not in an env"); asks for typed `DESTROY`; afterwards `~/dxt-c` and `~/.local/state/dax/tenants/dxt/dxt-c` are gone, and `dxt-c` isn't in `~/.dax.yaml` |
+| destroy from `~` | shows the picker (doesn't exit for "not in an env"); asks for typed `DESTROY`; afterwards `~/test/dxt-c` and `~/.local/state/dax/tenants/dxt/dxt-c` are gone, and `dxt-c` isn't in `~/.dax.yaml` |
 | `--dry-run` | argparse error (unrecognized argument) |
 | while a `dxt-a` container is running (in another terminal), `dax env destroy dxt-a` | refuses with "stop it first"; type nothing |
 
@@ -160,9 +163,9 @@ dax env destroy dxt-c --dry-run           # flag no longer exists
 
 ```bash
 cd ~ && dax env archive        # pick dxt-a and dxt-b; managed; do NOT remove
-ls ~/dax-test-backups/daily/
-tar -tzf ~/dax-test-backups/daily/dxt-b-*.tar.gz | grep -E 'manifest|credentials'
-dax env archive                # pick dxt-a; specific file: ~/dax-test-backups/one-off.tar.gz
+ls ~/test/dax-test-backups/daily/
+tar -tzf ~/test/dax-test-backups/daily/dxt-b-*.tar.gz | grep -E 'manifest|credentials'
+dax env archive                # pick dxt-a; specific file: ~/test/dax-test-backups/one-off.tar.gz
 dax env archive --explain | head -20
 dax backup --explain | head -5
 ```
@@ -171,7 +174,7 @@ dax backup --explain | head -5
 |---|---|
 | `daily/` listing | `dxt-a-<today>.tar.gz` and `dxt-b-<today>.tar.gz` |
 | `tar` grep | exactly `dax-env-manifest.json`; **no** `.credentials.json` line |
-| specific-file archive | `~/dax-test-backups/one-off.tar.gz` exists; no removal was offered |
+| specific-file archive | `~/test/dax-test-backups/one-off.tar.gz` exists; no removal was offered |
 | `archive --explain` | describes the new prompts; no mention of include-credential, `--dry-run` or `dax process` |
 | `backup --explain` | its redirect points at `dax env archive` |
 | no prompt anywhere | asks whether to include a credential |
@@ -179,7 +182,7 @@ dax backup --explain | head -5
 **Verify-before-remove (decision 34):**
 
 ```bash
-mkdir ~/dxt-c && cd ~/dxt-c && dax run         # throwaway again; exit
+mkdir ~/test/dxt-c && cd ~/test/dxt-c && dax run         # throwaway again; exit
 cd ~ && dax env archive                        # pick dxt-c; managed; remove = yes
 ```
 
@@ -205,27 +208,27 @@ cd ~ && dax env restore --explain | head -20
 **Refusals first, all with nothing touched:**
 
 ```bash
-mkdir ~/dxt-full && echo x > ~/dxt-full/f && cd ~/dxt-full && dax env restore   # non-empty
-cd ~/dxt-a && dax env restore                                                 # registered
-mkdir ~/dxt-a2 && cd ~/dxt-a2 && touch .DS_Store && dax env restore dxt-a     # .DS_Store only → allowed; Ctrl-C at confirm
+mkdir ~/test/dxt-full && echo x > ~/test/dxt-full/f && cd ~/test/dxt-full && dax env restore   # non-empty
+cd ~/test/dxt-a && dax env restore                                                 # registered
+mkdir ~/test/dxt-a2 && cd ~/test/dxt-a2 && touch .DS_Store && dax env restore dxt-a     # .DS_Store only → allowed; Ctrl-C at confirm
 ```
 
 | Check | Pass |
 |---|---|
-| `~/dxt-full` | refused, says not empty; `~/.dax.yaml` unchanged (`diff ~/.dax.yaml ~/.dax.yaml.bak` shows only your scratch edits) |
-| `~/dxt-a` | refused (as registered or as not empty, whichever is checked first); nothing touched |
-| `~/dxt-a2` with only `.DS_Store` | reaches the summary (not refused); Ctrl-C at the confirm leaves nothing registered |
+| `~/test/dxt-full` | refused, says not empty; `~/.dax.yaml` unchanged (`diff ~/.dax.yaml ~/.dax.yaml.bak` shows only your scratch edits) |
+| `~/test/dxt-a` | refused as already registered as project `dxt-a` (and not empty), with the `dax env destroy` rollback hint; nothing touched |
+| `~/test/dxt-a2` with only `.DS_Store` | reaches the summary (not refused); Ctrl-C at the confirm leaves nothing registered |
 
 **Renamed restore of the Claude env (decisions 26–29, 33):**
 
 ```bash
-mkdir ~/dxt-b2 && cd ~/dxt-b2 && dax env restore
+mkdir ~/test/dxt-b2 && cd ~/test/dxt-b2 && dax env restore
 #   managed → dxt-b → newest date → read the summary → confirm
 ```
 
 | Check | Pass |
 |---|---|
-| summary | archived name `dxt-b` → new name `dxt-b2`, new dir `~/dxt-b2`, tenant `dxt` |
+| summary | archived name `dxt-b` → new name `dxt-b2`, new dir `~/test/dxt-b2`, tenant `dxt` |
 | registry | `dxt-b2` registered; `dxt-b` untouched |
 | `.claude.json` key | see command below: prints `/home/dfarrow/dxt-b2` and **not** `dxt-b` |
 | `history.jsonl` | see command below: every count is under `dxt-b2` |
@@ -237,7 +240,7 @@ python3 -c "import json;print(list(json.load(open('$HOME/.local/state/dax/tenant
 python3 -c "import json,collections;print(collections.Counter(json.loads(l).get('project') for l in open('$HOME/.local/state/dax/tenants/dxt/dxt-b2/history.jsonl')))"
 ```
 
-**Then launch it (login):** `cd ~/dxt-b2 && dax run`. This needs a fresh login
+**Then launch it (login):** `cd ~/test/dxt-b2 && dax run`. This needs a fresh login
 (mints a second grant). Inside: `claude`, then `/resume`.
 
 | Check | Pass |
@@ -252,10 +255,10 @@ python3 -c "import json,collections;print(collections.Counter(json.loads(l).get(
 copy the file and rename it with an earlier date:
 
 ```bash
-cd ~/dax-test-backups/daily && cp dxt-a-*.tar.gz dxt-a-2026-01-01.tar.gz
-mkdir ~/dxt-a3 && cd ~/dxt-a3 && dax env restore dxt-a   # shortcut → date list
+cd ~/test/dax-test-backups/daily && cp dxt-a-*.tar.gz dxt-a-2026-01-01.tar.gz
+mkdir ~/test/dxt-a3 && cd ~/test/dxt-a3 && dax env restore dxt-a   # shortcut → date list
 #   pick 2026-01-01 → confirm
-mkdir ~/dxt-a4 && cd ~/dxt-a4 && dax env restore ~/dax-test-backups/one-off.tar.gz
+mkdir ~/test/dxt-a4 && cd ~/test/dxt-a4 && dax env restore ~/test/dax-test-backups/one-off.tar.gz
 ```
 
 | Check | Pass |
@@ -267,7 +270,7 @@ mkdir ~/dxt-a4 && cd ~/dxt-a4 && dax env restore ~/dax-test-backups/one-off.tar.
 
 ```bash
 ls <real backup_dir>/daily/ | head      # the OneDrive path noted in setup
-mkdir ~/dxt-old && cd ~/dxt-old && dax env restore '<real backup_dir>/daily/<some-env>-<date>.tar.gz'
+mkdir ~/test/dxt-old && cd ~/test/dxt-old && dax env restore '<real backup_dir>/daily/<some-env>-<date>.tar.gz'
 #   confirm → then immediately: cd ~ && dax env destroy dxt-old
 ```
 
@@ -283,12 +286,12 @@ mkdir ~/dxt-old && cd ~/dxt-old && dax env restore '<real backup_dir>/daily/<som
 ## Step 4 — `_bootstrap_env` replaces `dax init` / `dax process new`
 
 ```bash
-mkdir ~/dxt-d && cd ~/dxt-d && dax run        # tenant dxt, no creds, coding branch;
+mkdir ~/test/dxt-d && cd ~/test/dxt-d && dax run        # tenant dxt, no creds, coding branch;
                                                # answer n to the login prompt; exit
-mkdir ~/dxt-e && cd ~/dxt-e && dax run        # substrate branch (needs your substrate path)
-mkdir ~/dxt-d/sub && cd ~/dxt-d/sub && dax run    # nested
-mkdir -p ~/tmp-x/dxt-d && cd ~/tmp-x/dxt-d && dax run   # name clash
-mkdir ~/dxt-g && cd ~/dxt-g && dax run        # at the final confirm, answer No
+mkdir ~/test/dxt-e && cd ~/test/dxt-e && dax run        # substrate branch (needs your substrate path)
+mkdir ~/test/dxt-d/sub && cd ~/test/dxt-d/sub && dax run    # nested
+mkdir -p ~/test/tmp-x/dxt-d && cd ~/test/tmp-x/dxt-d && dax run   # name clash
+mkdir ~/test/dxt-g && cd ~/test/dxt-g && dax run        # at the final confirm, answer No
 dax init ; dax process --help
 ```
 
@@ -298,13 +301,13 @@ any existing substrate env (`dax env show diary`). Use tenant `personal`.
 | Check | Pass |
 |---|---|
 | `dxt-d` | wizard asks image → tenant → existing credentials → coding vs. substrate; summary table; then the container launches with no second command |
-| `dxt-e` | asks type (from `process-types.tsv`), title, git; `context.md` scaffolded in `~/dxt-e`; launches |
+| `dxt-e` | asks type (from `process-types.tsv`), title, git; `context.md` scaffolded in `~/test/dxt-e`; launches |
 | bad title/type answer | re-asks the same question, doesn't exit |
-| `~/dxt-d/sub` | exits immediately naming `dxt-d` and its root; nothing registered |
-| `~/tmp-x/dxt-d` | exits naming the existing `dxt-d` and its dir; `~/.dax.yaml` unchanged |
+| `~/test/dxt-d/sub` | exits immediately naming `dxt-d` and its root; nothing registered |
+| `~/test/tmp-x/dxt-d` | exits naming the existing `dxt-d` and its dir; `~/.dax.yaml` unchanged |
 | `dxt-g`, declined | `dax run` ends: no container launches, nothing in `~/.dax.yaml` |
 | `dax init`, `dax process` | both are argparse errors (gone) |
-| `HOME=$(mktemp -d) dax env list` (no `~/.dax.yaml` there) | exits printing the minimal `~/.dax.yaml` to create; never mentions `dax init`; creates nothing (decision 37) |
+| `PYTHONUSERBASE="$HOME/Library/Python/3.9" HOME=$(mktemp -d) dax envs list` (a fake home with no `~/.dax.yaml`; `PYTHONUSERBASE` keeps Python finding the per-user `dax` install, which it otherwise looks for under `HOME`; `env list` arrives in step 8) | exits printing the minimal `~/.dax.yaml` to create; never mentions `dax init`; creates nothing (decision 37) |
 | tenant | always asked and required; existing tenants offered, a new one can be typed |
 | credentials | checkbox shows only existing non-Claude credentials; no option to define one; no Claude question |
 
@@ -312,7 +315,7 @@ any existing substrate env (`dax env show diary`). Use tenant `personal`.
 
 ## Step 5 — wizard keypress behavior (only reachable from a real terminal)
 
-Use any confirm, e.g. `cd ~/dxt-a && dax env archive` → at "Proceed?":
+Use any confirm, e.g. `cd ~/test/dxt-a && dax env archive` → at "Proceed?":
 
 | Check | Pass |
 |---|---|
@@ -324,7 +327,7 @@ Use any confirm, e.g. `cd ~/dxt-a && dax env archive` → at "Proceed?":
 ## Step 7 — Claude baseline; old `claude` retired; copy-once seed; login temp folder
 
 ```bash
-mkdir ~/dxt-f && cd ~/dxt-f && dax run     # wizard: tenant dxt, no other creds;
+mkdir ~/test/dxt-f && cd ~/test/dxt-f && dax run     # wizard: tenant dxt, no other creds;
                                            # answer n to the login prompt; exit
 grep -A6 'dxt-f:' ~/.dax.yaml              # no claude in features: or creds:
 ls ~/.local/state/dax/tenants/dxt/dxt-f/CLAUDE.md
@@ -344,10 +347,10 @@ ls -A ~/.local/state/dax/login/                 # still empty
 | `dax creds login claude-dxt-dxt-f` | accepted, though `creds:` never names it (the implied credential is visible to login); "token imported to Keychain"; host `~/.claude/.credentials.json` mtime unchanged; `login/` empty |
 | abandoned login | nothing imported (says so); `login/` empty |
 | `dax creds list` | has a `claude-dxt-dxt-f` row |
-| `cd ~/dxt-f && dax run`, then `claude` | starts logged in (the wrapper injected the new grant from Keychain) |
+| `cd ~/test/dxt-f && dax run`, then `claude` | starts logged in (the wrapper injected the new grant from Keychain) |
 | an existing real env's tree, e.g. `ls -l ~/.local/state/dax/tenants/personal/fabric/CLAUDE.md` | mtime unchanged by any of this |
 | `dax features` | `claude` marked always-on alongside `workdir`/`dotfiles`/`webpreview`; no `claude_tenant_state`; `auto_claude` still listed |
-| `cd ~/dxt-b && dax run` (`dxt-b` still lists `claude_tenant_state` and `creds: [claude]`) | a warning listing every env with old Claude entries: `dxt-b`; `dxt-b2`, `dxt-d` and `dxt-e`, which were written before step 7; and all 14 of your real envs (`discernment`'s old `claude` included) until you clean them up. Claude applied once (no duplicate-mount error) |
+| `cd ~/test/dxt-b && dax run` (`dxt-b` still lists `claude_tenant_state` and `creds: [claude]`) | a warning listing every env with old Claude entries: `dxt-b`; `dxt-b2`, `dxt-d` and `dxt-e`, which were written before step 7; and all 14 of your real envs (`discernment`'s old `claude` included) until you clean them up. Claude applied once (no duplicate-mount error) |
 | remove those two lines from `dxt-b`, `dax run` again | `dxt-b` no longer in the warning (the real envs still are); still starts with Claude logged in |
 | edit `dxt-a` to remove its `tenant:`, `dax run` there | refused with a clear "needs a tenant" message, not an unknown-credential error; put it back |
 
@@ -364,7 +367,7 @@ security find-generic-password -s dax-creds -a claude-dxt-dxt-f   # must say "co
 
 ```bash
 dax env list
-cat ~/dax-test-backups/envs-before.txt
+cat ~/test/dax-test-backups/envs-before.txt
 dax envs ; dax tenant ; dax tenants
 ```
 
@@ -404,7 +407,7 @@ cd <fabric's dir> && dax run           # a real env, plain restart; exit
 |---|---|
 | build | succeeds |
 | `fabric` | launches, `claude` starts logged in, `/resume` shows its history |
-| full pass on a fresh scratch env | `mkdir ~/dxt-z && cd ~/dxt-z && dax run` → `dax env archive` → `mkdir ~/dxt-z2 && cd ~/dxt-z2 && dax env restore dxt-z` → `dax env destroy dxt-z dxt-z2` |
+| full pass on a fresh scratch env | `mkdir ~/test/dxt-z && cd ~/test/dxt-z && dax run` → `dax env archive` → `mkdir ~/test/dxt-z2 && cd ~/test/dxt-z2 && dax env restore dxt-z` → `dax env destroy dxt-z dxt-z2` |
 
 ---
 
@@ -419,9 +422,9 @@ for n in $(dax creds list | awk '/dxt/{print $1}'); do echo "left: $n"; done   #
 security dump-keychain 2>/dev/null | grep -c '"claude-dxt-'                         # 0: no dxt Keychain entries left
 #    edit ~/.dax.yaml: restore backup_dir to the real value from setup
 diff ~/.dax.yaml ~/.dax.yaml.bak                 # no output: config back to its pre-test state
-rm -rf ~/dax-test-backups ~/tmp-x ~/dxt-full ~/dxt-a2 ~/dxt-g   # folders never registered
+rm -rf ~/test/dax-test-backups ~/test/tmp-x ~/test/dxt-full ~/test/dxt-a2 ~/test/dxt-g   # folders never registered
 rm -f ~/.local/state/dax/creds-login/claude-dxt-*.json         # relogin timestamps
-ls -d ~/dxt-* 2>/dev/null                                       # no output
+ls -d ~/test/dxt-* 2>/dev/null                                       # no output
 ```
 
 `dxt-e` used tenant `personal`; `destroy` removes its tree. Destroyed

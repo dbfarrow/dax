@@ -1323,7 +1323,8 @@ dead multi-tenant model entirely** (independent of steps 1–7).
   step deletes, yet `_prompt_tenant` survives (it's what makes tenant
   required) and `_known_tenant_names` is rewritten. Move those tests into a
   surviving file and adapt them before deleting the rest.
-- Simplify `_known_tenant_names()` to a one-line set comprehension over
+- Simplify `_known_tenant_names()` (whose registry half already landed in
+  step 4, a `/code-review` fix) to a one-line set comprehension over
   `projects[*].tenant`, dropping its `all_tenant_projects` call (the real
   wrinkle noted under decision 19) — `_prompt_tenant` itself is unaffected.
   (`run_env_show`'s hardcoded `multi_tenant`/`tenant_subdir` check is

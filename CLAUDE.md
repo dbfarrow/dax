@@ -335,6 +335,133 @@ the shared mount, which is the intended fallback.
 
 ## In progress
 
+- **`dax env` lifecycle consolidation** — full design in
+  `docs/design/2026-10-18-env-bootstrap-consolidation.md`, branch
+  `feature/env-lifecycle-consolidation` (off `master`, nothing implemented
+  yet — scoping is complete, 37 decisions locked in, ready to build).
+  Decisions 25–37 came from a 2026-10-19 pre-implementation risk review:
+  env-name collisions are fatal; restore only targets an empty,
+  unregistered cwd and never overwrites anything (rollback = destroy, then
+  restore); an env→date archive picker that reaches older archives;
+  renamed restores rewrite `.claude.json` and `history.jsonl` too;
+  credentials are never archived (`backup_dir` is OneDrive); `--explain`
+  stays, `--dry-run` goes; unknown archived features are restored
+  commented out; Claude logins write to a temp folder, never the host
+  `~/.claude` (decision 32); a renamed restore swaps explicit Claude creds
+  for bare `claude`; `archive --remove` reads each tarball back first; Claude is an always-on
+  baseline feature with an implied `claude-<tenant>-<env>` credential and a
+  required tenant for every env (35); redundant old Claude entries are
+  ignored and warned about until hand-removed (36); a missing `~/.dax.yaml`
+  exits with instructions, never auto-created (37). Two independent
+  reviews found and fixed ~55 issues on 2026-10-19; execution order is
+  1, 2, 3, 4, 5, 7, 8, 6. Manual runbook:
+  `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
+  **Build progress (uncommitted, on the branch):**
+  - **Step 1 built 2026-10-19, suite 687 (from 671):**
+    - `dax env destroy` replaces `dax process destroy`, with no `--dry-run`.
+    - `cmd_env` now resolves the env name per subcommand, so `destroy`
+      works outside an env.
+    - `dax env set` is removed; the `run_env_set` helper stays until step 4.
+    - "Run `dax env set`" hints now name the `~/.dax.yaml` field instead.
+    - `unknown_env_keys` flags non-`ENV_FIELDS` keys in `env show`, and
+      quietly on every `dax run` across all envs. Typos are reported as
+      "ignored"; the retired `multi_tenant`/`tenant_subdir` keys as
+      "retired, remove them", since their code still reads them until step 8
+      (a `/code-review` finding).
+    - Routing `--explain` before the config load is deferred to step 2,
+      since no `dax env` subcommand has `--explain` yet.
+    - Manual checks passed; committed as `4602df1`.
+  - **Step 2 built 2026-10-19, suite 711 (from 687):**
+    - `dax env archive` replaces `process archive` and `process export`.
+      It's a wizard (`_run_env_archive`) over a non-interactive core
+      (`_archive_envs`); the restore and import tests use the core too.
+    - Credentials are never archived (`_state_tree_tar_filter` always
+      excludes `.credentials.json`).
+    - Removal requires every tarball to read back first (`_verify_archive`).
+    - The manifest is written as `dax-env-manifest.json`. Both readers fall
+      back to `dax-export-manifest.json` via `_archive_manifest_member`,
+      covered by a legacy-name restore test.
+    - `--explain` is routed in `cmd_env` before the missing-config exit,
+      and `dax backup --explain` now points at `dax env archive`.
+    - New `_q_path` prompt helper in `dax_creds/init.py`.
+    - The specific-file prompt puts the archive inside a directory if
+      given one (a `/code-review` finding: it used to crash) and asks
+      before overwriting an existing file.
+    - Manual checks passed; committed as `468792a`.
+  - **Step 3 built 2026-10-20, suite 733 (from 711):**
+    - `dax env restore [name|path]` (`_run_env_restore`) replaces
+      `process restore` and `process import`.
+    - It only restores into an empty (`.DS_Store` aside), unregistered cwd,
+      names the env after the folder, and refuses on a registered name or a
+      leftover state tree. `_extract_env_archive` refuses rather than
+      `rmtree`s, and moves the project's contents into cwd.
+    - Pickers: env then date, with cwd's name and the newest date
+      pre-selected (`_available_archives` now returns every date).
+    - A renamed restore re-keys `projects/`, `.claude.json` and
+      `history.jsonl` (exact `/home/<user>/<name>` paths only,
+      `_rename_container_path`). It swaps explicit Claude credentials for
+      bare `claude`, but only when there's a tenant (otherwise it warns that
+      the grant is shared). The `projects/` key match accepts the folder
+      name verbatim or with non-alphanumerics mangled to `-`. Both were
+      `/code-review` findings.
+    - Archived credentials are stripped and reported.
+    - Unknown features are written as `#- <name>` via ruamel comment tokens.
+      The entry is built in memory and saved once.
+    - `_check_process_dir`/`_process_dir_conflict` renamed to
+      `_check_bootstrap_dir`/`_bootstrap_dir_conflict`.
+    - `_q_select` gained `default=`.
+    - From inside a registered env, restore reports "already registered (and
+      not empty)" with the destroy hint, not just "not empty" (a manual-pass
+      request).
+    - Manual checks passed; committed as `de8181e`.
+  - **Step 4 built 2026-10-20, suite 709 (from 733; 56 deliberate deletions,
+    32 new):**
+    - `_bootstrap_env` (in `dax.py`) is what `dax run` now starts in an
+      unregistered folder. It asks for image, tenant (always; blank
+      re-asks), then a checkbox of existing non-Claude credentials (no
+      define-new loop), then coding project vs substrate-backed process
+      (substrate path, title, type, git; bad answers re-ask). Then a
+      `_print_table` summary and a confirm.
+    - `new-process.sh` runs only after the confirm, and the entry is saved
+      once. Until step 7 it still writes `creds: [..., claude]` and
+      `claude_tenant_state`.
+    - Fatal cases: a cwd conflict, a name registered elsewhere, or leftover
+      state.
+    - Declining or Ctrl-C makes `cmd_run` `sys.exit(0)`, so nothing
+      launches (that was the swallowed-`KeyError` bug).
+    - Deleted: `dax init` (`cmd_init`, `run_init`/`_run_init`), `dax process`
+      (`cmd_process`, `_run_process_new`), `run_env_set`, `env_field_help`,
+      `register_project`, `_setup_claude_credential`.
+    - A missing `~/.dax.yaml` gives one shared message
+      (`missing_config_message()` / `_exit_missing_config()`) from
+      `load_config`, `cmd_env`, `cmd_creds`, `cmd_envs` and `cmd_backup`;
+      dax never creates the file.
+    - The Gate 0 test is kept.
+    - `/code-review` fixes:
+      - `_known_tenant_names` now also reads each entry's `tenant:` (the
+        wizard writes only that); step 8 drops the legacy `.dax-tenant` half.
+      - A failed or interrupted `new-process.sh` lists the files it left and
+        says to remove them before retrying (never auto-deleted).
+    - Awaiting the runbook's step 4 manual checks before step 5.
+  **Read that doc before touching `dax process`/`dax init`/`dax env`/
+  `dax tenant`/`dax tenants` — large parts of all five are being deleted,
+  not extended.**
+
+  Headline: six top-level commands survive (`build`, `run`, `features`,
+  `backup`, `creds`, `env`), down from eleven. `dax init`, `dax process new`,
+  and `dax run`'s own auto-registration fallback collapse into one
+  `_bootstrap_env` wizard triggered implicitly by `dax run` — no separate
+  command for creating an env at all. `dax process destroy`/`archive`/
+  `restore`/`export`/`import` move to `dax env`, with `export`/`import`
+  absorbed as prompts inside `archive`/`restore` rather than surviving as
+  separate verbs. `dax env set`/`accept-shared-files` are dropped (confirmed
+  dead against real usage); `dax envs`, `dax tenant`, `dax tenants` are
+  dropped too (folded into `env list`, or confirmed dead code from the
+  already-abandoned multi-tenant model). The old shared `claude` mount
+  feature and its drift-tracking shared-files sync are also decommissioned,
+  replaced by a one-time seed. The doc's own "Implementation plan" section
+  (8 steps) is the build order; nothing here has started.
+
 - **Tenant isolation for Claude Code state** — design and status in
   `docs/design/2026-07-27-tenant-isolation.md`. **Read that doc's
   "Redesign 2026-07-29 — multi-tenant abandoned" section before touching
@@ -849,6 +976,46 @@ the shared mount, which is the intended fallback.
   something to script automatically.
 
 ## Backlog
+
+- **`dax creds login` leaves the newest Claude grant in plaintext at the
+  host's `~/.claude/.credentials.json`.** Found 2026-10-19 during the
+  env-lifecycle review. The login container mounts the real host
+  `~/.claude` rw, `claude auth login` writes the token there, and
+  `_post_login_import` copies it into Keychain but never deletes the file.
+  Auggie's branch does clean up (`_clear_auggie_session`); Claude's
+  doesn't. So the file always holds a live copy of whichever env logged in
+  last. Possible fix: point the login container at a fresh temp directory
+  instead of the real `~/.claude`, and pass it to `import_from_disk(...,
+  credentials_file=...)`, which already exists, so nothing ever lands in
+  the host `~/.claude`. **Decided and folded into the consolidation
+  branch, 2026-10-19:** it's decision 32 there, built in step 7 (a temp
+  folder under `~/.local/state/dax/login/`). The leftover token already
+  sitting in the host's `~/.claude/.credentials.json` is the user's to
+  delete by hand.
+
+- **Per-tenant browser profiles for Claude logins.** Raised 2026-10-19
+  (consolidation decision 35): the user wants Claude logins steered to
+  different Chrome profiles by tenant (e.g. `ysecurity` → its own profile).
+  Today `credential_defaults.claude` applies to every env regardless of
+  tenant. Likely shape: per-tenant overrides of `credential_defaults`,
+  resolved when the derived `claude-<tenant>-<env>` credential is
+  synthesized. Not built.
+
+- **A pass that scans existing backups for credentials.** Raised
+  2026-10-19 with decision 29 of the env-lifecycle consolidation, which
+  stops archiving `.credentials.json` from now on. Older archives in
+  `backup_dir` (OneDrive) made with `--include-credential` could still hold
+  one. The user thinks none do and is fine leaving them for now, but wants a
+  definitive check eventually: walk `backup_dir/*/*.tar.gz` and report any
+  archive with a `.credentials.json` member, read-only, never modifying
+  archives.
+
+- **Global `CLAUDE.md` edits don't reach already-seeded state trees.**
+  Deferred 2026-10-19: the consolidation's decision 13 (copy shared files
+  once) leaves this gap on purpose. Edits are rare, and substrate envs'
+  `CLAUDE.md` is wired by `wire.sh`, which rules out the simple sync
+  options. See decision 13's "Known gap" note in
+  `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
 
 - **Collapse `dax process` into `dax env` — "process" isn't a distinct
   concept, it's an env with `substrate` in its `features`.** Raised
