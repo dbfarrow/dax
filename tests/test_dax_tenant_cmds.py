@@ -333,9 +333,11 @@ def test_prompt_tenant_raises_on_cancelled_select(tmp_path):
         _prompt_tenant(tmp_path / 'sub', {'ysecurity'}, _select=lambda p, c, d: None)
 
 
-def test_prompt_tenant_raises_on_empty_text(tmp_path):
+def test_prompt_tenant_raises_on_cancelled_text(tmp_path):
+    """A blank answer re-asks now (decision 8; see test_dax_bootstrap_env.py);
+    only an explicit cancel stops."""
     with pytest.raises(KeyboardInterrupt):
-        _prompt_tenant(tmp_path / 'sub', set(), _text=lambda p, d: '   ')
+        _prompt_tenant(tmp_path / 'sub', set(), _text=lambda p, d: None)
 
 
 # --- _ensure_tenants_classified ----------------------------------------------

@@ -241,12 +241,6 @@ def unknown_env_keys(config):
     return found
 
 
-def env_field_help():
-    width = max(len(f) for f in ENV_FIELDS)
-    return 'fields:\n' + '\n'.join(
-        f'  {f:<{width}}  {desc}' for f, desc in ENV_FIELDS.items())
-
-
 def yaml_round_trip(required_by):
     """A ruamel YAML handler that preserves comments, key order, and quoting.
 
@@ -292,7 +286,25 @@ def load_dax_config():
                 f.seek(0)
                 return yaml.safe_load(f)
     except FileNotFoundError:
-        raise FileNotFoundError('~/.dax.yaml not found — run `dax init` to create it')
+        raise FileNotFoundError(missing_config_message())
+
+
+def missing_config_message():
+    """What to do about a missing ~/.dax.yaml (decision 37). dax never
+    creates one itself: `dax init`, which used to, is gone, and a silently
+    invented config is worse than a clear instruction."""
+    return """\
+dax needs a ~/.dax.yaml and never creates one itself. A minimal one:
+
+    defaults:
+      image: dax-base
+    # Where `dax env archive` writes and `dax env restore` reads (optional;
+    # defaults to backup/ inside the dax repo checkout):
+    # backup_dir: ~/backups/dax
+    projects: {}
+
+Create it, then run the command again. .dax.yaml.example in the dax repo
+shows every setting."""
 
 
 def find_named_project_by_dir(config, cwd):
@@ -305,7 +317,7 @@ def find_named_project_by_dir(config, cwd):
     for name, project in config.get('projects', {}).items():
         if Path(project['dir']).expanduser() == cwd:
             return name, project
-    raise KeyError(f'no project configured for {cwd} — run `dax init` first')
+    raise KeyError(f'no project configured for {cwd} — run `dax run` there to register it')
 
 
 def find_project_by_dir(config, cwd):

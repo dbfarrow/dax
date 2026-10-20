@@ -20,7 +20,6 @@ import pytest
 import dax_creds.providers.claude as claude_provider_module
 from dax import _post_login_import
 from dax_creds.config import credential_names_for_provider
-from dax_creds.init import _setup_claude_credential
 from dax_creds.providers.claude import (
     ClaudeProvider, grant_collision_message, grant_id,
 )
@@ -169,50 +168,6 @@ def test_login_stores_an_independent_grant(tmp_path, monkeypatch):
 
     stored = kr.stored[('dax-creds', 'claude-personal-fabric')]
     assert grant_id(stored) == grant_id(envelope('fresh-fabric-grant'))
-
-
-# --- add path (never had a guard at all) ------------------------------------
-
-def test_add_refuses_to_copy_another_envs_grant(tmp_path, monkeypatch, capsys):
-    """`dax creds add`'s claude path imports straight from
-    ~/.claude/.credentials.json, which under a shared mount is whichever env
-    logged in last. This was the one remaining door to a shared grant."""
-    monkeypatch.setenv('HOME', str(tmp_path))
-    write_disk_token(tmp_path, envelope('dax-grant'))
-    kr = FakeKeyring({('dax-creds', 'claude-personal-dax'): envelope('dax-grant')})
-    monkeypatch.setattr(claude_provider_module, '_keyring', kr)
-
-    _setup_claude_credential('claude-personal-fabric', {'provider': 'claude'},
-                             config=CONFIG)
-
-    assert ('dax-creds', 'claude-personal-fabric') not in kr.stored
-    assert "same OAuth grant as 'claude-personal-dax'" in capsys.readouterr().out
-
-
-def test_add_still_imports_an_unshared_grant(tmp_path, monkeypatch):
-    monkeypatch.setenv('HOME', str(tmp_path))
-    write_disk_token(tmp_path, envelope('fabric-only-grant'))
-    kr = FakeKeyring({('dax-creds', 'claude-personal-dax'): envelope('dax-grant')})
-    monkeypatch.setattr(claude_provider_module, '_keyring', kr)
-
-    _setup_claude_credential('claude-personal-fabric', {'provider': 'claude'},
-                             config=CONFIG)
-
-    assert ('dax-creds', 'claude-personal-fabric') in kr.stored
-
-
-def test_add_without_config_skips_the_check_rather_than_crashing(
-        tmp_path, monkeypatch):
-    """`config` is optional so callers that have none still work — `dax init`'s
-    path passes it, but the signature must not become load-bearing."""
-    monkeypatch.setenv('HOME', str(tmp_path))
-    write_disk_token(tmp_path, envelope('some-grant'))
-    kr = FakeKeyring()
-    monkeypatch.setattr(claude_provider_module, '_keyring', kr)
-
-    _setup_claude_credential('claude-work', {'provider': 'claude'})
-
-    assert ('dax-creds', 'claude-work') in kr.stored
 
 
 # --- message ----------------------------------------------------------------

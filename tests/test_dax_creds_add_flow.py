@@ -210,7 +210,8 @@ def test_no_envs_registered_is_refused_with_a_pointer(answers, capsys):
     _, pending = _add_per_env_credential({'projects': {}}, 'claude', cwd='/tmp')
 
     assert pending is None
-    assert 'dax init' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert 'dax run' in out and 'dax init' not in out
 
 
 # --- the honest report on the non-per-env path -------------------------------

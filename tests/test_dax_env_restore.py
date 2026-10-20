@@ -729,4 +729,4 @@ def test_the_old_restore_and_import_flags_are_gone(home, flag):
 def test_process_restore_and_import_are_gone(home, sub):
     result = _cli(home, 'process', sub, 'demo')
     assert result.returncode == 2
-    assert "invalid choice: '{}'".format(sub) in result.stderr
+    assert 'invalid choice' in result.stderr  # `process` itself is gone since step 4

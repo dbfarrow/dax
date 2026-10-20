@@ -3,7 +3,8 @@
 Covers dax.py's `find_project_by_dir` -> `find_enclosing_project` fallback:
 `dax run` invoked from *inside* an already-registered project (rather than
 from its root) must refuse with a clear message, not silently auto-register
-the subdirectory as a brand-new, unrelated project via `run_init`. That
+the subdirectory as a brand-new, unrelated project via the bootstrap wizard
+(`_bootstrap_env`, which replaced `run_init`). That
 auto-register path previously mounted only the subdirectory, silently
 dropping repo-root content (`.git`, `.claude/skills/`, etc.) with no error.
 """
@@ -58,37 +59,40 @@ def test_cmd_run_refuses_when_invoked_from_inside_registered_multi_tenant_projec
     assert 'dax run' in out
 
 
-def test_cmd_run_still_auto_registers_a_genuinely_new_project(tmp_path, monkeypatch, capsys):
+def _new_project_setup(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     home.mkdir()
     other_repo = home / 'other-project'
     other_repo.mkdir()
     new_repo = home / 'brand-new-project'
     new_repo.mkdir()
-
     _write_yaml(home / '.dax.yaml', {
         'image': 'test/dax:latest',
-        'features': [],
         'projects': {
             'other-project': {'dir': str(other_repo), 'creds': []},
         },
     })
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.chdir(new_repo)
+    return home, new_repo
 
-    def fake_run_init(dax_config, cwd):
-        dax_config.setdefault('projects', {})['brand-new-project'] = {
-            'dir': str(cwd), 'creds': [],
-        }
+
+def test_cmd_run_bootstraps_a_genuinely_new_project(tmp_path, monkeypatch, capsys):
+    home, new_repo = _new_project_setup(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_bootstrap(dax_config, cwd):
+        calls.append(cwd)
+        entry = {'dir': str(cwd), 'creds': [], 'tenant': 'acme'}
+        dax_config.setdefault('projects', {})['brand-new-project'] = entry
         _write_yaml(home / '.dax.yaml', dax_config)
-        return dax_config
+        return 'brand-new-project', entry
 
-    monkeypatch.setattr('dax_creds.init.run_init', fake_run_init)
+    monkeypatch.setattr('dax._bootstrap_env', fake_bootstrap)
 
     # cmd_run proceeds past project resolution into real docker/daemon
-    # machinery next, which this test has no interest in exercising - a
-    # missing `docker` binary (or any other failure past this point) is fine;
-    # only that it did NOT take the refusal branch matters here.
+    # machinery next, which this test has no interest in exercising - only
+    # that it took the bootstrap branch, not the refusal branch.
     try:
         cmd_run(_args())
     except SystemExit as e:
@@ -96,6 +100,22 @@ def test_cmd_run_still_auto_registers_a_genuinely_new_project(tmp_path, monkeypa
     except Exception:
         pass
 
+    assert calls == [new_repo.resolve()]
     out = capsys.readouterr().out
-    assert 'project not registered' in out
+    assert "isn't a registered env yet" in out
     assert 'registered project' not in out
+
+
+def test_declining_the_bootstrap_launches_nothing(tmp_path, monkeypatch, capsys):
+    """A swallowed KeyError used to let a declined wizard fall through to a
+    real launch; now declining ends `dax run`."""
+    _new_project_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr('dax._bootstrap_env', lambda dax_config, cwd: None)
+    launched = []
+    monkeypatch.setattr('dax.subprocess.run', lambda *a, **k: launched.append(a))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cmd_run(argparse.Namespace(features=None, ports=None, test_only=False))
+
+    assert excinfo.value.code == 0
+    assert launched == []

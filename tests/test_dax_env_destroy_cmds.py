@@ -293,4 +293,4 @@ def test_env_set_is_gone(home):
 def test_process_destroy_is_gone(home):
     result = _cli(home, 'process', 'destroy', 'demo')
     assert result.returncode == 2
-    assert "invalid choice: 'destroy'" in result.stderr
+    assert 'invalid choice' in result.stderr  # `process` itself is gone since step 4

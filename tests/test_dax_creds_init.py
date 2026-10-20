@@ -3,7 +3,7 @@ import sys
 import pytest
 import yaml
 from pathlib import Path
-from dax_creds.init import register_project, save_config, run_creds_remove, ensure_project_credentials, run_creds_update, _setup_claude_credential
+from dax_creds.init import save_config, run_creds_remove, ensure_project_credentials, run_creds_update
 
 
 class FakeKeyring:
@@ -26,25 +26,6 @@ class FakeKeyring:
 def _load_yaml(path):
     with open(path) as f:
         return yaml.safe_load(f)
-
-
-def test_register_project_adds_project_entry(tmp_path, monkeypatch):
-    monkeypatch.setenv('HOME', str(tmp_path))
-    config_path = tmp_path / '.dax.yaml'
-    config_path.write_text(yaml.dump({
-        'defaults': {'image': 'dax-base'},
-        'credentials': {},
-        'projects': {},
-    }))
-
-    project_dir = tmp_path / 'my-project'
-    config = _load_yaml(config_path)
-    register_project(config, name='my-project', project_dir=project_dir,
-                     image='dax-base', creds=['github-dfarrow'])
-
-    assert config['projects']['my-project']['dir'] == str(project_dir)
-    assert config['projects']['my-project']['creds'] == ['github-dfarrow']
-    assert config['projects']['my-project']['image'] == 'dax-base'
 
 
 def test_creds_remove_deletes_token_from_keychain(tmp_path, monkeypatch):
@@ -208,50 +189,6 @@ def test_ensure_project_credentials_returns_empty_when_cred_in_keychain(tmp_path
     assert missing == []
 
 
-def test_setup_claude_imports_credentials_json_as_blob(tmp_path, monkeypatch):
-    import json
-    monkeypatch.setenv('HOME', str(tmp_path))
-    creds_dir = tmp_path / '.claude'
-    creds_dir.mkdir()
-    payload = {'claudeAiOauth': {'accessToken': 'sk-ant-oat01-abc', 'refreshToken': 'sk-ant-ort01-xyz'}}
-    (creds_dir / 'credentials.json').write_text(json.dumps(payload))
-
-    class FakeKeyring:
-        def __init__(self):
-            self._stored = {}
-        def get_password(self, s, n):
-            return self._stored.get((s, n))
-        def set_password(self, s, n, v):
-            self._stored[(s, n)] = v
-
-    kr = FakeKeyring()
-    import dax_creds.providers.claude as _cm
-    monkeypatch.setattr(_cm, '_keyring', kr)
-
-    _setup_claude_credential('claude-work', {'provider': 'claude'})
-
-    stored = json.loads(kr.get_password('dax-creds', 'claude-work'))
-    assert stored == payload
-
-
-def test_setup_claude_skips_when_already_in_keychain(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv('HOME', str(tmp_path))
-
-    class FakeKeyring:
-        def get_password(self, s, n):
-            return 'existing-token'
-        def set_password(self, s, n, v):
-            raise AssertionError('should not be called')
-
-    import dax_creds.providers.claude as _cm
-    monkeypatch.setattr(_cm, '_keyring', FakeKeyring())
-
-    _setup_claude_credential('claude-work', {'provider': 'claude'})
-
-    out = capsys.readouterr().out
-    assert 'already in Keychain' in out
-
-
 def test_creds_remove_can_clear_a_derived_credential(tmp_path, monkeypatch, capsys):
     """A derived credential has no config entry, so `remove` reported it as
     unknown and there was no way to clear a bad one."""
@@ -278,61 +215,6 @@ def test_creds_remove_of_a_derived_credential_writes_no_config(tmp_path, monkeyp
     run_creds_remove(config, 'claude-personal-fabric', keyring=kr)
 
     assert not (tmp_path / '.dax.yaml').exists()
-
-
-def test_setup_claude_replace_rewrites_the_keychain_secret(tmp_path, monkeypatch):
-    """Confirming "Overwrite it?" used to rewrite only the YAML metadata, so a
-    rotated credential could not be re-imported without `dax creds remove`."""
-    import json
-    monkeypatch.setenv('HOME', str(tmp_path))
-    rotated = {'claudeAiOauth': {'accessToken': 'sk-ant-oat01-new',
-                                 'refreshToken': 'sk-ant-ort01-new'}}
-    claude_dir = tmp_path / '.claude'
-    claude_dir.mkdir()
-    (claude_dir / '.credentials.json').write_text(json.dumps(rotated))
-
-    kr = FakeKeyring({('dax-creds', 'claude-work'): 'stale-token'})
-    import dax_creds.providers.claude as _cm
-    monkeypatch.setattr(_cm, '_keyring', kr)
-
-    _setup_claude_credential('claude-work', {'provider': 'claude'}, replace=True)
-
-    assert json.loads(kr.get_password('dax-creds', 'claude-work')) == rotated
-
-
-def test_setup_claude_replace_reports_when_nothing_replaced_it(tmp_path, monkeypatch, capsys):
-    """The user asked for a replacement and did not get one — say so, rather
-    than leaving them believing the old secret is gone."""
-    monkeypatch.setenv('HOME', str(tmp_path))
-    kr = FakeKeyring({('dax-creds', 'claude-work'): 'stale-token'})
-    import dax_creds.providers.claude as _cm
-    monkeypatch.setattr(_cm, '_keyring', kr)
-
-    _setup_claude_credential('claude-work', {'provider': 'claude'}, replace=True)
-
-    out = capsys.readouterr().out
-    assert 'left in place' in out
-    assert 'dax creds remove claude-work' in out
-    assert kr.get_password('dax-creds', 'claude-work') == 'stale-token'
-
-
-def test_setup_claude_without_replace_still_skips(tmp_path, monkeypatch, capsys):
-    """Ordinary setup must stay a no-op when the secret is already there."""
-    import json
-    monkeypatch.setenv('HOME', str(tmp_path))
-    claude_dir = tmp_path / '.claude'
-    claude_dir.mkdir()
-    (claude_dir / '.credentials.json').write_text(json.dumps(
-        {'claudeAiOauth': {'refreshToken': 'sk-ant-ort01-ondisk'}}))
-
-    kr = FakeKeyring({('dax-creds', 'claude-work'): 'existing-token'})
-    import dax_creds.providers.claude as _cm
-    monkeypatch.setattr(_cm, '_keyring', kr)
-
-    _setup_claude_credential('claude-work', {'provider': 'claude'})
-
-    assert kr.get_password('dax-creds', 'claude-work') == 'existing-token'
-    assert 'already in Keychain' in capsys.readouterr().out
 
 
 def test_save_config_writes_yaml(tmp_path, monkeypatch):

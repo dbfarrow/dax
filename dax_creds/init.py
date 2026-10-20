@@ -5,7 +5,7 @@ from pathlib import Path
 
 from dax_creds.config import (
     BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
-    credential_users, derived_credentials, env_field_help,
+    credential_users, derived_credentials,
     last_login_at, relogin_due, resolve_credential_names, state_tree_path,
     state_trees, sync_claude_shared_files, unknown_env_keys,
     describe_unknown_env_keys,
@@ -18,16 +18,6 @@ except ImportError:
     _keyring_module = None
 
 _KEYCHAIN_SERVICE = 'dax-creds'
-
-
-def register_project(config, name, project_dir, image, creds):
-    existing = config.setdefault('projects', {}).get(name, {})
-    existing.update({
-        'dir': str(project_dir),
-        'image': image,
-        'creds': creds,
-    })
-    config['projects'][name] = existing
 
 
 def save_config(config):
@@ -260,39 +250,6 @@ def _setup_github_credential(cred_name, cred_def, config, replace=False):
         return False
 
 
-def _setup_claude_credential(cred_name, cred_def, replace=False, config=None):
-    from dax_creds.providers.claude import ClaudeProvider, grant_collision_message
-    provider = ClaudeProvider()
-
-    if not replace and provider.check(cred_def, cred_name):
-        print(f'  [{cred_name}] token already in Keychain.')
-        return True
-
-    token = provider.import_from_disk(cred_def)
-    if token:
-        # This path copies whatever sits in ~/.claude/.credentials.json, which
-        # under a shared mount is some *other* env's credential — the sharing
-        # decision C exists to prevent, and the one door `dax creds login`'s
-        # before/after guard never covered. Refuse on a grant collision rather
-        # than storing a second name for one grant (decision C6).
-        candidates = (credential_names_for_provider(config, 'claude')
-                      if config is not None else set())
-        clash = provider.grant_collision(cred_name, token, candidates)
-        if clash:
-            lines = grant_collision_message(cred_name, clash)
-            print(f'  [{cred_name}] {lines[0]}')
-            for line in lines[1:]:
-                print(f'  [{cred_name}] {line}')
-            return False
-        print(f'  [{cred_name}] importing existing token from ~/.claude/.credentials.json')
-        provider.store(cred_name, token)
-        print(f'  [{cred_name}] done.')
-        return True
-
-    _report_no_token(cred_name, provider, cred_def, replace)
-    return False
-
-
 def _setup_auggie_credential(cred_name, cred_def, replace=False):
     from dax_creds.providers.auggie import AuggieProvider
     provider = AuggieProvider()
@@ -336,103 +293,6 @@ def _report_no_token(cred_name, provider, cred_def, replace):
         print(f'  [{cred_name}] the existing Keychain secret was left in place — '
               f'nothing new was found to replace it.')
         print(f'  [{cred_name}] to clear it anyway: dax creds remove {cred_name}')
-
-
-def run_init(config, cwd):
-    print('\ndax init\n')
-    try:
-        return _run_init(config, cwd)
-    except KeyboardInterrupt:
-        print('\n\nInit cancelled. Nothing was saved.')
-        sys.exit(0)
-
-
-def _run_init(config, cwd):
-    import questionary
-    from dax_creds.config import find_enclosing_project
-
-    existing_project_name = next(
-        (name for name, p in config.get('projects', {}).items()
-         if Path(p['dir']) == cwd),
-        None
-    )
-    existing_project = config.get('projects', {}).get(existing_project_name, {})
-
-    if existing_project_name:
-        print(f'  {cwd.name} is already registered as "{existing_project_name}".')
-        if not _q_confirm('Update it?', default=False):
-            print('Nothing changed.')
-            return config
-    else:
-        # The same blind spot `find_enclosing_project`/Gate 0 closed for
-        # `dax run`: an exact-match lookup alone finds nothing for a
-        # subdirectory of an already-registered project and falls straight
-        # through to registering a duplicate rooted there.
-        enclosing = find_enclosing_project(config, cwd)
-        if enclosing is not None:
-            enclosing_name, enclosing_project = enclosing
-            enclosing_dir = Path(enclosing_project['dir']).expanduser()
-            print(f'  {cwd} is inside already-registered project "{enclosing_name}" '
-                  f'at {enclosing_dir}, not its root.')
-            print(f'  Run `dax init` from {enclosing_dir} instead.')
-            return config
-
-    default_image = existing_project.get('image') or config.get('defaults', {}).get('image', 'dax-base')
-    image = _prompt('Image', default=default_image)
-
-    tenant = _prompt('Tenant (optional grouping label for state-tree paths and '
-                     'credential names)', default=existing_project.get('tenant'))
-
-    existing_creds = list(config.get('credentials', {}).keys())
-    already_selected = set(existing_project.get('creds', []))
-    new_creds = {}
-
-    # Single checkbox — existing creds pre-checked if already attached
-    if existing_creds:
-        choices = [
-            questionary.Choice(name, checked=(name in already_selected))
-            for name in existing_creds
-        ]
-        selected_creds = _q_checkbox('Select credentials for this project:', choices)
-    else:
-        selected_creds = []
-
-    # Define new credentials
-    while _q_confirm('Define a new credential?', default=False):
-        cred_name = _prompt('Credential name (e.g. ssh-github, github-dfarrow)')
-        if not cred_name:
-            continue
-        provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive'])
-        cred_def = _define_credential(cred_name, provider_name)
-        new_creds[cred_name] = cred_def
-        selected_creds.append(cred_name)
-
-    config.setdefault('credentials', {}).update(new_creds)
-
-    for cred_name in selected_creds:
-        cred_def = config['credentials'].get(cred_name) or new_creds.get(cred_name)
-        if not cred_def:
-            continue
-        provider_name = cred_def.get('provider')
-        if provider_name == 'ssh':
-            _setup_ssh_credential(cred_name, cred_def)
-        elif provider_name == 'github':
-            _setup_github_credential(cred_name, cred_def, config)
-        elif provider_name == 'claude':
-            _setup_claude_credential(cred_name, cred_def, config=config)
-        elif provider_name == 'auggie':
-            _setup_auggie_credential(cred_name, cred_def)
-        elif provider_name in ('gmail', 'drive'):
-            _setup_google_credential(cred_name, cred_def)
-
-    project_name = existing_project_name or cwd.name
-    register_project(config, name=project_name, project_dir=cwd,
-                     image=image, creds=selected_creds)
-    save_config(config)
-    if tenant:
-        run_env_set(config, project_name, 'tenant', tenant)
-    print(f'\nRegistered {project_name}. Run `dax run` to launch.')
-    return config
 
 
 def run_creds_add(config, cwd=None):
@@ -535,7 +395,7 @@ def _add_per_env_credential(config, provider, cwd=None):
     projects = config.get('projects') or {}
     if not projects:
         print(f'  no envs registered, so there is nothing to scope a {provider} '
-              f'credential to.\n  Run `dax init` first.')
+              f'credential to.\n  Run `dax run` from the env\'s folder first to register it.')
         return config, None
 
     print(f'\n  {provider} credentials are per env, and dax builds the name from the '
@@ -893,57 +753,6 @@ def run_env_show(config, name):
         print()
         print(f'  note: {describe_unknown_env_keys(unknown)}')
     print()
-
-
-def run_env_set(config, name, field, value, valid_features=None):
-    """Set a single field on one env's registry entry. Returns the new value.
-
-    `valid_features` is passed in by the caller rather than imported: the feature
-    functions live in dax.py, which imports this module, and validating against
-    them matters — a per-env feature list is silently ignored when misspelled,
-    the same failure mode a typo'd credential name had.
-    """
-    projects = config.get('projects', {})
-    if name not in projects:
-        known = ', '.join(sorted(projects)) or '(none registered)'
-        raise KeyError(f'no env named {name!r}. Known envs: {known}')
-    if field not in ENV_FIELDS:
-        raise ValueError(
-            f'unknown field {field!r}.\n' + env_field_help())
-
-    if field == 'features':
-        new = [f.strip() for f in value.split(',') if f.strip()]
-        if valid_features is not None:
-            unknown = [f for f in new if f not in valid_features]
-            if unknown:
-                raise ValueError(
-                    'not a dax feature: {} (see `dax features`)'.format(
-                        ', '.join(unknown)))
-    elif field == 'creds':
-        new = [c.strip() for c in value.split(',') if c.strip()]
-        # A bare provider name is not a credential in the registry — it asks
-        # dax to derive one per tenant/project (see BARE_PROVIDER_CREDS).
-        unknown = [c for c in new
-                   if c not in config.get('credentials', {})
-                   and c not in BARE_PROVIDER_CREDS]
-        if unknown:
-            raise ValueError(
-                'not defined in ~/.dax.yaml credentials: {} (or use a bare provider '
-                'name for a per-env credential: {})'.format(
-                    ', '.join(unknown), ', '.join(BARE_PROVIDER_CREDS)))
-    elif field == 'mounts':
-        new = [m.strip() for m in value.split(',') if m.strip()]
-    else:
-        new = value
-
-    old = projects[name].get(field)
-    projects[name][field] = new
-    save_config(config)
-
-    shown_old = ', '.join(old) if isinstance(old, list) else old
-    shown_new = ', '.join(new) if isinstance(new, list) else new
-    print(f'  [{name}] {field}: {shown_old if old is not None else "(unset)"} -> {shown_new}')
-    return new
 
 
 def run_env_accept_shared_files(config, name):
