@@ -398,9 +398,50 @@ dax config                     # break the YAML (e.g. delete a colon), save, qui
 | `dax config` again, quit without changing anything | "no changes"; `~/.dax.yaml.prev` is untouched (opening the file just to look never costs the undo copy) |
 | `dax config` from a shell **inside** a dax container | refuses immediately with "only runs on the host"; no editor opens. The container's own `dax` is the image's frozen copy, so before the end-of-branch rebuild run the branch's code directly: `python3 ~/dax/dax.py config` |
 
+## Step 8c — auggie removed
+
+```bash
+dax features | grep -i auggie            # no output
+dax creds add                            # the provider list has no auggie; Ctrl-C out
+cd <ys-augmentcode's folder> && dax -t run
+```
+
+| Check | Pass |
+|---|---|
+| `dax features` | no `auggie` |
+| `dax creds add` | auggie isn't offered as a provider |
+| `dax -t run` in `ys-augmentcode` | no "unknown feature: auggie" error; no `~/.augment` mount in the docker command; a warning names `ys-augmentcode` and `auggie` (features and creds) |
+| after removing `auggie` from its `features:` and `creds:` (`dax config`) | the auggie warning is gone |
+| `dax creds remove auggie` | clears the Keychain secret and registry entry (optional; your call) |
+
+## Step 8d — `mounts:` switches its feature on; one global substrate
+
+Setup with `dax config`:
+- add a top-level line: `substrate: /Users/dfarrow/fatsec/discernment`;
+- under `dxt-a`, add `mounts: [~/test]` and remove `mounts` from its
+  `features:` if present;
+- leave one real substrate env's per-env `substrate:` line in for now, to
+  see the retired-key warning.
+
+```bash
+cd ~/test/dxt-a && dax -t run
+cd ~/test/dxt-e && dax -t run
+dax env show dxt-e
+```
+
+| Check | Pass |
+|---|---|
+| `dax -t run` in `dxt-a` | the docker command mounts `~/test`; no `mounts` in `features:` needed |
+| `mounts` left in some env's `features:` | each `dax run` warns it's no longer used and to remove it; nothing is mounted twice |
+| `dax -t run` in `dxt-e` (`features: [substrate]`, no per-env path) | mounts `/Users/dfarrow/fatsec/discernment` and sets `SUBSTRATE_ROOT` |
+| an env still carrying a per-env `substrate:` line | the launch warning calls it a retired key: ignored, remove it |
+| `dax env show dxt-e` | shows the global substrate path |
+| temporarily remove the top-level `substrate:`, `dax -t run` in `dxt-e` | refused before launch, saying to add `substrate: <path>` via `dax config`; put it back |
+| new substrate env: `mkdir ~/test/dxt-i && cd ~/test/dxt-i && dax run` (process branch) | doesn't ask for a substrate path (the global one is used); decline at the confirm, then `rm -r ~/test/dxt-i` |
+
 ## Step 6 — docs sweep (run last, after step 8)
 
-Step 6 is implemented last (execution order 1, 2, 3, 4, 5, 7, 8, 8b, 6),
+Step 6 is implemented last (execution order 1, 2, 3, 4, 5, 7, 8, 8b, 8c, 8d, 6),
 so its checks come here.
 
 ```bash

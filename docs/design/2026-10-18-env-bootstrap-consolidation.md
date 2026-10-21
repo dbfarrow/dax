@@ -1,8 +1,9 @@
 # `dax env` lifecycle consolidation
 
-**Status:** Steps 1–5 built. 38 decisions:
+**Status:** Steps 1–8c built. 41 decisions:
 1–24 from 2026-10-18; 25–37 plus several in-place corrections from a
-pre-implementation risk review on 2026-10-19; 38 on 2026-10-20.
+pre-implementation risk review on 2026-10-19; 38 on 2026-10-20; 39–41
+on 2026-10-21.
 
 **Branch:** `feature/env-lifecycle-consolidation` (off `master`, rebuilt
 2026-10-18 after PR #10 merged — see note on `auto_enter` below).
@@ -805,6 +806,75 @@ working.
     from eleven. Built as step 8b, after step 8 and before step 6's docs
     sweep, so the sweep documents it.
 
+39. **Auggie support is removed entirely.** Decided 2026-10-21 (user: "we
+    can remove the entire auggie feature support"). Deleted:
+    `feature_auggie` (the `~/.augment` mount), `dax_creds/providers/auggie.py`,
+    the auggie branches of `dax creds add`/`login`/`list`/`update` and the
+    credential checks, the manual-login instructions, `_clear_auggie_session`,
+    the image's `npm install -g @augmentcode/auggie` and `auggie` wrapper, and
+    `auggiedir` in `.dax.yaml.example`.
+
+    **Old entries are ignored and warned about, like decision 36's.** The
+    live `ys-augmentcode` lists `auggie` in both `features:` and `creds:`, and
+    an `auggie` credential (provider `auggie`) is registered. Rather than let
+    `dax run` stop with "unknown feature: auggie", the name `auggie` in
+    `features:` and any credential whose provider is `auggie` are filtered out
+    wherever an env is read. Each `dax run` names envs still carrying them until
+    they're removed by hand, and restore drops them from old archives. The
+    Keychain secret is cleared with `dax creds remove auggie`, which needs
+    no auggie code. Built as step 8c, before step 6's docs sweep.
+
+40. *(The substrate half is superseded by decision 41: substrate stays a
+    selected feature, with one global path. The mounts half stands.)*
+    **`mounts:` and `substrate:` switch their own features on.** Decided
+    2026-10-21 (user: "it's redundant to have to specify the feature and
+    then also the mount points"). Both features read their data straight off
+    the env's entry, and do nothing without it, so also listing them in
+    `features:` was pure ceremony. Now a non-empty `mounts:` turns on the
+    mounts feature, and a `substrate:` path turns on the substrate feature. No
+    `features:` entry is needed for either, and none means none.
+    - **`mounts`/`substrate` left in `features:`** are treated like decision
+      36's retired names (the user's call, over accepting them quietly):
+      filtered out, and named on every `dax run` until removed by hand.
+      Listing one without its data still does nothing, just as before.
+    - `dax env show`'s "set but the feature isn't active" notes for mounts and
+      substrate are deleted, since that state can no longer exist.
+    - The bootstrap wizard stops writing `features: [substrate]`.
+    - Restore drops `mounts`/`substrate` from an archive's `features:` (the
+      `mounts:`/`substrate:` values themselves travel as before).
+    - `-f mounts`/`-f substrate` and a cwd-local `.dax.yaml` listing them
+      are filtered the same way. A feature has no data to work with outside
+      the env entry anyway.
+    Built as step 8d, before step 6's docs sweep.
+
+41. **One global substrate; each process opts in with `features:
+    [substrate]`.** Decided 2026-10-21 (user: "the folder holding the
+    substrate should be set as a global setting (so all projects share the
+    same substrate) rather than having to provide the path to it every place
+    it's used"). Replaces decision 40's substrate half.
+    - **The path is a top-level `substrate:` in `~/.dax.yaml`.** The
+      bootstrap wizard already used that key as its default answer, so this
+      makes an existing convention the only one. The live config has 8
+      substrate envs, all pointing at `/Users/dfarrow/fatsec/discernment`
+      and none at a top-level value, so migration is one line added and 8
+      per-env keys removed.
+    - **`substrate` in `features:` is the opt-in** (not warned about,
+      unlike decision 40's plan). An env that selects it while no global path
+      is set is refused at launch, with a message saying to add
+      `substrate: <path>` via `dax config`.
+    - **A per-env `substrate:` key is retired:** removed from `ENV_FIELDS`,
+      so it's reported as a retired key ("ignored; remove them") until taken
+      out. No per-env override: one shared substrate is the point.
+    - **Bootstrap wizard:** the substrate branch uses the global path. If none
+      is set yet, it asks once (validated as now), writes it as the top-level
+      `substrate:`, and says so in the summary; every later process uses it
+      without asking.
+    - **Archive/restore:** new archives stop recording a substrate path.
+      Restore keeps `substrate` in features and ignores any path in an old
+      manifest. If the global path isn't set, the summary says the env will
+      need it.
+    - **`dax env show`** shows the global path for envs with the feature.
+
 ## The full env lifecycle, end to end
 
 Every stage, naming the exact command and the decision behind its shape.
@@ -942,7 +1012,7 @@ from eleven.
 - **Update `CLAUDE.md`'s progress note after every step**, commit or not.
   It's eight steps of uncommitted work, and a context compaction or outage
   mid-build shouldn't lose where things stand.
-- **Execution order is 1, 2, 3, 4, 5, 7, 8, 8b, 6.** Step 7 needs steps 3
+- **Execution order is 1, 2, 3, 4, 5, 7, 8, 8b, 8c, 8d, 6.** Step 7 needs steps 3
   and 4 in place, and step 6's doc sweep and grep gate can only pass once
   steps 7 and 8 have removed the old names. The step numbers are kept as
   labels.
@@ -1172,6 +1242,37 @@ single-target, cwd-based per decision 3).**
   editor and a decline exits non-zero; unknown keys are reported; a missing
   config is never created. The editor is replaced by a script that edits
   the file.
+
+**Step 8c — remove auggie (decision 39).**
+- Delete the auggie code listed in decision 39, the image's auggie install and
+  wrapper, and `test_dax_creds_auggie.py`. Drop auggie cases from the other
+  test files.
+- Generalize decision 36's filter and warning so `auggie` in `features:`
+  and auggie-provider credentials in `creds:` are retired entries too,
+  reported with a message that fits both (not "Claude is automatic now").
+  Restore drops them.
+- Tests: an env listing `auggie` launches with no auggie mount and a warning;
+  `dax creds add` no longer offers auggie; an auggie-provider credential is
+  not resolved for an env; restore drops `auggie` from an archive's features.
+
+**Step 8d — `mounts:` implies its feature; one global substrate
+(decisions 40, 41).**
+- `cmd_run` adds `mounts` when the entry's `mounts:` is non-empty. `mounts`
+  in `features:` joins the retired-features filter and warning for every
+  source. Delete `run_env_show`'s "mounts feature not active" note, and
+  restore's carrying of `mounts` in features.
+- `feature_substrate` reads the top-level `substrate:` and refuses if it's
+  unset. Drop `substrate` from `ENV_FIELDS` and stop promoting
+  `project['substrate']`. The wizard's substrate branch uses the global
+  path, or asks once and saves it as the top-level `substrate:`. Archive
+  stops writing the path; restore ignores it. `env show` displays the
+  global path.
+- Tests: an env with `mounts:` and no `features:` gets its mounts; `mounts`
+  in `features:` is warned about and mounts nothing extra; an env with
+  `features: [substrate]` mounts the global path and sets `SUBSTRATE_ROOT`;
+  no global path refuses at launch; a per-env `substrate:` is reported as
+  retired; the wizard asks for and saves the global path only when it's
+  missing.
 
 **Step 6 — doc/example sweep (covers both halves of this doc).** **Run it
 last, after steps 7 and 8**, even though it keeps its number: until then

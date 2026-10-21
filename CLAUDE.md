@@ -338,7 +338,7 @@ the shared mount, which is the intended fallback.
 - **`dax env` lifecycle consolidation** — full design in
   `docs/design/2026-10-18-env-bootstrap-consolidation.md`, branch
   `feature/env-lifecycle-consolidation` (off `master`; steps 1–5 built,
-  38 decisions; see "Build progress" below).
+  41 decisions; see "Build progress" below).
   Decisions 25–37 came from a 2026-10-19 pre-implementation risk review:
   env-name collisions are fatal; restore only targets an empty,
   unregistered cwd and never overwrites anything (rollback = destroy, then
@@ -522,7 +522,36 @@ the shared mount, which is the intended fallback.
       - `.prev` is written only when an edit changes the file;
       - a missing editor gets a message, not a traceback.
     - A missing config is decision 37's message.
-    - Awaiting the runbook's step 8b manual checks before step 6.
+    - Manual checks passed (the in-container refusal check is deferred to
+      the end-of-branch rebuild); committed as `1fa3d68`.
+  - **Decision 39 added 2026-10-21:** remove auggie support entirely, as
+    step 8c before step 6. `auggie` in `features:` and auggie-provider creds
+    are ignored and warned about until hand-removed (live: `ys-augmentcode`,
+    plus the registered `auggie` credential).
+  - **Step 8c built 2026-10-21, suite 694 (from 695; 11 auggie tests
+    deleted, 10 new):**
+    - Deleted: `feature_auggie`, `providers/auggie.py`, `wrappers/auggie`,
+      `_cmd_creds_login_auggie`, `_clear_auggie_session`, and auggie's place
+      in creds add/list/update and the credential checks.
+    - The image's auggie npm install and wrapper are gone (takes effect on
+      the end-of-branch rebuild); `auggiedir` is gone from the example.
+    - Step 7's old-Claude filter is generalized: `RETIRED_FEATURES` (adds
+      `auggie`), `is_retired_credential`, `retired_entries`, and
+      `_warn_retired_entries`, whose message now fits both.
+    - Manual checks passed 2026-10-21.
+  - **Decision 40 added 2026-10-21:** a non-empty `mounts:` / a `substrate:`
+    path switch their features on, with no `features:` entry. `mounts` and
+    `substrate` left in `features:` are warned about like retired names.
+    Built as step 8d.
+  - **Decision 41 added 2026-10-21, replacing decision 40's substrate
+    half:**
+    - one global top-level `substrate:` path; each process opts in with
+      `features: [substrate]`;
+    - a per-env `substrate:` is a retired key;
+    - the wizard asks once and saves the global path when it's missing.
+
+    Live migration: add `substrate: /Users/dfarrow/fatsec/discernment` and
+    remove the 8 identical per-env lines.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.
