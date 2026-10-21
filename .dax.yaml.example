@@ -79,3 +79,16 @@ backup:
 # The bootstrap wizard asks for it, and saves it here, the first time you
 # create a process env if it isn't set yet.
 # substrate: ~/src/virgil
+
+# Which browser each env's Claude login opens. credential_defaults covers
+# every env; a tenant's own block under `tenants:` is merged over it, so it
+# only needs what differs. The `dax run` wizard asks the first time you use a
+# new tenant. `dax env show` says which browser an env's login will open.
+# credential_defaults:
+#   claude:
+#     browser: chrome
+#     chrome_profile: Profile 2
+# tenants:
+#   ysecurity:
+#     claude:
+#       chrome_profile: Profile 5

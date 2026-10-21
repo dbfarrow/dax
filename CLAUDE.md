@@ -8,7 +8,7 @@ functions in `dax.py`.
 ## Current state — read this first (2026-10-21)
 
 The env-lifecycle consolidation (`feature/env-lifecycle-consolidation`; design
-and all 42 decisions in `docs/design/2026-10-18-env-bootstrap-consolidation.md`)
+and all 43 decisions in `docs/design/2026-10-18-env-bootstrap-consolidation.md`)
 reshaped dax's CLI and env model. **Sections further down are history: their
 command names and mechanisms often predate this**; trust this section and
 the code over them.
@@ -47,11 +47,15 @@ the code over them.
   after that folder.
 - **Removed outright:** auggie support, and the multi-tenant model
   (`dax_creds/tenant.py`).
+- **Per-tenant browser profiles:** a top-level `tenants:` block
+  (`tenants.<tenant>.claude`) is merged over `credential_defaults.claude`
+  in `synthesized_credential` (decision 43). The wizard asks for a brand-new
+  tenant only.
 - **Versioning:** semver in `VERSION` (3.0.0 is this branch), with
   `dax --version` and `CHANGELOG.md`. `dax build` labels the image
   `dax.version`, and `dax run` warns when the label differs from the host's
   version (decision 42).
-- **Tests:** 718 passing. Manual runbook:
+- **Tests:** 752 passing. Manual runbook:
   `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
 
 ## Baseline features replace the top-level `features:` list
@@ -391,7 +395,7 @@ the shared mount, which is the intended fallback.
 - **`dax env` lifecycle consolidation** — full design in
   `docs/design/2026-10-18-env-bootstrap-consolidation.md`, branch
   `feature/env-lifecycle-consolidation` (off `master`; steps 1–5 built,
-  42 decisions; see "Build progress" below).
+  43 decisions; see "Build progress" below).
   Decisions 25–37 came from a 2026-10-19 pre-implementation risk review:
   env-name collisions are fatal; restore only targets an empty,
   unregistered cwd and never overwrites anything (rollback = destroy, then
@@ -648,6 +652,31 @@ the shared mount, which is the intended fallback.
     - Committed 2026-10-21. The user signed off the end-of-branch checks
       and finished the live-config cleanup. What's left on the branch is the
       merge to `master` and the tag, both on the user's word.
+  - **Step 10 (decision 43, per-tenant browser profiles) built 2026-10-21,
+    suite 752 (from 718):**
+    - On this branch, as part of 3.0.0, by the user's choice.
+    - `synthesized_credential(config, provider, tenant)` merges
+      `tenants.<tenant>.<provider>` over `credential_defaults`. Its two
+      callers pass the env's tenant, so login, `creds list` and `dax run`
+      need no change.
+    - `unknown_tenant_entries` warns on `dax run` and `dax config` about a
+      tenant no env uses, or a provider other than `claude`.
+    - `env show` prints `login opens <browser>   (tenant X | credential_defaults | nothing set)`.
+    - The wizard's `_ask_tenant_browser` runs only for a tenant that's in
+      neither the registry nor `tenants:`. "Same as default" writes
+      nothing. There's a `claude login` summary row, and one save.
+    - Found while testing: questionary turns `Choice(value=None)` into the
+      title, so the "same" choice uses a string sentinel.
+    - Review fixes (suite now 752):
+      - malformed `tenants:` levels are ignored and reported, not crashes,
+        and `dax config` refuses a non-map `tenants:`;
+      - an emptied `tenants:`/`credential_defaults:` key no longer crashes
+        the save;
+      - a tenant `browser` drops the default's `chrome_profile`;
+      - a profile whose merged browser isn't Chrome is flagged;
+      - the daemon opens plain Chrome rather than a profile named "None";
+      - the `creds add` note and the decision-43 doc are corrected.
+    - Manual checks passed 2026-10-21; committed.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.
@@ -1211,7 +1240,8 @@ the shared mount, which is the intended fallback.
   sitting in the host's `~/.claude/.credentials.json` is the user's to
   delete by hand.
 
-- **Per-tenant browser profiles for Claude logins.** Raised 2026-10-19
+- **~~Per-tenant browser profiles for Claude logins~~ — built as the
+  consolidation's step 10 (decision 43).** Raised 2026-10-19
   (consolidation decision 35): the user wants Claude logins steered to
   different Chrome profiles by tenant (e.g. `ysecurity` → its own profile).
   Today `credential_defaults.claude` applies to every env regardless of

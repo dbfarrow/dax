@@ -905,6 +905,49 @@ working.
       already handle old configs; add one only if dax ever needs to tell
       config formats apart.
 
+43. **Per-tenant browser profiles for Claude logins.** Decided 2026-10-21
+    (user, at decision 35: "eventually i'll want to steer claude credentials
+    to different profiles based on the tenant the env is in"). Built as step
+    10, on this branch, as part of 3.0.0.
+    - **A top-level `tenants:` block, keyed by tenant, then provider:**
+
+      ```yaml
+      tenants:
+        ysecurity:
+          claude:
+            chrome_profile: Profile 5
+      ```
+
+      It is merged over `credential_defaults.<provider>`, so a tenant only
+      states what differs. A browser and its profile are overridden
+      together: a tenant that sets `browser` without `chrome_profile` doesn't
+      inherit the default's profile. It's the first per-tenant setting, and
+      the block leaves room for more.
+    - **Applied where the implied credential is synthesized**
+      (`synthesized_credential`, which now takes the tenant). Login, `creds
+      list` and `env show` all read that definition, so they pick it up
+      unchanged. An explicitly registered credential keeps its own settings,
+      as it already did over `credential_defaults`.
+    - **The bootstrap wizard asks only for a brand-new tenant** (in neither
+      the registry nor `tenants:`). The choices are "Same as default
+      (<current>)" or any browser or Chrome profile found on the machine.
+      The default, chosen either way, writes nothing. Any other choice
+      writes `tenants.<t>.claude`, shown in the summary and saved in the same
+      single save. A tenant already in use is never asked again. `dax env
+      restore` doesn't ask, even when it asks for a new tenant; set the block
+      with `dax config`.
+    - **Checked like env keys,** on `dax run` and `dax config`:
+      - a `tenants:` entry no env uses yet (typo?). The block still applies to
+        the next env given that tenant, for example after `dax env destroy`
+        removed its last one;
+      - a provider other than `claude`;
+      - a level that isn't a map, which is ignored rather than crashing
+        (`dax config` refuses a non-map `tenants:` outright);
+      - a `chrome_profile` whose merged browser isn't Chrome, which would be
+        silently ignored.
+    - **`dax env show`** says which browser the env's Claude login opens and
+      where that setting comes from (tenant or default).
+
 ## The full env lifecycle, end to end
 
 Every stage, naming the exact command and the decision behind its shape.

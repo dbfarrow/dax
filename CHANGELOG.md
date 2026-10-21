@@ -37,6 +37,7 @@ The env-lifecycle consolidation. Design and every decision behind it: `docs/desi
 ### Added
 
 - `dax config`, which opens `~/.dax.yaml` in `$VISUAL`/`$EDITOR`, keeps the previous version as `~/.dax.yaml.prev`, and checks the result. It runs on the host only.
+- Per-tenant browser profiles for Claude logins: a top-level `tenants:` block, merged over `credential_defaults`. The `dax run` wizard asks for one when it sees a new tenant.
 - `dax --version`. `dax build` labels the image with its version, and `dax run` warns when the image was built by a different version.
 
 ### Updating `~/.dax.yaml` from 2.x

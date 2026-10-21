@@ -99,6 +99,11 @@ credential_defaults:
     browser: chrome
     chrome_profile: Profile 2
 
+tenants:                        # per-tenant overrides of credential_defaults (optional)
+  ysecurity:
+    claude:
+      chrome_profile: Profile 5
+
 credentials:
   github-dfarrow:
     provider: github
@@ -135,6 +140,7 @@ projects:
 | `backup_dir` | Where `dax env archive` writes and `dax env restore` reads; defaults to `backup/` in this checkout |
 | `substrate` | The one substrate repo every process env shares (see the `substrate` feature) |
 | `credential_defaults` | Per-provider browser settings for derived credentials, e.g. every env's Claude login |
+| `tenants` | Per-tenant settings, merged over `credential_defaults`: today, which browser a tenant's Claude logins open |
 | `credentials` | Named credential definitions (managed by `dax creds`) |
 | `projects` | Registered environments (created by `dax run`'s wizard, edited with `dax config`) |
 
@@ -193,7 +199,22 @@ Every env has its own Claude credential, named `claude-<tenant>-<env>`, created 
 
 The login runs in a throwaway container against a private temporary folder (never your host `~/.claude`), and the token goes straight into Keychain. On each launch the `claude` wrapper writes it into the env's own state tree, and on container stop dax syncs the refreshed token back to Keychain and removes it from disk. `dax run` reruns the login before launch when the last one is older than `defaults.relogin_cooldown_hours`.
 
-Browser and Chrome profile for these logins come from `credential_defaults.claude`.
+Browser and Chrome profile for these logins come from `credential_defaults.claude`, with the env's tenant's own `tenants.<tenant>.claude` merged over it. So a client's envs can log in through that client's Chrome profile while everything else uses your default:
+
+```yaml
+credential_defaults:
+  claude:
+    browser: chrome
+    chrome_profile: Profile 2
+tenants:
+  ysecurity:
+    claude:
+      chrome_profile: Profile 5
+```
+
+A tenant that sets `browser` replaces the default's `chrome_profile` too, unless it sets its own. A `chrome_profile` only takes effect with `browser: chrome`; set on its own, as above, it relies on the default's browser being Chrome.
+
+The `dax run` wizard asks which browser to use the first time it sees a new tenant ("Same as default" writes nothing). `dax env show` says which browser an env's login opens and where that setting came from. `dax run` and `dax config` warn about a `tenants:` entry that no env uses, or one that can't take effect.
 
 #### gmail
 

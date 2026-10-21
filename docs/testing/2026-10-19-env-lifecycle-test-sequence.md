@@ -488,6 +488,36 @@ table below.
 
 ---
 
+## Step 10 — per-tenant browser profiles
+
+Uses a scratch env with a brand-new tenant, so your real tenants' settings
+are never touched. Run in a host terminal.
+
+```bash
+mkdir ~/test/dxt-t && cd ~/test/dxt-t && dax run
+#   tenant: dxt-tenant (new) → you're asked "Browser for dxt-tenant Claude logins:"
+#   pick a Chrome profile that ISN'T your default → summary shows it; confirm; exit
+dax env show dxt-t
+dax creds list | grep dxt-t
+dax creds login claude-dxt-tenant-dxt-t     # watch which profile opens; cancel is fine
+dax config                                  # rename the block to `dxt-tenantt`, save
+```
+
+| Check | Pass |
+|---|---|
+| wizard | asks the browser question for the new tenant, offering "Same as default (…)" first |
+| `~/.dax.yaml` after | has `tenants: {dxt-tenant: {claude: {…}}}` with the profile you picked |
+| `dax env show dxt-t` | `login opens Chrome: <profile>   (tenant dxt-tenant)` |
+| `dax creds list` | the `claude-dxt-tenant-dxt-t` row shows that profile |
+| `dax creds login` | opens that profile, not your default |
+| `dax config` with a misspelled tenant | warns `tenant 'dxt-tenantt' in \`tenants:\` is used by no env yet (typo?)` |
+| a second `dax run` in another new folder with tenant `dxt-tenant` | is **not** asked again |
+
+Cleanup: `dax env destroy dxt-t` (and any second scratch env), then remove
+the `tenants:` block with `dax config`.
+
+---
+
 ## End of branch
 
 ```bash
