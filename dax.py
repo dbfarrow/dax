@@ -140,9 +140,10 @@ def _warn_retired_entries(found):
     """One line per env still listing a feature or credential dax no longer
     uses (decisions 36, 39): ignored, and reported until hand-removed."""
     for env_name, entries in found.items():
-        dax_print('[!] ~/.dax.yaml: env {!r} still lists {} — no longer used (Claude is '
-                  'automatic, auggie was removed); remove {}'.format(
-                      env_name, ', '.join(entries), 'it' if len(entries) == 1 else 'them'))
+        dax_print('[!] ~/.dax.yaml: env {!r} still lists {} — no longer needed (Claude is '
+                  'automatic, `mounts:` switches mounts on by itself, auggie was removed); '
+                  'remove {}'.format(env_name, ', '.join(entries),
+                                     'it' if len(entries) == 1 else 'them'))
 
 
 def _exit_missing_config():
@@ -564,14 +565,16 @@ def feature_mounts(config):
 
 
 def feature_substrate(config):
-    """Mounts a virgil-style substrate repo (rw) and exposes it as
+    """Mounts the virgil-style substrate repo (rw) and exposes it as
     $SUBSTRATE_ROOT — the container path both the substrate's own hooks and
     the `claude` wrapper's gate/settings-delivery logic read (see
     docs/design/VALIDATION.md's dax contract).
 
     A single path, unlike the generic `mounts` list feature_mounts handles:
     dax needs to know specifically which mount holds `shared/wire.sh` and
-    `shared/new-process.sh`, not just that something extra is mounted.
+    `shared/new-process.sh`, not just that something extra is mounted. It's
+    one top-level `substrate:` setting shared by every process (decision 41);
+    an env opts in with `features: [substrate]`.
 
     `wire.sh --quiet` itself runs once per container boot (dax-entrypoint.sh,
     baked into the image), not here and not on every `claude` launch — see
@@ -579,9 +582,20 @@ def feature_substrate(config):
     """
     substrate = config.get('substrate')
     if not substrate:
-        dax_print("[!] no substrate configured for this env "
-                  "(add `substrate: <path>` to its entry in ~/.dax.yaml)")
-        return []
+        # One global path shared by every process (decision 41). Refused
+        # rather than launched without it: a substrate process can't work
+        # without its substrate, and the claude wrapper's gate would refuse
+        # inside the container anyway, later and less clearly.
+        dax_print("[!] this env uses the substrate feature, but no substrate is set.")
+        old = config.get('_per_env_substrate')
+        if old:
+            dax_print("    Its entry still has a per-env `substrate: {}`, which is no longer "
+                      "read. Move that path to a top-level `substrate:` in ~/.dax.yaml "
+                      "(`dax config`); every process shares it.".format(old))
+        else:
+            dax_print("    Add a top-level `substrate: <path>` to ~/.dax.yaml (`dax config`); "
+                      "every process shares it.")
+        sys.exit(1)
     host = os.path.expanduser(substrate)
     # Same reasoning as feature_mounts' own check: Docker auto-creates a
     # missing bind-mount source as an empty directory rather than failing,
@@ -1044,7 +1058,17 @@ def cmd_run(args):
         # reads config['tenant'] above — project entries aren't otherwise
         # promoted into the flat config feature functions see.
         config['mounts'] = project.get('mounts') or []
-        config['substrate'] = project.get('substrate')
+        # A non-empty `mounts:` switches the feature on by itself (decision
+        # 40); `mounts` listed in `features:` is filtered as retired above.
+        if config['mounts'] and 'mounts' not in config['features']:
+            config['features'].append('mounts')
+        # No per-env `substrate:` any more (decision 41): feature_substrate
+        # reads the one top-level path. Taken from the registry, not just from
+        # load_config's earlier read, because the bootstrap wizard may have
+        # just saved it (a first process env's first launch). An old per-env
+        # path is passed along only so a refusal can say what to move.
+        config['substrate'] = dax_config.get('substrate') or config.get('substrate')
+        config['_per_env_substrate'] = project.get('substrate')
 
         # Two competing conventions have accumulated for "the default image":
         # a bare top-level `image:` (what load_config() above reads, and what
@@ -1954,9 +1978,15 @@ def _bootstrap_env(config, env_dir):
         ])
 
         process = None
+        save_substrate = False
         if kind == 'process':
+            # One substrate shared by every process (decision 41): the
+            # top-level `substrate:`, asked for and saved only if it isn't
+            # set yet. A set-but-broken one is fixed input, so it's fatal.
+            global_substrate = config.get('substrate')
             while True:
-                substrate = _q_path('Substrate path:', default=config.get('substrate'))
+                substrate = global_substrate or _q_path(
+                    'Substrate path (saved as the one substrate every process shares):')
                 if not substrate:
                     dax_print('[!] a substrate path is required')
                     continue
@@ -1964,22 +1994,26 @@ def _bootstrap_env(config, env_dir):
                 script = substrate_root / 'shared' / 'new-process.sh'
                 try:
                     types = _read_process_types(substrate_root)
+                    problem = (None if script.is_file() else
+                               'no shared/new-process.sh in {}'.format(substrate_root))
+                    if problem is None and not types:
+                        problem = '{} declares no process types'.format(substrate_root)
                 except ValueError as e:
-                    dax_print('[!] {}'.format(e))
-                    continue
-                if not script.is_file():
-                    dax_print('[!] no shared/new-process.sh in {}'.format(substrate_root))
-                    continue
-                if not types:
-                    dax_print('[!] {} declares no process types'.format(substrate_root))
-                    continue
-                break
+                    problem = str(e)
+                if problem is None:
+                    break
+                dax_print('[!] {}'.format(problem))
+                if global_substrate:
+                    dax_print('    That is your global substrate; fix the top-level '
+                              '`substrate:` in ~/.dax.yaml (`dax config`).')
+                    sys.exit(1)
+            save_substrate = not global_substrate
             while True:
-                title = _q_text('Process title:')
+                title = _q_text('Process title (the heading for its context.md, inbox.md and CLAUDE.md):')
                 if title:
                     break
                 dax_print('[!] a process title is required')
-            process_type, skill = _q_select('Process type:', [
+            process_type, skill = _q_select('Process type (picks the substrate skill Claude works it with):', [
                 questionary.Choice('{} — {}'.format(t, desc), value=(t, sk))
                 for t, sk, desc in types])
             print()
@@ -2006,7 +2040,9 @@ def _bootstrap_env(config, env_dir):
         ]
         if process:
             rows += [
-                ('substrate', str(process['substrate'])),
+                ('substrate', str(process['substrate']) + (
+                    '   (will be saved as the global substrate)' if save_substrate
+                    else '   (global)')),
                 ('title', process['title']),
                 ('type', '{} (skill: {})'.format(process['type'], process['skill'])),
                 ('git', 'yes' if process['git'] else 'no'),
@@ -2048,8 +2084,8 @@ def _bootstrap_env(config, env_dir):
     entry = {'dir': str(env_dir), 'image': image, 'creds': creds, 'tenant': tenant}
     if features:
         entry['features'] = features
-    if process:
-        entry['substrate'] = str(process['substrate'])
+    if save_substrate:
+        config['substrate'] = str(process['substrate'])
     config.setdefault('projects', {})[name] = entry
     save_config(config)
     dax_print('[+] registered {}'.format(name))
@@ -2249,7 +2285,6 @@ def _write_env_archive(config, name, out_path):
         'creds': project.get('creds') or [],
         'features': project.get('features') or [],
         'mounts': project.get('mounts') or [],
-        'substrate': project.get('substrate'),
         'had_state_tree': has_state,
     }
 
@@ -2917,8 +2952,8 @@ def _restored_entry(config, manifest, env_dir, tenant):
                 entry.ca.items['features'] = [None, None, token, None]
     if manifest.get('mounts'):
         entry['mounts'] = list(manifest['mounts'])
-    if manifest.get('substrate'):
-        entry['substrate'] = manifest['substrate']
+    # A substrate path in an old manifest is ignored: the one global
+    # setting is used (decision 41).
 
     return entry, {'dropped_features': dropped}
 
@@ -3078,8 +3113,10 @@ def _run_env_restore(config, args):
                 ', '.join(notes['dropped_features']))))
         if 'mounts' in entry:
             rows.append(('mounts', ', '.join(entry['mounts']) + '   (paths only)'))
-        if 'substrate' in entry:
-            rows.append(('substrate', entry['substrate'] + '   (path only)'))
+        if 'substrate' in (entry.get('features') or []):
+            rows.append(('substrate', config.get('substrate') or
+                         'NOT SET: add a top-level `substrate: <path>` (`dax config`) '
+                         'before launching'))
         _print_table(('field', 'value'), rows)
 
         if not _q_confirm('Restore {} here?'.format(name), default=True):

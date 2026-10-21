@@ -81,7 +81,7 @@ def test_an_env_that_mentions_nothing_about_claude_still_gets_it(tmp_path, monke
 
 
 @pytest.mark.parametrize('listed', [['claude'], ['claude_tenant_state'],
-                                    ['claude', 'claude_tenant_state', 'mounts']])
+                                    ['claude', 'claude_tenant_state', 'auto_claude']])
 def test_old_feature_names_in_an_envs_own_list_apply_claude_once(
         tmp_path, monkeypatch, capsys, listed):
     _setup(tmp_path, monkeypatch, project_extra={'features': listed})
@@ -108,13 +108,13 @@ def test_old_feature_names_from_a_cwd_local_file_or_dash_f_apply_once(
 
 
 def test_a_feature_from_two_sources_is_applied_once(tmp_path, monkeypatch, capsys):
-    _, repo = _setup(tmp_path, monkeypatch, project_extra={'features': ['mounts']})
+    _, repo = _setup(tmp_path, monkeypatch, project_extra={'features': ['auto_claude']})
     with open(repo / '.dax.yaml', 'w') as f:
-        yaml.dump({'features': ['mounts']}, f)
+        yaml.dump({'features': ['auto_claude']}, f)
 
-    cmd_run(_args(features='mounts'))
+    cmd_run(_args(features='auto_claude'))
 
-    assert capsys.readouterr().out.count('adding mounts') == 1
+    assert capsys.readouterr().out.count('adding auto_claude') == 1
 
 
 def test_envs_still_listing_claude_entries_are_reported(tmp_path, monkeypatch, capsys):
@@ -128,13 +128,14 @@ def test_envs_still_listing_claude_entries_are_reported(tmp_path, monkeypatch, c
 
     out = capsys.readouterr().out
     assert ("env 'fabric' still lists claude_tenant_state (features), claude (creds) "
-            "— no longer used (Claude is automatic, auggie was removed); remove them") in out
+            "— no longer needed (Claude is automatic, `mounts:` switches mounts on by "
+            "itself, auggie was removed); remove them") in out
     assert "env 'ot' still lists claude-ysec-ot (creds)" in out
     assert 'gh (creds)' not in out
 
 
 def test_no_report_once_the_entries_are_gone(tmp_path, monkeypatch, capsys):
-    _setup(tmp_path, monkeypatch, project_extra={'features': ['mounts']})
+    _setup(tmp_path, monkeypatch, project_extra={'features': ['auto_claude']})
 
     cmd_run(_args())
 

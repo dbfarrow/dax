@@ -442,13 +442,13 @@ def test_claude_entries_in_an_archive_are_dropped_on_restore(home, monkeypatch, 
     }
     _save(config)
     _archive(home, 'ot', tenant='acme', creds=['claude-acme-ot', 'claude', 'github-me'],
-             features=['claude_tenant_state', 'claude', 'mounts'])
+             features=['claude_tenant_state', 'claude', 'mounts', 'auto_claude'])
 
     _restore(monkeypatch, home / 'ot-check', source='ot')
 
     entry = load_dax_config()['projects']['ot-check']
     assert list(entry['creds']) == ['github-me']
-    assert list(entry['features']) == ['mounts']
+    assert list(entry['features']) == ['auto_claude']  # mounts: switches itself on now
     assert '#- claude' not in _yaml_text(home)  # dropped, not kept commented out
     out = capsys.readouterr().out
     assert 'claude-acme-ot-check (its own; logs in fresh)' in out
@@ -498,12 +498,12 @@ def test_an_archived_credential_is_stripped_and_reported(home, monkeypatch, caps
 
 def test_features_dax_no_longer_has_are_kept_commented_out(home, monkeypatch, capsys):
     """Decision 31, with a name that is not and never was a dax feature."""
-    env_dir, _ = _archive(home, 'demo', features=['mounts', 'oldfeature'])
+    env_dir, _ = _archive(home, 'demo', features=['auto_claude', 'oldfeature'])
     _destroy('demo')
 
     _restore(monkeypatch, env_dir, source='demo')
 
-    assert list(load_dax_config()['projects']['demo']['features']) == ['mounts']
+    assert list(load_dax_config()['projects']['demo']['features']) == ['auto_claude']
     assert '#- oldfeature' in _yaml_text(home)
     assert 'kept commented out: oldfeature' in capsys.readouterr().out
 
@@ -520,7 +520,7 @@ def test_all_unknown_features_leave_an_empty_list_with_the_comments(home, monkey
 
 
 def test_the_commented_features_survive_a_later_save(home, monkeypatch):
-    env_dir, _ = _archive(home, 'demo', features=['mounts', 'oldfeature'])
+    env_dir, _ = _archive(home, 'demo', features=['auto_claude', 'oldfeature'])
     _destroy('demo')
     _restore(monkeypatch, env_dir, source='demo')
 
@@ -530,7 +530,7 @@ def test_the_commented_features_survive_a_later_save(home, monkeypatch):
 
 
 def test_the_registry_is_saved_exactly_once(home, monkeypatch):
-    env_dir, _ = _archive(home, 'demo', tenant='acme', features=['mounts'])
+    env_dir, _ = _archive(home, 'demo', tenant='acme', features=['auto_claude'])
     _destroy('demo', tenant='acme')
     from dax_creds import init
     real_save = init.save_config
@@ -542,7 +542,7 @@ def test_the_registry_is_saved_exactly_once(home, monkeypatch):
 
     assert len(calls) == 1
     entry = load_dax_config()['projects']['demo']
-    assert entry['tenant'] == 'acme' and list(entry['features']) == ['mounts']
+    assert entry['tenant'] == 'acme' and list(entry['features']) == ['auto_claude']
 
 
 # --- old archives --------------------------------------------------------

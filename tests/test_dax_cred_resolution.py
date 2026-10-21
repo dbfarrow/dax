@@ -220,9 +220,9 @@ def test_retired_entries_finds_features_and_creds():
     config = {
         'credentials': {'claude-fre': {'provider': 'claude'}, 'gh': {'provider': 'github'}},
         'projects': {
-            'a': {'features': ['claude_tenant_state', 'mounts'], 'creds': ['claude', 'gh']},
+            'a': {'features': ['claude_tenant_state', 'auto_claude'], 'creds': ['claude', 'gh']},
             'b': {'features': ['claude'], 'creds': ['claude-fre']},
-            'clean': {'features': ['mounts'], 'creds': ['gh']},
+            'clean': {'features': ['auto_claude'], 'creds': ['gh']},
         },
     }
 

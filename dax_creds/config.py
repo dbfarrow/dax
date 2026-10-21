@@ -18,17 +18,15 @@ ENV_FIELDS = {
     'tenant': 'grouping label used for state-tree paths and credential names',
     'dir': 'absolute path to the project directory on the host',
     'image': 'docker image to run for this env',
-    'creds': 'comma-separated credential names (replaces the whole list)',
+    'creds': 'credential names (the Claude one is implied)',
     'features': 'features for this env, on top of the always-on baseline',
-    'mounts': 'comma-separated host paths, each mounted at $HOME/<name> in the '
-              'container (needs "mounts" in features too). A path may be '
+    'mounts': 'host paths, each mounted at $HOME/<name> in the container (a '
+              'non-empty list switches the feature on by itself). A path may be '
               '<host>:<container_name> to mount under a name other than its own '
               'basename, e.g. ~/.claude:host-claude, and/or end in :ro to mount '
               'read-only instead of the read-write default, e.g. '
               '~/discernment::ro (empty middle field keeps the default name) '
               'or ~/.claude:host-claude:ro',
-    'substrate': 'host path to a virgil-style substrate repo, mounted read-write and '
-                 'exposed as $SUBSTRATE_ROOT (needs "substrate" in features too)',
 }
 
 
@@ -161,9 +159,10 @@ def sync_claude_shared_files(tenant, project):
 
 # Per-env entries dax no longer uses, filtered out wherever an env's
 # `features:`/`creds:` are read and reported until hand-removed (decisions
-# 36, 39): `claude`/`claude_tenant_state` because Claude is a baseline feature
-# with an implied credential, `auggie` because its support was removed.
-RETIRED_FEATURES = ('claude', 'claude_tenant_state', 'auggie')
+# 36, 39, 40): `claude`/`claude_tenant_state` because Claude is a baseline
+# feature with an implied credential, `auggie` because its support was
+# removed, `mounts` because a non-empty `mounts:` switches it on by itself.
+RETIRED_FEATURES = ('claude', 'claude_tenant_state', 'auggie', 'mounts')
 
 
 def is_claude_credential(config, cred_name):
@@ -208,22 +207,29 @@ def retired_entries(config):
     return found
 
 
-# Retired multi-tenant keys (the model was abandoned 2026-07-29 and its code
-# deleted in the env-lifecycle consolidation's step 8). Outside ENV_FIELDS,
-# and named separately in the warning so they don't read as typos.
-RETIRED_ENV_KEYS = ('multi_tenant', 'tenant_subdir')
+# Retired per-env keys: the multi-tenant `multi_tenant`/`tenant_subdir` (the
+# model was abandoned 2026-07-29 and its code deleted in the env-lifecycle
+# consolidation's step 8), and `substrate`, which is one global top-level
+# setting now (decision 41). Outside ENV_FIELDS, and named separately in the
+# warning so they don't read as typos.
+RETIRED_ENV_KEYS = ('multi_tenant', 'tenant_subdir', 'substrate')
 
 
 def describe_unknown_env_keys(keys):
     """One phrase for a list of unknown keys, telling retired ones apart from
     plain unknowns (almost always typos), which dax genuinely ignores."""
-    retired = [k for k in keys if k in RETIRED_ENV_KEYS]
+    retired = [k for k in keys if k in RETIRED_ENV_KEYS and k != 'substrate']
     other = [k for k in keys if k not in RETIRED_ENV_KEYS]
     parts = []
     if other:
         parts.append('unknown key(s) {} — ignored (typo?)'.format(', '.join(other)))
     if retired:
         parts.append('retired key(s) {} — ignored; remove them'.format(', '.join(retired)))
+    if 'substrate' in keys:
+        # "Remove it" alone would delete the only copy of the path for an
+        # env from before decision 41, so say where it goes instead.
+        parts.append('retired key substrate — ignored; move its path to a top-level '
+                     '`substrate:` (one shared by every process), then remove it')
     return '; '.join(parts)
 
 

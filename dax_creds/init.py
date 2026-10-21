@@ -658,17 +658,16 @@ def run_env_show(config, name):
     env_features = proj.get('features') or []
     print(f'  features {", ".join(env_features) or "(none beyond the always-on baseline)"}')
 
+    # A non-empty `mounts:` switches the feature on by itself (decision 40).
     env_mounts = proj.get('mounts') or []
     if env_mounts:
         print(f'  mounts   {", ".join(env_mounts)}')
-        if 'mounts' not in env_features:
-            print('           note: "mounts" feature not in features list above — inactive')
 
-    substrate = proj.get('substrate')
-    if substrate:
-        print(f'  substrate {substrate}')
-        if 'substrate' not in env_features:
-            print('           note: "substrate" feature not in features list above — inactive')
+    # One global substrate, opted into per env (decision 41).
+    if 'substrate' in env_features:
+        global_substrate = config.get('substrate')
+        print(f'  substrate {global_substrate or "NOT SET: add a top-level `substrate: <path>` (dax config)"}'
+              f'{"   (global)" if global_substrate else ""}')
 
     # Every env's Claude credential is implied (decision 35), so show the
     # resolved names rather than leave the convention invisible, and surface

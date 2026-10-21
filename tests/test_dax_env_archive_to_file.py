@@ -104,7 +104,9 @@ def test_export_excludes_live_credential_by_default(tmp_path, home):
     assert 'state/.credentials.json' not in names
 
 
-def test_export_manifest_carries_mounts_and_substrate_as_specs_only(tmp_path, home):
+def test_export_manifest_carries_mounts_as_specs_only_and_no_substrate(tmp_path, home):
+    """The substrate is one global setting now (decision 41), so an archive
+    doesn't carry a path for it."""
     config = load_dax_config()
     _register(config, home, mounts=['/some/sidecar'], substrate='/some/substrate')
 
@@ -117,7 +119,7 @@ def test_export_manifest_carries_mounts_and_substrate_as_specs_only(tmp_path, ho
         # only the spec travels — no attempt to package either path's contents
         names = tar.getnames()
     assert manifest['mounts'] == ['/some/sidecar']
-    assert manifest['substrate'] == '/some/substrate'
+    assert 'substrate' not in manifest
     assert not any(n.startswith('sidecar') or 'substrate' in n for n in names)
 
 

@@ -185,60 +185,55 @@ def test_show_omits_mounts_line_when_unset(home, capsys):
     assert 'mounts' not in capsys.readouterr().out
 
 
-def test_show_flags_mounts_set_without_the_feature_active(home, capsys):
+def test_show_has_no_mounts_feature_note(home, capsys):
+    """A non-empty `mounts:` switches the feature on by itself (decision 40),
+    so there's no "inactive" state to flag."""
     _set(load_dax_config(), 'fabric', 'mounts', '~/discernment')
     capsys.readouterr()
 
     run_env_show(load_dax_config(), 'fabric')
 
-    out = capsys.readouterr().out
-    assert 'inactive' in out
+    assert 'inactive' not in capsys.readouterr().out
 
 
-def test_show_does_not_flag_mounts_when_the_feature_is_active(home, capsys):
+# --- substrate (one global path, decision 41) ---------------------------------
+
+def test_show_displays_the_global_substrate_for_an_env_that_opts_in(home, capsys):
     config = load_dax_config()
-    _set(config, 'fabric', 'mounts', '~/discernment')
-    _set(config, 'fabric', 'features', 'claude,mounts')
-    capsys.readouterr()
+    config['substrate'] = '~/virgil'
+    config['projects']['fabric']['features'] = ['substrate']
 
-    run_env_show(load_dax_config(), 'fabric')
+    run_env_show(config, 'fabric')
 
-    out = capsys.readouterr().out
-    assert 'inactive' not in out
+    assert 'substrate ~/virgil   (global)' in capsys.readouterr().out
 
 
-# --- env set substrate -------------------------------------------------------
-#
-# A single path, unlike the generic `mounts` list: dax needs to know
-# specifically which mount holds shared/wire.sh and shared/new-process.sh, not
-# just that something extra is mounted (docs/design/VALIDATION.md).
+def test_show_says_when_the_global_substrate_is_missing(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['features'] = ['substrate']
 
-def test_show_lists_substrate_when_set(home, capsys):
-    _set(load_dax_config(), 'fabric', 'substrate', '~/virgil')
-    capsys.readouterr()
+    run_env_show(config, 'fabric')
 
-    run_env_show(load_dax_config(), 'fabric')
-
-    out = capsys.readouterr().out
-    assert '~/virgil' in out
+    assert 'NOT SET' in capsys.readouterr().out
 
 
-def test_show_omits_substrate_line_when_unset(home, capsys):
-    run_env_show(load_dax_config(), 'fabric')
+def test_show_omits_substrate_when_the_env_does_not_opt_in(home, capsys):
+    config = load_dax_config()
+    config['substrate'] = '~/virgil'
 
-    assert 'substrate' not in capsys.readouterr().out
+    run_env_show(config, 'fabric')
+
+    assert '~/virgil' not in capsys.readouterr().out
 
 
-def test_show_flags_substrate_set_without_the_feature_active(home, capsys):
-    _set(load_dax_config(), 'fabric', 'substrate', '~/virgil')
-    capsys.readouterr()
+def test_a_per_env_substrate_is_reported_as_retired(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['substrate'] = '~/old'
 
-    run_env_show(load_dax_config(), 'fabric')
+    run_env_show(config, 'fabric')
 
     out = capsys.readouterr().out
-    assert 'inactive' in out
-
-
+    assert 'retired key substrate — ignored; move its path to a top-level `substrate:`' in out
 def test_show_does_not_flag_substrate_when_the_feature_is_active(home, capsys):
     config = load_dax_config()
     _set(config, 'fabric', 'substrate', '~/virgil')

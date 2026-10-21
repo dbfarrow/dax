@@ -207,10 +207,12 @@ def test_process_runs_new_process_sh_after_confirm_and_registers(home, substrate
 
     assert _last_call(tmp_path) == ['--dir', str(env_dir), '--title', 'My process',
                                     '--type', 'ops', '--no-git']
-    saved = load_dax_config()['projects']['proc']
-    assert saved['substrate'] == str(substrate.resolve())
+    config = load_dax_config()
+    saved = config['projects']['proc']
+    assert 'substrate' not in saved  # one global setting, not per env (decision 41)
+    assert config['substrate'] == str(substrate.resolve())  # asked once, saved globally
     assert list(saved['features']) == ['substrate']
-    assert script.offered['Process type:'] == [('commitment', 'discernment'), ('ops', 'ops')]
+    assert script.offered['Process type (picks the substrate skill Claude works it with):'] == [('commitment', 'discernment'), ('ops', 'ops')]
 
 
 def test_process_git_yes_passes_git(home, substrate, tmp_path, monkeypatch):
@@ -247,16 +249,43 @@ def test_a_blank_title_re_asks(home, substrate, tmp_path, monkeypatch, capsys):
     assert '--title' in _last_call(tmp_path) and 'Real title' in _last_call(tmp_path)
 
 
-def test_the_substrate_prompt_defaults_to_the_top_level_setting(home, substrate, monkeypatch):
+def test_a_set_global_substrate_is_used_without_asking(home, substrate, monkeypatch):
     config_text = (home / '.dax.yaml').read_text()
     (home / '.dax.yaml').write_text('substrate: {}\n'.format(substrate) + config_text)
     env_dir = _env_dir(home, 'proc')
     script = Script(monkeypatch, text=[None, 'T'], select=['process', ('ops', 'ops')],
-                    confirm=[False, True], path=[str(substrate)])
+                    confirm=[False, True])  # no path answer scripted: asking would fail
 
     _bootstrap_env(load_dax_config(), env_dir)
 
-    assert script.path_defaults == [str(substrate)]
+    assert script.path_defaults == []
+    assert 'proc' in load_dax_config()['projects']
+
+
+def test_a_broken_global_substrate_is_fatal_not_re_asked(home, tmp_path, monkeypatch, capsys):
+    broken = tmp_path / 'not-a-substrate'
+    broken.mkdir()
+    config_text = (home / '.dax.yaml').read_text()
+    (home / '.dax.yaml').write_text('substrate: {}\n'.format(broken) + config_text)
+    env_dir = _env_dir(home, 'proc')
+    Script(monkeypatch, text=[None], select=['process'])
+
+    with pytest.raises(SystemExit):
+        _bootstrap_env(load_dax_config(), env_dir)
+
+    assert 'fix the top-level `substrate:`' in capsys.readouterr().out
+
+
+def test_a_second_process_reuses_the_saved_global_substrate(home, substrate, tmp_path, monkeypatch):
+    Script(monkeypatch, text=[None, 'T'], select=['process', ('ops', 'ops')],
+           confirm=[False, True], path=[str(substrate)])
+    _bootstrap_env(load_dax_config(), _env_dir(home, 'first'))
+
+    script = Script(monkeypatch, text=[None, 'T2'], select=['process', ('ops', 'ops')],
+                    confirm=[False, True])
+    _bootstrap_env(load_dax_config(), _env_dir(home, 'second'))
+
+    assert script.path_defaults == []  # not asked again
 
 
 def test_declining_a_process_never_runs_new_process_sh(home, substrate, tmp_path, monkeypatch):

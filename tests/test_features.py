@@ -261,10 +261,13 @@ def test_feature_substrate_is_not_fooled_by_a_trailing_slash(tmp_path, monkeypat
     assert '--volume={}/virgil/:/home/dfarrow/virgil'.format(tmp_path) in opts
 
 
-def test_feature_substrate_warns_if_none_configured(capsys):
-    opts = feature_substrate({})
-    assert opts == []
-    assert 'no substrate configured' in capsys.readouterr().out
+def test_feature_substrate_refuses_if_no_global_substrate(capsys):
+    """Decision 41: a substrate process can't work without it, so the
+    launch stops rather than starting without the mount."""
+    with pytest.raises(SystemExit) as excinfo:
+        feature_substrate({})
+    assert excinfo.value.code == 1
+    assert 'no substrate is set' in capsys.readouterr().out
 
 
 def test_feature_substrate_refuses_a_missing_mount(tmp_path, monkeypatch, capsys):

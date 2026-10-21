@@ -19,7 +19,7 @@ from dax_creds.config import is_retired_credential, resolve_credential_names, re
 CONFIG = {
     'credentials': {'auggie': {'provider': 'auggie'}, 'gh': {'provider': 'github'}},
     'projects': {'ys': {'dir': '/x', 'tenant': 'augment',
-                        'features': ['auggie', 'mounts'], 'creds': ['auggie', 'gh']}},
+                        'features': ['auggie', 'auto_claude'], 'creds': ['auggie', 'gh']}},
 }
 
 
@@ -73,11 +73,11 @@ def test_an_env_listing_auggie_still_launches(tmp_path, monkeypatch, capsys):
 
 def test_restore_drops_auggie_from_an_archive(tmp_path):
     from dax import _restored_entry
-    manifest = {'name': 'ys', 'features': ['auggie', 'mounts'], 'creds': ['auggie', 'gh']}
+    manifest = {'name': 'ys', 'features': ['auggie', 'auto_claude'], 'creds': ['auggie', 'gh']}
 
     entry, notes = _restored_entry(CONFIG, manifest, tmp_path / 'ys', 'augment')
 
-    assert list(entry['features']) == ['mounts']
+    assert list(entry['features']) == ['auto_claude']
     assert list(entry['creds']) == ['gh']
     assert notes['dropped_features'] == []  # dropped silently, not kept as #- auggie
 

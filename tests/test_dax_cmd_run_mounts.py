@@ -54,13 +54,32 @@ def test_an_envs_mounts_list_reaches_feature_mounts(tmp_path, monkeypatch, capsy
     assert f'--volume={home}/discernment:/home/' in out
 
 
-def test_mounts_without_the_feature_is_silently_inactive(tmp_path, monkeypatch, capsys):
-    """Data present but the opt-in feature missing must not mount anything —
-    matches feature_ports' existing shape, not a regression."""
-    _setup(tmp_path, monkeypatch, project_extra={'mounts': ['~/discernment']})
+def test_a_mounts_list_switches_the_feature_on_by_itself(tmp_path, monkeypatch, capsys):
+    """Decision 40: listing the paths is the opt-in; no `features:` entry."""
+    home, _ = _setup(tmp_path, monkeypatch, project_extra={'mounts': ['~/discernment']})
+
+    cmd_run(_args())
+
+    out = capsys.readouterr().out
+    assert out.count('adding mounts') == 1
+    assert f'--volume={home}/discernment:' in out
+
+
+def test_mounts_in_features_without_a_list_mounts_nothing_and_is_warned_about(
+        tmp_path, monkeypatch, capsys):
+    _setup(tmp_path, monkeypatch, project_extra={'features': ['mounts']})
 
     cmd_run(_args())
 
     out = capsys.readouterr().out
     assert 'adding mounts' not in out
-    assert 'discernment' not in out
+    assert "still lists mounts (features)" in out
+
+
+def test_mounts_in_features_and_a_list_mounts_once(tmp_path, monkeypatch, capsys):
+    _setup(tmp_path, monkeypatch,
+           project_extra={'features': ['mounts'], 'mounts': ['~/discernment']})
+
+    cmd_run(_args())
+
+    assert capsys.readouterr().out.count('adding mounts') == 1
