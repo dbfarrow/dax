@@ -8,7 +8,7 @@ functions in `dax.py`.
 ## Current state — read this first (2026-10-21)
 
 The env-lifecycle consolidation (`feature/env-lifecycle-consolidation`; design
-and all 41 decisions in `docs/design/2026-10-18-env-bootstrap-consolidation.md`)
+and all 42 decisions in `docs/design/2026-10-18-env-bootstrap-consolidation.md`)
 reshaped dax's CLI and env model. **Sections further down are history: their
 command names and mechanisms often predate this**; trust this section and
 the code over them.
@@ -47,7 +47,11 @@ the code over them.
   after that folder.
 - **Removed outright:** auggie support, and the multi-tenant model
   (`dax_creds/tenant.py`).
-- **Tests:** 704 passing. Manual runbook:
+- **Versioning:** semver in `VERSION` (3.0.0 is this branch), with
+  `dax --version` and `CHANGELOG.md`. `dax build` labels the image
+  `dax.version`, and `dax run` warns when the label differs from the host's
+  version (decision 42).
+- **Tests:** 718 passing. Manual runbook:
   `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
 
 ## Baseline features replace the top-level `features:` list
@@ -387,7 +391,7 @@ the shared mount, which is the intended fallback.
 - **`dax env` lifecycle consolidation** — full design in
   `docs/design/2026-10-18-env-bootstrap-consolidation.md`, branch
   `feature/env-lifecycle-consolidation` (off `master`; steps 1–5 built,
-  41 decisions; see "Build progress" below).
+  42 decisions; see "Build progress" below).
   Decisions 25–37 came from a 2026-10-19 pre-implementation risk review:
   env-name collisions are fatal; restore only targets an empty,
   unregistered cwd and never overwrites anything (rollback = destroy, then
@@ -630,6 +634,20 @@ the shared mount, which is the intended fallback.
       - the README documents top-level `image` and `githubdir`/`awsdir`/
         `optdir`/`msfdir`;
       - the example's `.settings.json` backup typo is fixed.
+  - **Step 9 (decision 42, versioning) built 2026-10-21, suite 718 (from
+    704):**
+    - `VERSION` is `3.0.0`; `dax --version` reads it, falling back to the
+      installed package's version inside the image.
+    - `dax build` adds `--label dax.version=<version>`.
+    - `cmd_run` calls `_warn_if_image_is_stale` right after resolving the
+      image; it warns, never refuses. An autouse conftest fixture stubs
+      `_image_version` so no test asks docker.
+    - Added `CHANGELOG.md` and a README "Versions" section.
+    - After merging: an annotated `v3.0.0` tag on `master`. Pushing the tag
+      needs its own approval.
+    - Committed 2026-10-21. The user signed off the end-of-branch checks
+      and finished the live-config cleanup. What's left on the branch is the
+      merge to `master` and the tag, both on the user's word.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.
@@ -1050,7 +1068,9 @@ the shared mount, which is the intended fallback.
   project key, so it seeds the tree wholesale and preserves trust/`allowedTools`/
   tips. `file-history/` is keyed by session UUID and mappable but low value.
 
-  **Watch for orphan grants in state trees.** `fabric`'s tree held a
+  *(Dropped 2026-10-21: obsolete under the current design, and any
+  leftover grant has expired by now.)* **Watch for orphan grants in state
+  trees.** `fabric`'s tree held a
   `.credentials.json` from 2026-07-28 whose grant matched no Keychain entry.
   Inject-if-absent correctly left it alone (non-empty file), so the env would have
   refreshed and used an untracked grant indefinitely.
@@ -1094,7 +1114,9 @@ the shared mount, which is the intended fallback.
   projects' credentials over that cap — was judged low for this usage
   pattern specifically (low absolute launch frequency keeps total mint
   volume low) but remains **untested**; worth an empirical check before this
-  policy is ever made more aggressive (e.g. dropping the cooldown). 16 new
+  policy is ever made more aggressive (e.g. dropping the cooldown).
+  *(Dropped 2026-10-21: the consolidation's testing ran far more logins
+  than usual and hit no cap.)* 16 new
   tests (`test_dax_creds_login_state.py`, `test_dax_cmd_run_relogin.py`),
   suite at **651**.
 

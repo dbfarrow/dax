@@ -875,6 +875,36 @@ working.
       need it.
     - **`dax env show`** shows the global path for envs with the feature.
 
+42. **Product versioning: semver, starting at 3.0.0.** Decided 2026-10-21
+    (user: "this is ... the third major revision of it ... we can just start
+    this as v3.0"). Built as step 9.
+    - **`VERSION` holds `MAJOR.MINOR.PATCH`.**
+      - Major: something has to change by hand (a removed or renamed
+        command, or a `~/.dax.yaml` change that breaks or warns about
+        existing entries).
+      - Minor: a new command, feature or key, or any change that affects
+        the image, with old configs still working.
+      - Patch: fixes only.
+    - **The release:** bump `VERSION` as the branch's last commit, then put
+      an annotated tag `vX.Y.Z` on `master` after the merge. Pushing the
+      tag needs its own approval.
+    - **`dax --version`** prints the host version. Inside the image, where
+      dax is a plain pip install with no `VERSION` file beside it, it falls
+      back to the installed package's version, which pip took from the same
+      file.
+    - **`dax build` stamps a `dax.version=<version>` label** on the image.
+    - **`dax run` warns (never refuses) when the image's label differs from
+      the host's version**, naming `dax build` as the fix. An unlabelled
+      `dax:*` image is reported as predating versioning; an unlabelled
+      custom image, or one docker can't inspect, is silent. This is the
+      point of the whole decision: the in-image dax/dax_creds is frozen at
+      build time, and "needs a rebuild" was otherwise only ever a note.
+    - **`CHANGELOG.md`** gets one section per release. History before 3.0.0
+      lives in git.
+    - **No `version:` key in `~/.dax.yaml`.** The retired-name warnings
+      already handle old configs; add one only if dax ever needs to tell
+      config formats apart.
+
 ## The full env lifecycle, end to end
 
 Every stage, naming the exact command and the decision behind its shape.

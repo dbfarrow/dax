@@ -452,7 +452,7 @@ dax env show dxt-e
 
 ## Step 6 — docs sweep (run last, after step 8)
 
-Step 6 is implemented last (execution order 1, 2, 3, 4, 5, 7, 8, 8b, 8c, 8d, 6),
+Step 6 was implemented after 8d (execution order 1, 2, 3, 4, 5, 7, 8, 8b, 8c, 8d, 6, 9),
 so its checks come here.
 
 ```bash
@@ -468,6 +468,26 @@ dax --help ; dax env --help ; dax backup --explain | head
 
 ---
 
+## Step 9 — versioning
+
+Run these before the end-of-branch rebuild: the current image has no
+version label, which is what the warning check needs.
+
+```bash
+dax --version
+cd ~/test/dxt-a && dax -t run | head
+```
+
+| Check | Pass |
+|---|---|
+| `dax --version` | prints `dax 3.0.0` |
+| `dax -t run` against the old image | prints `image dax:latest predates dax versioning; this is dax 3.0.0. Run \`dax build\` to update it.` |
+
+The rest of step 9 is checked after the rebuild, in the end-of-branch
+table below.
+
+---
+
 ## End of branch
 
 ```bash
@@ -478,6 +498,9 @@ cd <fabric's dir> && dax run           # a real env, plain restart; exit
 | Check | Pass |
 |---|---|
 | build | succeeds |
+| `docker image inspect --format '{{ index .Config.Labels "dax.version" }}' dax:latest` | prints `3.0.0` |
+| `cd ~/test/dxt-a && dax -t run` | no `predates dax versioning` or `was built by` warning |
+| in a freshly started container, `dax --version` | prints `dax 3.0.0` |
 | in a freshly started container, `dax config` | refuses with "only runs on the host" (the rebuilt image's own `dax` now has the command) |
 | `fabric` | launches, `claude` starts logged in, `/resume` shows its history |
 | full pass on a fresh scratch env | `mkdir ~/test/dxt-z && cd ~/test/dxt-z && dax run` → `dax env archive` → `mkdir ~/test/dxt-z2 && cd ~/test/dxt-z2 && dax env restore dxt-z` → `dax env destroy dxt-z dxt-z2` |

@@ -43,6 +43,10 @@ dax build -c
 
 The build prompts for a container password unless a `.daxpw` file exists with `0600` permissions.
 
+### Versions
+
+dax uses semantic versioning; the current version is in `VERSION`, and `dax --version` prints it. Each `dax build` labels the image with the version it was built from, and `dax run` warns when the image it's about to launch was built by a different version — the dax code inside the image only changes on a rebuild, so that warning means it's time for `dax build`. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## Quick Start
