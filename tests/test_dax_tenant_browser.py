@@ -146,7 +146,7 @@ def test_a_tenant_no_env_uses_is_flagged():
 
 def test_a_provider_other_than_claude_is_flagged():
     problems = unknown_tenant_entries(_config({'ysecurity': {'github': {}}}))
-    assert problems == ['`tenants.ysecurity.github` — ignored (only claude is set per tenant)']
+    assert problems == ['`tenants.ysecurity.github` — ignored (a tenant takes claude, hidden)']
 
 
 def test_a_valid_block_is_silent():

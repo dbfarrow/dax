@@ -450,6 +450,20 @@ def credential_settings_source(config, tenant, provider):
     return None
 
 
+# Per-tenant settings that aren't a provider block (decision 45).
+TENANT_SETTINGS = ('hidden',)
+
+
+def hidden_tenants(config):
+    """Tenants whose `tenants:` block says `hidden: true`: left out of `dax
+    env list` unless `--all`. A missing `hidden`, or `false`, shows it."""
+    tenants = config.get('tenants')
+    if not isinstance(tenants, dict):
+        return set()
+    return {t for t, block in tenants.items()
+            if isinstance(block, dict) and block.get('hidden') is True}
+
+
 def unknown_tenant_entries(config):
     """Problems in the top-level `tenants:` block, as messages: a tenant no
     registered env uses (almost always a typo, and otherwise silently
@@ -473,9 +487,14 @@ def unknown_tenant_entries(config):
             problems.append(f'`tenants.{tenant}` should be a map of providers — ignored')
             continue
         for provider, settings in block.items():
+            if provider in TENANT_SETTINGS:
+                if not isinstance(settings, bool):
+                    problems.append(f'`tenants.{tenant}.{provider}` should be true or '
+                                    f'false, not {settings!r} — ignored')
+                continue
             if provider not in BARE_PROVIDER_CREDS:
-                problems.append(f'`tenants.{tenant}.{provider}` — ignored (only '
-                                f'{", ".join(BARE_PROVIDER_CREDS)} is set per tenant)')
+                problems.append(f'`tenants.{tenant}.{provider}` — ignored (a tenant takes '
+                                f'{", ".join(BARE_PROVIDER_CREDS + TENANT_SETTINGS)})')
             elif settings is not None and not isinstance(settings, dict):
                 problems.append(f'`tenants.{tenant}.{provider}` should be a map '
                                 '(browser, chrome_profile) — ignored')

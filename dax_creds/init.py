@@ -9,6 +9,7 @@ from dax_creds.config import (
     last_login_at, relogin_due, resolve_credential_names, state_tree_path,
     state_trees, unknown_env_keys, retired_entries,
     describe_unknown_env_keys, synthesized_credential, credential_settings_source,
+    hidden_tenants,
 )
 from dax_creds.providers.ssh import SshProvider
 
@@ -665,6 +666,18 @@ def run_env_show(config, name):
 
     print()
     print(f'  env      {name}')
+    kind, info = env_kind(proj)
+    if kind == 'code':
+        print('  kind     code project')
+    else:
+        if 'type' in info:
+            detail = 'type {}{}'.format(
+                info['type'], f' (skill {info["skill"]})' if 'skill' in info else '')
+        else:
+            detail = 'type unknown: no `type:` in {}/context.md'.format(dir_path or '?')
+        print(f'  kind     substrate-backed process, {detail}')
+        if 'title' in info:
+            print(f'  title    {info["title"]}')
     print(f'  tenant   {tenant or "(unset)"}')
     print(f'  dir      {dir_path}{"" if Path(dir_path).exists() else "   [missing]"}')
     print(f'  image    {proj.get("image", "?")}')
@@ -736,12 +749,94 @@ def run_env_show(config, name):
     print()
 
 
-def run_env_list(config):
+ARCHIVE_ONLY_TENANT = '(archive-only)'
+
+
+def process_info(dir_path):
+    """What a substrate process's own context.md says about it: its
+    frontmatter `type`/`skill` (written by new-process.sh) and its `# Title`
+    heading, as a dict with whichever were found; {} without a readable
+    context.md. Read-only, and only the top of the file."""
+    try:
+        with open(Path(dir_path) / 'context.md', encoding='utf-8') as f:
+            lines = [next(f, '') for _ in range(40)]
+    except (OSError, UnicodeDecodeError):
+        return {}
+    info = {}
+    body = lines
+    if lines and lines[0].strip() == '---':
+        for i, line in enumerate(lines[1:], start=1):
+            if line.strip() == '---':
+                body = lines[i + 1:]
+                break
+            key, sep, value = line.partition(':')
+            if sep and key.strip() in ('type', 'skill') and value.strip():
+                info[key.strip()] = value.strip()
+    for line in body:
+        if line.startswith('# '):
+            info['title'] = line[2:].strip()
+            break
+    return info
+
+
+def _left_out_footer(config, hidden_rows, archive_only):
+    """The `dax env list` footer line for what plain listing leaves out, or
+    '': envs in hidden tenants (named in `tenants:` order) and envs that
+    exist only as archives."""
+    parts = []
+    if hidden_rows:
+        n = len(hidden_rows)
+        names = [t for t in (config.get('tenants') or {}) if t in {r[1] for r in hidden_rows}]
+        parts.append('{} env{} hidden in {}'.format(n, '' if n == 1 else 's', ', '.join(names)))
+    if archive_only:
+        n = len(archive_only)
+        if parts:
+            parts.append('{} more exist{} only as archives'.format(n, 's' if n == 1 else ''))
+        else:
+            parts.append('{} more env{} exist{} only as archives'.format(
+                n, '' if n == 1 else 's', 's' if n == 1 else ''))
+    return '  {} (dax env list --all)'.format('; '.join(parts)) if parts else ''
+
+
+def env_kind(proj):
+    """('process', process_info) for a substrate env, else ('code', {})."""
+    if 'substrate' in (proj.get('features') or []):
+        return 'process', process_info(proj.get('dir') or '.')
+    return 'code', {}
+
+
+def _kind_cell(proj):
+    kind, info = env_kind(proj)
+    if kind == 'code':
+        return 'code'
+    return info.get('type', '?')  # any kind but `code` is a process
+
+
+def run_env_list(config, archived=None, missing_backup_dir=None, show_all=False):
+    """`archived` is {env name: time of its newest archive in backup_dir},
+    from `dax env archive`; it adds an `archived` column, 'never' for an env
+    with none. `missing_backup_dir` is a backup_dir that isn't there (an
+    unmounted drive, OneDrive offline): the column shows '?' rather than a
+    misleading 'never'. With neither, there's no column.
+
+    An env that exists only as an archive (no registry entry, no state tree)
+    gets a row under the synthetic tenant `(archive-only)`, and envs in a
+    `hidden: true` tenant get theirs, only with `show_all` (`--all`);
+    otherwise each is just a count in the footer.
+    Archives are never opened, so their recorded tenant isn't read: opening
+    one can make OneDrive download the whole file."""
     # No early return on an empty registry: deregistering every project is
     # precisely when every state tree becomes an orphan, and bailing here would
     # hide them all.
     projects = config.get('projects', {})
     trees = state_trees()
+    show_archived = archived is not None or missing_backup_dir is not None
+
+    def _archived(name):
+        if missing_backup_dir is not None:
+            return '?'
+        when = archived.get(name)
+        return _human_age(when) if when else 'never'
 
     rows = []
     for name, proj in projects.items():
@@ -760,11 +855,12 @@ def run_env_list(config):
 
         size, used = _tree_stats(tree) if tree else (None, None)
         status = '*' if running else (' ' if dir_exists else '!')
-        rows.append((status, tenant or '-', name, proj.get('image', '?'),
+        rows.append((status, tenant or '-', name, _kind_cell(proj),
                      _home_relative(dir_path) if dir_path else '-',
                      creds_str,
                      _human_size(size) if tree else '-',
-                     _human_age(used) if tree else '-'))
+                     _human_age(used) if tree else '-')
+                    + ((_archived(name),) if show_archived else ()))
 
     # Anything still on disk has no registry entry pointing at it: the project
     # was deregistered or its tenant renamed, and its transcripts and memory
@@ -772,13 +868,40 @@ def run_env_list(config):
     for (tenant, name), tree in sorted(trees.items()):
         size, used = _tree_stats(tree)
         rows.append(('?', tenant, name, '-', '-', '-',
-                     _human_size(size), _human_age(used)))
+                     _human_size(size), _human_age(used))
+                    + ((_archived(name),) if show_archived else ()))
+
+    # Envs that survive only as archives: nothing above has a row for them.
+    has_row = set(projects) | {name for _, name in trees}
+    archive_only = sorted(n for n in (archived or {}) if n not in has_row)
+    if show_all:
+        for name in archive_only:
+            rows.append(('a', ARCHIVE_ONLY_TENANT, name, '-', '-', '-', '-', '-',
+                         _archived(name)))
+
+    # Hidden tenants (decision 45) are left out unless --all, and counted.
+    hidden = set() if show_all else hidden_tenants(config)
+    hidden_rows = [r for r in rows if r[1] in hidden]
+    rows = [r for r in rows if r[1] not in hidden]
+    footer = _left_out_footer(config, hidden_rows, [] if show_all else archive_only)
 
     if not rows:
-        print('No environments registered, and no state trees on disk.')
+        print('No environments registered, and no state trees on disk.'
+              if not hidden_rows else 'Every env is in a hidden tenant.')
+        if footer:
+            print(footer.strip() + '.')
         return
 
-    headers = ('', 'tenant', 'name', 'image', 'dir', 'creds', 'state', 'used')
+    # Grouped by tenant, in the order the top-level `tenants:` block lists
+    # them, then alphabetically for any it doesn't; names sorted within each.
+    # Orphaned trees sit with their tenant, and envs with no tenant come last.
+    listed = config.get('tenants') if isinstance(config.get('tenants'), dict) else {}
+    order = {t: i for i, t in enumerate(listed)}
+    rows.sort(key=lambda r: (r[1] == ARCHIVE_ONLY_TENANT, r[1] == '-',
+                             order.get(r[1], len(order)), r[1], r[2]))
+
+    headers = ('', 'tenant', 'name', 'kind', 'dir', 'creds', 'state', 'used') + (
+        ('archived',) if show_archived else ())
     ncols = len(headers)
     widths = [max(len(headers[i]), max(len(r[i]) for r in rows)) for i in range(ncols)]
     widths[5] = min(widths[5], _CREDS_MAX)
@@ -790,7 +913,9 @@ def run_env_list(config):
     print()
     print(_line((' ',) + headers[1:]).replace('[ ]', '   ', 1))
     print(_line((' ',) + tuple('-' * widths[i] for i in range(1, ncols))).replace('[ ]', '   ', 1))
-    for row in rows:
+    for i, row in enumerate(rows):
+        if i and row[1] != rows[i - 1][1]:
+            print()
         creds_str = row[5]
         if len(creds_str) > _CREDS_MAX:
             creds_str = creds_str[:_CREDS_MAX - 3] + '...'
@@ -799,12 +924,21 @@ def run_env_list(config):
     markers = {r[0] for r in rows}
     legend = [(m, t) for m, t in (('*', 'running'),
                                   ('!', 'directory missing'),
-                                  ('?', 'orphaned state tree — no registry entry'))
+                                  ('?', 'orphaned state tree — no registry entry'),
+                                  ('a', 'archive only — to bring it back, cd into an empty '
+                                        'folder with its name and run `dax env restore`'))
               if m in markers]
     if legend:
         print()
         for marker, text in legend:
             print(f'  [{marker}] {text}')
+    if missing_backup_dir is not None:
+        print()
+        print(f'  archived: backup_dir {_home_relative(str(missing_backup_dir))} not found, '
+              'so archive ages are unknown')
+    if footer:
+        print()
+        print(footer)
     print()
 
 

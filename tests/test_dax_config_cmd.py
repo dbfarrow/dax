@@ -87,6 +87,7 @@ def test_the_editor_is_run_on_the_config_file(home, monkeypatch):
 
 def test_the_previous_version_is_kept(home, monkeypatch):
     _editor(monkeypatch, lambda t: t.replace('personal', 'acme'))
+    monkeypatch.setattr('dax_creds.init._q_confirm', lambda *a, **k: False)  # tenant move
 
     _run()
 

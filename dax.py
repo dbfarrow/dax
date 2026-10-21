@@ -1702,7 +1702,10 @@ def cmd_env(args):
     # over every env and is normally run from somewhere that isn't one.
     try:
         if args.env_command == 'list':
-            run_env_list(config)
+            archived, backup_dir = _last_archived(config)
+            run_env_list(config, archived=archived,
+                         missing_backup_dir=None if archived is not None else backup_dir,
+                         show_all=getattr(args, 'all', False))
         elif args.env_command == 'show':
             run_env_show(config, _resolve_env_name(config, args.name))
         elif args.env_command == 'destroy':
@@ -1841,6 +1844,236 @@ def cmd_config(args):
     for problem in unknown_tenant_entries(config):
         dax_print('[!] {}'.format(problem))
     _warn_retired_entries(retired_entries(config))
+    _offer_tenant_moves(_tenant_changes(before, config), config)
+    for env_name, tree in _stranded_trees(before, config):
+        dax_print('[-] env {!r} is no longer in ~/.dax.yaml, but its Claude state is still '
+                  'at {} (`dax env list` shows it as orphaned).'.format(env_name, tree))
+
+
+def _tenant_changes(before, config):
+    """[(env, old tenant, new tenant, old dir)] for every env present before
+    and after an edit whose tenant changed from one value to another. An env
+    that gained its first tenant had no state tree to move. The old text is
+    parsed by the same loader as the new, so an unchanged value never reads
+    as a change (pyyaml's YAML 1.1 turns `on` into True)."""
+    from dax_creds.config import yaml_round_trip
+
+    try:
+        old = yaml_round_trip('dax config').load(before.decode('utf-8'))
+    except ImportError:
+        old = yaml.safe_load(before)
+    except Exception:
+        return []
+    old_projects = old.get('projects') if isinstance(old, dict) else None
+    if not isinstance(old_projects, dict):
+        return []
+    changes = []
+    for name, entry in (config.get('projects') or {}).items():
+        was = old_projects.get(name)
+        old_tenant = was.get('tenant') if isinstance(was, dict) else None
+        new_tenant = entry.get('tenant')
+        if not old_tenant or not new_tenant or old_tenant == new_tenant:
+            continue
+        if not (isinstance(old_tenant, str) and isinstance(new_tenant, str)):
+            dax_print('[!] env {!r}: tenant {!r} -> {!r} is not a plain name; quote it '
+                      '(e.g. tenant: "2025"), then move its Claude state by hand'.format(
+                          name, old_tenant, new_tenant))
+            continue
+        changes.append((name, old_tenant, new_tenant, was.get('dir')))
+    return changes
+
+
+def _stranded_trees(before, config):
+    """Envs that left the registry in this edit (removed, or renamed) while
+    their Claude state tree is still on disk: [(env, tree path)]."""
+    from dax_creds.config import state_tree_path, yaml_round_trip
+
+    try:
+        old = yaml_round_trip('dax config').load(before.decode('utf-8'))
+    except Exception:
+        return []
+    old_projects = old.get('projects') if isinstance(old, dict) else None
+    if not isinstance(old_projects, dict):
+        return []
+    now = config.get('projects') or {}
+    stranded = []
+    for name, entry in old_projects.items():
+        tenant = entry.get('tenant') if isinstance(entry, dict) else None
+        if name not in now and isinstance(tenant, str) and tenant:
+            tree = state_tree_path(tenant, name)
+            if tree.exists():
+                stranded.append((name, tree))
+    return stranded
+
+
+def _offer_tenant_moves(changes, config):
+    """After `dax config`, offer to carry each re-tenanted env's Claude
+    state along (decision 44)."""
+    from dax_creds.init import _q_confirm, _keyring_module
+
+    for name, old, new, old_dir in changes:
+        print()
+        dax_print('[-] env {!r} moved from tenant {!r} to {!r}.'.format(name, old, new))
+        print('    Its Claude state tree and credential are still filed under {!r}.'.format(old))
+        try:
+            move = _q_confirm('Move them to {!r}?'.format(new), default=True)
+        except KeyboardInterrupt:
+            move = False
+        if move:
+            _move_env_tenant(config, name, old, new, keyring=_keyring_module, old_dir=old_dir)
+        else:
+            dax_print('[-] not moved.')
+            _print_tenant_move_by_hand(name, old, new)
+
+
+def _keychain_delete_command(cred_name):
+    """A shell command that removes one dax Keychain secret. `dax creds
+    remove` can't: once the tenant changed, the old name is neither
+    registered nor derived, so dax no longer knows it."""
+    return ('python3 -c "import keyring; keyring.delete_password(\'dax-creds\', '
+            '\'{}\')"'.format(cred_name))
+
+
+def _print_tenant_move_by_hand(name, old, new):
+    from dax_creds.config import state_tree_path
+    old_cred, new_cred = 'claude-{}-{}'.format(old, name), 'claude-{}-{}'.format(new, name)
+    print('    To do it by hand, with its container stopped:')
+    print('      mv {} {}'.format(state_tree_path(old, name), state_tree_path(new, name)))
+    print('    and remove the old credential from Keychain (the next `dax run` logs in')
+    print('    as {}):'.format(new_cred))
+    print('      ' + _keychain_delete_command(old_cred))
+
+
+def _container_running_or_unknown(container):
+    """True or False, or None when docker didn't answer in time: a move must
+    not guess while a tree might be mounted. Docker missing or its daemon
+    down means nothing is running."""
+    try:
+        result = subprocess.run(
+            ['docker', 'ps', '--filter', 'name={}'.format(container), '--format', '{{.Names}}'],
+            capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return None
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    return container in result.stdout.split()
+
+
+def _move_env_tenant(config, name, old, new, keyring=None, old_dir=None):
+    """Re-file env `name`'s Claude state from tenant `old` to `new`
+    (decision 44): the state tree, the Keychain secret of its implied
+    credential (renamed, not re-minted, so it stays the same grant and no
+    login is needed), and its relogin record. Returns whether it all moved.
+
+    Refuses while the env's container runs (its tree is mounted at the old
+    path, and stopping it syncs the credential back under the old name),
+    checked under both the old and the new `dir:`, and when anything already
+    exists at the new names. Every check runs before anything moves; a
+    failure after that is reported step by step, never rolled back
+    silently."""
+    from dax_creds.config import (
+        derived_credential_name, login_state_path, shared_files_manifest_path,
+        state_tree_path,
+    )
+    from dax_creds.init import _KEYCHAIN_SERVICE, _container_name_for
+
+    entry = (config.get('projects') or {}).get(name) or {}
+    src, dst = state_tree_path(old, name), state_tree_path(new, name)
+    old_cred = derived_credential_name('claude', old, name)
+    new_cred = derived_credential_name('claude', new, name)
+    old_record, new_record = login_state_path(old_cred), login_state_path(new_cred)
+
+    def _refuse(why):
+        dax_print('[!] {} — nothing moved.'.format(why))
+        _print_tenant_move_by_hand(name, old, new)
+        return False
+
+    for d in dict.fromkeys(x for x in (old_dir, entry.get('dir')) if x):
+        container = _container_name_for(d)
+        running = _container_running_or_unknown(container)
+        if running is None:
+            return _refuse("couldn't ask docker whether {!r} is running".format(container))
+        if running:
+            return _refuse('{!r} is running; stop it first (exit its shell, or '
+                           '`docker stop {}`)'.format(name, container))
+    if dst.exists():
+        return _refuse('{} already exists'.format(dst))
+    secret = None
+    if keyring is not None:
+        try:
+            secret = keyring.get_password(_KEYCHAIN_SERVICE, old_cred)
+            if secret and keyring.get_password(_KEYCHAIN_SERVICE, new_cred):
+                return _refuse('{} already has a secret in Keychain'.format(new_cred))
+        except Exception as e:
+            return _refuse("couldn't read Keychain ({})".format(e))
+
+    manifest = shared_files_manifest_path(old, name)
+    if manifest.exists():
+        manifest.unlink()  # pre-3.0 drift-tracking leftover; nothing reads it now
+    if src.exists():
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+        except OSError as e:
+            dax_print('[!] moving the state tree failed: {}'.format(e))
+            dax_print('    {} {}; {} {}. Keychain was not touched.'.format(
+                src, 'still exists' if src.exists() else 'is gone',
+                dst, 'exists (possibly partly copied)' if dst.exists() else 'does not exist'))
+            return False
+        dax_print('[+] state tree: {} -> {}'.format(src, dst))
+        try:
+            src.parent.rmdir()  # the old tenant's folder, if that was its last env
+        except OSError:
+            pass
+    else:
+        dax_print('[-] no state tree under {!r} yet; nothing to move'.format(old))
+
+    ok = True
+    if keyring is None:
+        dax_print("[!] keyring isn't available, so {} stays in Keychain. Remove it on the "
+                  'host with:'.format(old_cred))
+        print('      ' + _keychain_delete_command(old_cred))
+        ok = False
+    elif secret:
+        try:
+            keyring.set_password(_KEYCHAIN_SERVICE, new_cred, secret)
+        except Exception as e:
+            dax_print('[!] Keychain: storing {} failed ({}); {} is untouched, and the next '
+                      '`dax run` logs in as {}.'.format(new_cred, e, old_cred, new_cred))
+            dax_print('    Remove the old one once that works:')
+            print('      ' + _keychain_delete_command(old_cred))
+            ok = False
+        else:
+            deleted = False
+            for _ in range(2):  # one retry: the same grant under two names breaks
+                try:            # the one-grant-per-name rule
+                    keyring.delete_password(_KEYCHAIN_SERVICE, old_cred)
+                    deleted = True
+                    break
+                except Exception as e:
+                    error = e
+            if deleted:
+                dax_print('[+] Keychain: {} -> {} (same login, nothing to redo)'.format(
+                    old_cred, new_cred))
+            else:
+                dax_print('[!] Keychain: {} is stored, but removing {} failed ({}). The same '
+                          'login is now under both names; remove the old one with:'.format(
+                              new_cred, old_cred, error))
+                print('      ' + _keychain_delete_command(old_cred))
+                ok = False
+    else:
+        dax_print('[-] no {} in Keychain; the next `dax run` logs in as {}'.format(
+            old_cred, new_cred))
+
+    if old_record.exists():
+        new_record.parent.mkdir(parents=True, exist_ok=True)
+        old_record.replace(new_record)
+    if old_cred in (config.get('credentials') or {}):
+        dax_print('[-] {} is also registered under `credentials:` in ~/.dax.yaml; it holds '
+                  'nothing now, so remove it with `dax creds remove {}`.'.format(old_cred, old_cred))
+    return ok
 
 
 def _known_tenant_names():
@@ -2873,6 +3106,25 @@ def _available_archives(backup_dir):
     return found
 
 
+def _last_archived(config):
+    """({env name: time of its newest archive}, backup_dir) for `dax env
+    list`; the dict is None when backup_dir isn't there. Only archives in
+    backup_dir/daily/ count; one written to a file elsewhere is invisible
+    here. The time is the file's mtime (a same-day re-archive overwrites the
+    file), or midnight of its filename date if it can't be read."""
+    backup_dir = _default_backup_dir(config)
+    if not backup_dir.is_dir():
+        return None, backup_dir
+    found = {}
+    for name, archives in _available_archives(backup_dir).items():
+        path, date = archives[0]
+        try:
+            found[name] = path.stat().st_mtime
+        except OSError:
+            found[name] = datetime.datetime.strptime(date, '%Y-%m-%d').timestamp()
+    return found, backup_dir
+
+
 def _read_archive_manifest(archive):
     with tarfile.open(archive) as tar:
         member = _archive_manifest_member(tar)
@@ -3615,8 +3867,11 @@ def main():
         description='A new env is created by `dax run` in its folder; edit one with `dax config`.')
     env_sub = env_p.add_subparsers(dest='env_command', required=True)
 
-    env_sub.add_parser('list', help='List registered environments, and Claude state '
-                                    'trees no env claims')
+    env_list_p = env_sub.add_parser('list', help='List registered environments, and Claude '
+                                                 'state trees no env claims')
+    env_list_p.add_argument('--all', action='store_true',
+                            help='also list envs in hidden tenants, and envs that exist only '
+                                 'as archives in backup_dir')
 
     env_show_p = env_sub.add_parser('show', help="Show one env's configuration")
     env_show_p.add_argument('name', nargs='?', help='Env name (default: the env containing cwd)')
