@@ -1694,6 +1694,123 @@ def cmd_features(args):
     _print_features()
 
 
+# Installed by the dax image (Dockerfile.tmpl) and nowhere else, so its
+# presence means "running inside a dax container".
+_DAX_CONTAINER_MARKER = '/usr/local/bin/dax-entrypoint.sh'
+
+
+def _in_dax_container():
+    return os.path.exists(_DAX_CONTAINER_MARKER)
+
+
+def _editor_command():
+    """$VISUAL, then $EDITOR, then vi, split so `EDITOR="code -w"` works."""
+    return shlex.split(os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi')
+
+
+def _config_shape_problem(config):
+    """Why a config that parsed still can't be used, or None. Every dax
+    command expects a mapping with a `projects:` mapping of mappings; an
+    emptied file, a list, or an env written as a plain value would otherwise
+    crash them all with a traceback."""
+    if not isinstance(config, dict):
+        return 'the file is empty or not a mapping of settings'
+    projects = config.get('projects')
+    if projects is not None and not isinstance(projects, dict):
+        return '`projects:` must be a mapping of env names to settings'
+    for name, entry in (projects or {}).items():
+        if not isinstance(entry, dict):
+            return 'env {!r} must be a mapping of settings, not {!r}'.format(name, entry)
+    return None
+
+
+def cmd_config(args):
+    """`dax config`: edit ~/.dax.yaml in your editor, then check it
+    (decision 38). Since `dax env set` was dropped (decision 14), hand-editing
+    this file is the only way to change an env, and a broken file breaks
+    every dax command until it's fixed, so the edit is bracketed:
+
+    - the version from before an edit that changes the file is kept as
+      ~/.dax.yaml.prev, so a bad edit is one `cp` from undone (written only
+      on a change, so opening the file just to look never costs the undo);
+    - after saving, the file is parsed the way every other command reads it
+      (ruamel round-trip, so duplicate keys are caught too) and its shape is
+      checked. On a problem the editor is offered again. Then the same
+      warnings `dax run` prints: unknown keys and old Claude entries.
+      Reported, never auto-fixed.
+
+    Refuses inside a dax container: there ~/.dax.yaml is a single-file bind
+    mount, and an editor that saves by write-then-rename silently detaches
+    the container's copy from the host file, so a successful-looking edit
+    may never reach the host. A missing file is decision 37's message; dax
+    never creates one.
+    """
+    from dax_creds.config import (
+        load_dax_config, unknown_env_keys, describe_unknown_env_keys,
+        legacy_claude_entries,
+    )
+    from dax_creds.init import _q_confirm
+
+    if _in_dax_container():
+        dax_print('[!] dax config only runs on the host. Inside a dax container ~/.dax.yaml '
+                  'is a single-file bind mount, and an editor that saves by write-then-rename '
+                  "silently detaches the container's copy, so the edit might never reach the host.")
+        dax_print('    Run `dax config` in a host terminal.')
+        sys.exit(1)
+
+    path = Path.home() / '.dax.yaml'
+    if not path.is_file():
+        _exit_missing_config()
+
+    prev = path.with_name('.dax.yaml.prev')
+    before = path.read_bytes()
+
+    def _keep_previous_if_changed():
+        if path.read_bytes() != before:
+            prev.write_bytes(before)
+            return True
+        return False
+
+    editor = _editor_command()
+    while True:
+        try:
+            result = subprocess.run(editor + [str(path)])
+        except FileNotFoundError:
+            _keep_previous_if_changed()
+            dax_print('[!] editor {!r} not found. Set $VISUAL or $EDITOR to one that is '
+                      'installed.'.format(editor[0]))
+            sys.exit(1)
+        if result.returncode != 0:
+            dax_print('[!] the editor exited with status {}'.format(result.returncode))
+        try:
+            config = load_dax_config()
+            problem = _config_shape_problem(config)
+        except Exception as e:
+            problem = 'it no longer parses:\n    ' + str(e).replace('\n', '\n    ')
+        if problem is None:
+            break
+        dax_print('[!] ~/.dax.yaml has a problem: {}'.format(problem))
+        try:
+            again = _q_confirm('Reopen the editor to fix it?', default=True)
+        except KeyboardInterrupt:
+            again = False
+        if not again:
+            if _keep_previous_if_changed():
+                dax_print('[!] left as is; the version from before this edit is at {} '
+                          '(cp {} {} to undo)'.format(prev, prev, path))
+            else:
+                dax_print('[!] left as is (it was already like this before this edit)')
+            sys.exit(1)
+
+    if not _keep_previous_if_changed():
+        dax_print('[-] no changes')
+        return
+    dax_print('[+] ~/.dax.yaml saved (previous version: {})'.format(prev))
+    for env_name, keys in unknown_env_keys(config).items():
+        dax_print('[!] env {!r} has {}'.format(env_name, describe_unknown_env_keys(keys)))
+    _warn_legacy_claude_entries(legacy_claude_entries(config))
+
+
 def _known_tenant_names():
     """Every tenant any registered env declares in its `tenant:` field: the
     pick-list `_prompt_tenant` offers, so one tenant isn't split into two by
@@ -3385,6 +3502,10 @@ def main():
 
     # One noun, every verb: `dax env list` lists envs and the rest act on one
     # or more of them, the same shape as `dax creds` (decision 18).
+    subparsers.add_parser(
+        'config', help='Edit ~/.dax.yaml in $EDITOR, keeping the previous version, '
+                       'then check it')
+
     env_p = subparsers.add_parser(
         'env', help='Inspect or remove environments',
         description='Edit an env by hand-editing its entry in ~/.dax.yaml.')
@@ -3442,6 +3563,8 @@ def main():
         cmd_creds(args)
     elif args.command == 'env':
         cmd_env(args)
+    elif args.command == 'config':
+        cmd_config(args)
 
 
 if __name__ == '__main__':
