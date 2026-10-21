@@ -59,3 +59,13 @@ def _implied_claude_credential_is_logged_in(request, monkeypatch):
 
     monkeypatch.setattr(init_mod, 'ensure_project_credentials', _ensure)
     monkeypatch.setattr(config_mod, 'relogin_due', lambda *a, **k: False)
+
+
+@pytest.fixture(autouse=True)
+def _no_image_version_lookup(monkeypatch):
+    """`dax run` asks docker for the image's `dax.version` label (decision
+    42). Tests never have a real image, and some stub `subprocess.run` for
+    their own purposes, so the lookup reports "can't tell" and stays silent.
+    test_dax_version.py tests the real lookup directly."""
+    import dax
+    monkeypatch.setattr(dax, '_image_version', lambda image: None)

@@ -647,8 +647,60 @@ def _print_features():
 
 
 def _get_version():
-    with open(Path(__file__).parent / 'VERSION', 'r') as f:
-        return f.readline().split()[0]
+    """The `VERSION` file beside this checkout; in the image, where dax is a
+    plain pip install with no `VERSION` beside it, the installed package's
+    own version, which pip took from that same file at build time."""
+    try:
+        with open(Path(__file__).parent / 'VERSION', 'r') as f:
+            return f.readline().split()[0]
+    except (OSError, IndexError):
+        pass
+    try:
+        from importlib.metadata import version
+        return version('dax')
+    except Exception:
+        return 'unknown'
+
+
+# Image label `dax build` stamps with the version it built from, so `dax run`
+# can tell when the image is older than the host's dax (decision 42). The
+# in-image copy of dax/dax_creds is frozen at build time, so an un-rebuilt
+# image silently runs old wrapper and credential code.
+_VERSION_LABEL = 'dax.version'
+
+
+def _image_version(image):
+    """The `dax.version` label on `image`, '' when the image has none, or
+    None when it can't be read (no docker, no such image)."""
+    try:
+        result = subprocess.run(
+            ['docker', 'image', 'inspect', '--format',
+             '{{ index .Config.Labels "%s" }}' % _VERSION_LABEL, image],
+            capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return '' if value in ('', '<no value>') else value
+
+
+def _warn_if_image_is_stale(image):
+    """Warn, never refuse, when the image wasn't built from this version.
+    An image with no label at all is only reported if it is one of dax's own
+    (`dax:*`); a custom image is the user's business."""
+    built = _image_version(image)
+    host = _get_version()
+    if built is None or host == 'unknown':
+        return
+    if built == '':
+        if image.split(':', 1)[0] == 'dax':
+            dax_print("[!] image {} predates dax versioning; this is dax {}. "
+                      "Run `dax build` to update it.".format(image, host))
+        return
+    if built != host:
+        dax_print("[!] image {} was built by dax {}; this is dax {}. "
+                  "Run `dax build` to update it.".format(image, built, host))
 
 
 def _get_dax_passwd():
@@ -721,7 +773,8 @@ def cmd_build(args):
     build_cmd = ['docker', 'build'] + _get_user_build_args() + ['--platform=linux/amd64']
     if args.clean:
         build_cmd.append('--no-cache')
-    build_cmd += ['-t', image_tag, '.']
+    build_cmd += ['--label', '{}={}'.format(_VERSION_LABEL, version),
+                  '-t', image_tag, '.']
     if _runcmd(build_cmd, args.test_only) != 0:
         dax_print("[!] docker build failed — leaving ./Dockerfile in place to inspect")
         sys.exit(1)
@@ -1101,6 +1154,7 @@ def cmd_run(args):
         if image in ('dax-base', 'dax-base:latest'):
             image = 'dax:latest'
         config['image'] = image
+        _warn_if_image_is_stale(image)
 
         ssh_creds = {n: d for n, d in project_creds.items() if d.get('provider') == 'ssh'}
         if ssh_creds:
@@ -3452,6 +3506,7 @@ def cmd_backup(args):
 
 def main():
     parser = argparse.ArgumentParser(description='DAX - Docker-based environment manager')
+    parser.add_argument('--version', action='version', version='dax ' + _get_version())
     parser.add_argument('-t', dest='test_only', action='store_true',
                         help='test only - print the docker command and exit')
 
