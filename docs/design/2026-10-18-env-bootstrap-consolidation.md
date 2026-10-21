@@ -1,9 +1,12 @@
 # `dax env` lifecycle consolidation
 
-**Status:** Steps 1–8c built. 41 decisions:
+**Status:** Built (steps 1–13), released as dax 3.0.0. 45 decisions:
 1–24 from 2026-10-18; 25–37 plus several in-place corrections from a
-pre-implementation risk review on 2026-10-19; 38 on 2026-10-20; 39–41
-on 2026-10-21.
+pre-implementation risk review on 2026-10-19; 38 on 2026-10-20; 39–45
+on 2026-10-21. Steps 9–13 came after the original plan and have no
+sections of their own below: 9 is decision 42, 10 is 43, 12 is 44, 11 is
+the `dax env list` work (including decision 45), and 13 was pre-PR fixes
+from a docs review. The runbook covers all of them.
 
 **Branch:** `feature/env-lifecycle-consolidation` (off `master`, rebuilt
 2026-10-18 after PR #10 merged — see note on `auto_enter` below).
@@ -1155,7 +1158,7 @@ from eleven.
 - **Update `CLAUDE.md`'s progress note after every step**, commit or not.
   It's eight steps of uncommitted work, and a context compaction or outage
   mid-build shouldn't lose where things stand.
-- **Execution order is 1, 2, 3, 4, 5, 7, 8, 8b, 8c, 8d, 6.** Step 7 needs steps 3
+- **Execution order was 1, 2, 3, 4, 5, 7, 8, 8b, 8c, 8d, 6, 9, 10, 11, 12, 13.** Step 7 needs steps 3
   and 4 in place, and step 6's doc sweep and grep gate can only pass once
   steps 7 and 8 have removed the old names. The step numbers are kept as
   labels.
@@ -1421,7 +1424,7 @@ single-target, cwd-based per decision 3).**
 last, after steps 7 and 8**, even though it keeps its number: until then
 `accept-shared-files`, `dax envs` and `dax tenant` still exist, step 7
 changes the most user-facing behavior of all (Claude baseline), and the
-final grep gate can't pass. Execution order: 1, 2, 3, 4, 5, 7, 8, 6.
+final grep gate can't pass. (The final execution order is under "Rules" above.)
 - CLAUDE.md: retire old `dax init`/`dax process new`/`dax process
   archive`/`export`/`restore`/`import` write-ups, add this consolidation's
   own entry once built.
@@ -1683,4 +1686,5 @@ runbook's fixture names and commands are authoritative.
 | **6** docs sweep | the final grep gate comes back clean | Skim `dax --help` and `README.md` |
 | **7** Claude baseline, old `claude` retired, copy-once seed, login temp folder | an env with empty `features:`/`creds:` gets the state tree and implied credential; no tenant → refused; legacy entries filtered, applied once, and warned (decisions 35–36); seed-once tests; `accept-shared-files` gone; login mounts the temp folder, never the host `~/.claude`, and removes it on success, cancel, and error; stale folders swept | A new scratch env gets `CLAUDE.md` in its tree; existing env trees unchanged. `dax creds login` for a scratch env's Claude credential succeeds against an empty config folder; afterwards the host `~/.claude/.credentials.json` mtime is unchanged and `~/.local/state/dax/login/` is empty. Cancel a second login partway → nothing imported, folder gone. Launch the scratch env → wrapper injects the new grant from Keychain |
 | **8** `envs`/`tenant`/`tenants` deleted | 76 tenant tests gone, rest green; `import dax_creds.tenant` fails | `dax env list` matches the old `dax envs list` output; `dax tenant` is gone |
+| **8b–8d, 9–13** | see each step's tests in `CLAUDE.md`'s build progress | the runbook's section for each step |
 | **End of branch** | full suite | `dax build`, restart one real env (`fabric`), then one full pass on scratch envs: bootstrap, archive, restore under a new name, destroy both |

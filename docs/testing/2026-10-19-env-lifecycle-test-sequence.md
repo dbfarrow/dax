@@ -2,9 +2,8 @@
 
 Written 2026-10-19, before implementation, for the branch described in
 `docs/design/2026-10-18-env-bootstrap-consolidation.md`. Run the matching
-section after each implementation step lands. Exact prompt wording and
-output don't exist yet; each section states the behavior that must hold,
-and the exact expected output gets filled in as each step is built.
+section after each implementation step lands. Every section's expected
+output was filled in as its step was built.
 
 **Why a manual sequence at all.** The automated suite runs inside a dax
 container, which can't reach the macOS **Keychain**, **Docker**, the real
@@ -452,7 +451,7 @@ dax env show dxt-e
 
 ## Step 6 — docs sweep (run last, after step 8)
 
-Step 6 was implemented after 8d (execution order 1, 2, 3, 4, 5, 7, 8, 8b, 8c, 8d, 6, 9),
+Step 6 was implemented after 8d (execution order 1, 2, 3, 4, 5, 7, 8, 8b, 8c, 8d, 6, 9, 10, 11, 12, 13),
 so its checks come here.
 
 ```bash
@@ -518,7 +517,7 @@ the `tenants:` block with `dax config`.
 
 ---
 
-## Step 11 — last-archived column in `dax env list`
+## Step 11 — `dax env list`: kind and archived columns, tenant grouping and order, hidden tenants, `--all`
 
 Host terminal; read-only apart from one scratch archive.
 
@@ -584,6 +583,8 @@ cd <fabric's dir> && dax run           # a real env, plain restart; exit
 | in a freshly started container, `dax --version` | prints `dax 3.0.0` |
 | in a freshly started container, `dax config` | refuses with "only runs on the host" (the rebuilt image's own `dax` now has the command) |
 | `fabric` | launches, `claude` starts logged in, `/resume` shows its history |
+| in an env whose `~/.mcp.json` configures `dax-gmail` | `/mcp` inside `claude` lists it |
+| `cd ~/test && mkdir dxt-pv && cd dxt-pv && dax -t run` (step 13) | refuses: `-t only previews a launch`; `~/.dax.yaml` unchanged, nothing new under `~/.local/state/dax/tenants/` |
 | full pass on a fresh scratch env | `mkdir ~/test/dxt-z && cd ~/test/dxt-z && dax run` → `dax env archive` → `mkdir ~/test/dxt-z2 && cd ~/test/dxt-z2 && dax env restore dxt-z` → `dax env destroy dxt-z dxt-z2` |
 
 ---
@@ -593,16 +594,20 @@ cd <fabric's dir> && dax run           # a real env, plain restart; exit
 ```bash
 cd ~ && dax env list | grep dxt                 # every scratch env
 dax env destroy <each dxt-* name>               # dirs, trees, derived creds, registry
-rm -rf ~/.local/state/dax/tenants/dxt            # safety net for any orphaned tree
+rm -rf ~/.local/state/dax/tenants/dxt*           # safety net: every scratch tenant (dxt, dxt-one, dxt-two, dxt-tenant)
 ls -A ~/.local/state/dax/login/                  # must be empty
 for n in $(dax creds list | awk '/dxt/{print $1}'); do echo "left: $n"; done   # no output
 for n in claude-dxt-dxt-a claude-dxt-dxt-b claude-dxt-dxt-b2 claude-dxt-dxt-c claude-dxt-dxt-d \
-         claude-dxt-dxt-f claude-personal-dxt-e claude-personal-dxt-old; do
+         claude-dxt-dxt-f claude-personal-dxt-e claude-personal-dxt-old \
+         claude-dxt-tenant-dxt-t claude-dxt-one-dxt-m claude-dxt-two-dxt-m \
+         claude-personal-dxt-z claude-personal-dxt-z2; do
   python3 -c "import keyring,sys; v=keyring.get_password('dax-creds', sys.argv[1]); v and print('left:', sys.argv[1])" $n
 done                                                                                   # no output: no dxt Keychain entries left
+#    (dxt-z/dxt-z2 used whatever tenant you gave them; adjust those two names if it wasn't personal)
+#    edit ~/.dax.yaml: remove any dxt-* tenant from `tenants:` (steps 10, 12)
 #    edit ~/.dax.yaml: restore backup_dir to the real value from setup
 diff ~/.dax.yaml ~/.dax.yaml.bak                 # no output: config back to its pre-test state
-rm -rf ~/test/dax-test-backups ~/test/tmp-x ~/test/dxt-full ~/test/dxt-a2 ~/test/dxt-g   # folders never registered
+rm -rf ~/test/dax-test-backups ~/test/tmp-x ~/test/dxt-full ~/test/dxt-a2 ~/test/dxt-g ~/test/dxt-pv   # folders never registered
 rm -f ~/.local/state/dax/creds-login/claude-dxt-*.json         # relogin timestamps
 ls -d ~/test/dxt-* 2>/dev/null                                       # no output
 ```

@@ -1,16 +1,14 @@
-image: dax:latest
-
 # Fallback values, used only when something else can't resolve its own
-# answer. `image` backstops a project with no image of its own (and no
-# top-level `image:` above). `timezone` backstops `dax run`'s own
+# answer. `image` is the image for a project with no image of its own
+# (`dax build` tags dax:<version> and dax:latest). `timezone` backstops `dax run`'s own
 # host-timezone detection (read from /etc/localtime at every launch) when
 # the host doesn't use that convention and nothing can be detected.
 # `relogin_cooldown_hours` controls how long `dax run` waits, per env,
 # before running that env's Claude login flow again — it runs before every
 # launch unless the last login flow for that env's credential ran more
 # recently than this. Defaults to 24.
-# defaults:
-#   image: dax-base
+defaults:
+  image: dax:latest
 #   timezone: America/New_York
 #   relogin_cooldown_hours: 24
 
@@ -25,7 +23,6 @@ image: dax:latest
 # projects:
 #   myproject:
 #     dir: /Users/you/code/myproject
-#     image: dax-base
 #     tenant: personal           # required
 #     creds: [github-you]        # optional; leave out when empty
 #     features: [auto_claude]    # optional
@@ -59,14 +56,14 @@ dotfiles:
     - ~/.tmux.conf
   rw:
     - ~/.gitconfig
-    - ~/.claude.json
 
 backup:
   - ~/.claude/CLAUDE.md
   - ~/.claude/settings.json
 
-# Base directory `dax backup` and `dax env archive`/`restore` write
-# into. Defaults to backup/ inside this repo checkout if omitted — that
+# Base directory `dax env archive` writes into and `dax env restore` reads
+# from. (`dax backup` always writes to backup/ in this checkout.) Defaults to
+# backup/ inside this repo checkout if omitted — that
 # default exists specifically because it's bind-mounted into the container
 # and survives a rebuild. Pointing this elsewhere (an external drive, a NAS
 # share) is the point for real BCP/DR media, but only that path is backed

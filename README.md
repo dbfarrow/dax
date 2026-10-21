@@ -21,12 +21,12 @@ The core idea: your environment should be cattle, not pets. Spin one up, do the 
 
 ## Install & Build
 
-**Prerequisites:** Python 3.7+, Docker Desktop
+**Prerequisites:** a Mac (credentials live in the macOS Keychain), Python 3.7+, Docker Desktop
 
 ```bash
 git clone https://github.com/dbfarrow/dax.git
 cd dax
-pip install -e .
+pip install -e .           # also installs keyring, for the Keychain
 ```
 
 Build the image:
@@ -45,7 +45,7 @@ The build prompts for a container password unless a `.daxpw` file exists with `0
 
 ### Versions
 
-dax uses semantic versioning; the current version is in `VERSION`, and `dax --version` prints it. Each `dax build` labels the image with the version it was built from, and `dax run` warns when the image it's about to launch was built by a different version — the dax code inside the image only changes on a rebuild, so that warning means it's time for `dax build`. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
+dax uses semantic versioning; the current version is in `VERSION`, and `dax --version` prints it. Each `dax build` labels the image with the version it was built from, and `dax run` warns when the image it's about to launch was built by a different version — the dax code inside the image only changes on a rebuild, so that warning means it's time for `dax build`. What changed in each release is in [CHANGELOG.md](CHANGELOG.md), including what to change in `~/.dax.yaml` when coming from 2.x.
 
 ---
 
@@ -55,9 +55,11 @@ dax needs a `~/.dax.yaml`, and never creates one itself. A minimal one:
 
 ```yaml
 defaults:
-  image: dax-base
+  image: dax:latest
 projects: {}
 ```
+
+`dax build` tags the image `dax:<version>` and `dax:latest`. (`dax-base`, which older configs carry, still works as another name for `dax:latest`.)
 
 Then make a folder for the env and run it there:
 
@@ -66,7 +68,7 @@ mkdir ~/work/my-project && cd ~/work/my-project
 dax run
 ```
 
-The first `dax run` in a folder that isn't registered yet starts a short wizard: image, tenant, which of your existing credentials to attach, and whether this is a plain coding project or a substrate-backed process. It shows a summary, registers the env (named after its folder) on confirm, and launches straight into it. Every later `dax run` there just launches.
+The first `dax run` in a folder that isn't registered yet starts a short wizard: image, tenant, which of your existing credentials to attach, and whether this is a plain coding project or a substrate-backed process (see [`substrate`](#features-reference)). It shows a summary, registers the env (named after its folder) on confirm, and launches straight into it. Every later `dax run` there just launches.
 
 You're in a container with your project mounted, dotfiles present, Claude Code set up with this env's own state and credential, and any credentials you attached available.
 
@@ -74,13 +76,13 @@ You're in a container with your project mounted, dotfiles present, Claude Code s
 
 ## Configuration
 
-All configuration lives in `~/.dax.yaml`. Edit it with `dax config`, which opens it in `$VISUAL`/`$EDITOR`/`vi`, keeps the version from before your edit as `~/.dax.yaml.prev`, and checks the result (syntax, duplicate keys, shape, unknown keys) before you leave. A `.dax.yaml` in the current directory can add per-launch settings.
+All configuration lives in `~/.dax.yaml`. Edit it with `dax config`, which opens it in `$VISUAL`/`$EDITOR`/`vi`, keeps the version from before your edit as `~/.dax.yaml.prev`, and checks the result (syntax, duplicate keys, shape, unknown keys) before you leave. A `.dax.yaml` in the folder you run `dax run` from can add `features:` for launches from there, and override any top-level setting, such as `ports:`.
 
 ### Example
 
 ```yaml
 defaults:
-  image: dax-base
+  image: dax:latest
   relogin_cooldown_hours: 24
 
 dotfiles:
@@ -115,15 +117,13 @@ credentials:
 projects:
   my-project:
     dir: /Users/dfarrow/work/my-project
-    image: dax-base
     tenant: personal
     creds:
       - github-dfarrow
       - ssh-id-ed25519
   some-process:
     dir: /Users/dfarrow/work/some-process
-    image: dax-base
-    tenant: personal
+    tenant: ysecurity
     features: [substrate]
     mounts: [~/discernment]
 ```
@@ -133,8 +133,9 @@ projects:
 | Key | Description |
 | --- | --- |
 | `image` | Image for envs that don't set their own (wins over `defaults.image`) |
-| `defaults` | `image` (fallback image) and `relogin_cooldown_hours` (how often `dax run` refreshes an env's Claude login; default 24) |
-| `githubdir`, `awsdir`, `optdir`, `msfdir` | Host paths the `github`, `aws`, `optdir` and `msf` features mount; required only by the feature that uses each |
+| `defaults` | `image` (fallback image), `timezone` (used only when the host's can't be detected) and `relogin_cooldown_hours` (how often `dax run` refreshes an env's Claude login; default 24) |
+| `githubdir`, `awsdir`, `optdir`, `msfdir` | What the `github`, `aws`, `optdir` and `msf` features mount, each as `{mount: ~/.aws}` (same path inside) or `{host: ~/x, container: ~/y}`; required only by the feature that uses it |
+| `ports` | Extra `host:container` port mappings for the `ports` feature, e.g. `["8080:80"]` |
 | `dotfiles` | Files to mount into every container (`ro` / `rw`) |
 | `backup` | Host paths `dax backup` copies into `backup/` in this checkout (gitignored, local only) |
 | `backup_dir` | Where `dax env archive` writes and `dax env restore` reads; defaults to `backup/` in this checkout |
@@ -150,12 +151,12 @@ projects:
 | --- | --- | --- |
 | `dir` | yes | Absolute path to the env's folder on the host |
 | `tenant` | yes | Grouping label. Names the env's Claude credential (`claude-<tenant>-<env>`) and its state tree (`~/.local/state/dax/tenants/<tenant>/<env>/`) |
-| `image` | no | Docker image for this env |
+| `image` | no | Docker image for this env (the wizard fills in `dax:latest`) |
 | `creds` | no | Credentials to make available. Claude's is implied; don't list it |
 | `features` | no | Opt-in features beyond the always-on ones, e.g. `[substrate, auto_claude]` |
-| `mounts` | no | Extra host paths, each mounted at `$HOME/<name>`. A non-empty list turns mounting on by itself |
+| `mounts` | no | Extra host paths, each mounted read-write at `$HOME/<name>`. `~/x:other` mounts it as `$HOME/other`, and a trailing `:ro` (`~/x:other:ro`, or `~/x::ro` to keep its name) makes it read-only. A non-empty list turns mounting on by itself |
 
-A list key that would be empty can just be left out, or left as `creds:` with nothing after it. `dax run` warns about any key it doesn't recognize, and about entries that are no longer needed (a `claude` or `claude_tenant_state` feature, Claude credentials in `creds:`, `mounts` in `features:`, a per-env `substrate:`).
+A list key that would be empty can just be left out, or left as `creds:` with nothing after it. `dax run` warns about any key it doesn't recognize, and about entries that are no longer needed: `claude`, `claude_tenant_state`, `auggie` or `mounts` in `features:`; Claude or auggie credentials in `creds:`; and a per-env `substrate:`, `multi_tenant` or `tenant_subdir`. CHANGELOG.md's "Updating `~/.dax.yaml` from 2.x" lists what to do about each.
 
 ---
 
@@ -291,6 +292,7 @@ Remove a credential from both Keychain and `~/.dax.yaml`. Refuses while any env 
 
 `dax creds list` flags credentials where a plaintext copy of the token exists on disk:
 
+- **`[!] no passphrase`** (ssh): the key file isn't passphrase-protected.
 - **`[!] token on disk`** (github): `~/.config/gh/hosts.yml` contains an `oauth_token`. Written by `gh auth login`; the copy in Keychain is what dax uses.
 - **`[!] key on disk`** (claude): the env's state tree holds a `.credentials.json`. Normal while its container runs; after it stops, it means a teardown didn't get to sync it back to Keychain and clear it.
 
@@ -350,7 +352,7 @@ Returns the attachment in a format Claude can read directly:
 
 A dax **environment** is a folder registered in `~/.dax.yaml`, named after the folder. Each one has its own Claude state tree and credential.
 
-#### `dax run`
+### `dax run`
 
 Launch a container for the current folder, creating the env first with a short wizard if the folder isn't registered yet.
 
@@ -358,12 +360,14 @@ Launch a container for the current folder, creating the env first with a short w
 dax run                    # launch (or create, then launch)
 dax run -f github          # add features on the fly
 dax run -p 8080:80         # expose an extra port
-dax -t run                 # preview: print the docker command, change nothing
+dax -t run                 # preview: print the docker command instead of launching
 ```
+
+`-t` changes nothing: in a folder that isn't registered it refuses rather than starting the wizard, and it never creates or seeds a state tree.
 
 Run it from an env's own folder: from a subfolder of a registered env it refuses and tells you where the env's root is.
 
-#### `dax env list [--all]`
+### `dax env list [--all]`
 
 List registered envs, plus any Claude state tree no registered env claims:
 
@@ -400,23 +404,27 @@ A tenant with `hidden: true` is left out of `dax env list`; a footer line counts
 
 An env with no `~/.dax.yaml` entry and no state tree, only archives, is counted in the same footer line. `dax env list --all` lists each one under the tenant `(archive-only)`, after every other group. Its real tenant is recorded inside the archive, but dax doesn't open archives to find it: on OneDrive, opening one can download the whole file. To bring one back, `cd` into an empty folder with its name and run `dax env restore`.
 
-#### `dax env show [name]`
+### `dax env show [name]`
 
 One env's settings plus what isn't in `~/.dax.yaml`: what kind of env it is (a code project, or a process with its type, skill and title from its `context.md`), its implied Claude credential and which browser its login opens, whether the folder exists, the container's state, and its state tree's size and age. Defaults to the env containing the current folder.
 
-#### `dax env archive [name ...]`
+### `dax env archive [name ...]`
 
 Snapshot envs (folder, Claude state tree, registry entry) for backup. A short wizard: which envs, then (for one env) dax's managed backups under `backup_dir/daily/` or a specific file, then for managed backups whether to remove the envs afterwards. Removal happens only once every archive has been read back successfully. Credentials are never archived. `dax env archive --explain` describes it in full.
 
-#### `dax env restore [name|path]`
+### `dax env restore [name|path]`
 
 Recover one archived env into the current folder, which must be empty and not a registered env. Restore never deletes or overwrites anything. The env is named after the folder, so restoring `fabric` from `~/fabric-check` registers `fabric-check` next to the live `fabric`. Pick dax's managed backups (env, then date, newest first) or a specific file; a name or path argument skips straight ahead. To roll a live env back: `dax env destroy` it, then restore into an empty folder. `dax env restore --explain` describes it in full.
 
-#### `dax env destroy [name ...]`
+### `dax env destroy [name ...]`
 
 Permanently remove envs: folder, Claude state tree, derived credential, and registry entry. Refuses while an env's container is running, and asks you to type `DESTROY`. With no names, shows a picker.
 
-#### `dax config`
+### `dax backup [--explain]`
+
+Copies your `dotfiles:` and `backup:` paths into `backup/` in this checkout (gitignored), writing only files that changed. `dax run` does the same quietly on every launch. Env archives are a separate command, `dax env archive`.
+
+### `dax config`
 
 Edit `~/.dax.yaml` safely (see [Configuration](#configuration)). Runs on the host only: inside a dax container the file is a single-file bind mount that some editors' saves silently detach.
 
@@ -431,6 +439,8 @@ The env's own folder doesn't move. The env's container has to be stopped first. 
 
 ## Features Reference
 
+`dax features` lists every feature with a short note on each.
+
 Always on for every env: `workdir`, `dotfiles`, `webpreview`, `claude`.
 
 | Feature | Description |
@@ -440,7 +450,7 @@ Always on for every env: `workdir`, `dotfiles`, `webpreview`, `claude`.
 | `webpreview` | Starts `dax-preview`, a rendered file browser served on a stable port (8000–8999, derived from the env's folder) |
 | `claude` | Mounts the env's own Claude state tree at `~/.claude`, seeds your global `CLAUDE.md`/settings into it once, and wires in its implied credential |
 | `mounts` | Mounts each path in the env's `mounts:` list at `$HOME/<name>`. On whenever that list is non-empty |
-| `substrate` | Opt in per env: mounts the top-level `substrate:` repo and sets `$SUBSTRATE_ROOT` for its hooks |
+| `substrate` | Opt in per env, for a *substrate-backed process*: an env scaffolded by the substrate's own `shared/new-process.sh` (which the `dax run` wizard runs for you) and worked with its skills. Mounts the top-level `substrate:` repo and sets `$SUBSTRATE_ROOT`. Claude refuses to start unless the substrate's `shared/wire.sh --check` passes |
 | `auto_claude` | Opt in per env: the container starts straight into `claude` in tmux instead of a shell |
 | `github` | Mounts `githubdir` (e.g. `~/.config/gh`) for gh CLI config |
 | `aws` | Mounts `awsdir` (e.g. `~/.aws`; warns that credentials are exposed) |

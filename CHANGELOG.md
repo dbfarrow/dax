@@ -33,6 +33,10 @@ The env-lifecycle consolidation. Design and every decision behind it: `docs/desi
 - The substrate path is one top-level `substrate:` key, and a process opts in with `features: [substrate]`.
 - Archives never hold credentials. Restore only goes into an empty, unregistered folder, never overwrites anything, and names the env after that folder.
 - A missing `~/.dax.yaml` exits with instructions; dax never creates one.
+- `dax -t run` is a pure preview. In a folder that isn't registered it refuses instead of starting the wizard, and it never creates or seeds a state tree.
+- New envs get `image: dax:latest`. `dax-base` still works as another name for it.
+- An empty list key (`creds:` with nothing after it) counts as an empty list.
+- `keyring` is now a declared dependency on macOS, so `pip install -e .` sets up everything the host needs.
 
 ### Added
 
@@ -43,7 +47,8 @@ The env-lifecycle consolidation. Design and every decision behind it: `docs/desi
   - an `archived` column, showing how long ago each env was last archived to `backup_dir`;
   - tenants grouped in your `tenants:` order;
   - `hidden: true` on a tenant in `tenants:` leaves its envs out of the list;
-  - `--all`, which lists hidden tenants and envs that exist only as archives.
+  - `--all`, which lists hidden tenants and envs that exist only as archives;
+  - no `image` column (`dax env show` still has it).
 - Changing an env's `tenant:` in `dax config` offers to move its Claude state tree and rename its credential in Keychain to match.
 - `dax --version`. `dax build` labels the image with its version, and `dax run` warns when the image was built by a different version.
 
