@@ -504,7 +504,25 @@ the shared mount, which is the intended fallback.
     - Retired keys are now reported as "ignored; remove them".
     - The tenant-isolation doc's pre-redesign half is marked historical
       (decision 24).
-    - Awaiting the runbook's step 8 manual checks before step 8b.
+    - Manual checks passed; committed as `764f2b6`.
+  - **Step 8b built 2026-10-20, suite 695 (from 675):**
+    - `dax config` (`cmd_config`) opens `$VISUAL`/`$EDITOR`/`vi` on
+      `~/.dax.yaml`, split with `shlex`, after copying it to
+      `~/.dax.yaml.prev`.
+    - After saving it parses via `load_dax_config` (duplicate keys
+      included) and offers to reopen on an error; declining exits 1 and
+      points at `.prev`.
+    - It then prints the unknown-key and old-Claude-entry warnings.
+    - It **refuses** inside a dax container (the user's call, 2026-10-21):
+      a single-file bind mount can silently detach on a write-then-rename
+      save. `_in_dax_container` checks for `/usr/local/bin/dax-entrypoint.sh`.
+    - `/code-review` fixes:
+      - a parsed-but-wrong-shape file (empty, list `projects:`, scalar env)
+        is a problem like a syntax error;
+      - `.prev` is written only when an edit changes the file;
+      - a missing editor gets a message, not a traceback.
+    - A missing config is decision 37's message.
+    - Awaiting the runbook's step 8b manual checks before step 6.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.

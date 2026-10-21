@@ -794,10 +794,12 @@ working.
     - Then runs the same quiet checks `dax run` does: decision 20's
       unknown-key warning and, once step 7 lands, decision 36's old Claude
       entries. Reported, never auto-fixed.
-    - Known caveat: inside a container `~/.dax.yaml` is a single-file bind
-      mount, where an editor that saves by write-then-rename can detach the
-      file from the host. The command prints a one-line warning when run
-      inside a dax container; on the host it's a non-issue.
+    - **Refuses inside a dax container** (revised 2026-10-21, at the
+      user's call, from an earlier "warn"): there `~/.dax.yaml` is a
+      single-file bind mount, and an editor that saves by write-then-rename
+      silently detaches the container's copy from the host file, so a
+      successful-looking edit may never reach the host. Detected by the dax
+      image's own `/usr/local/bin/dax-entrypoint.sh`.
 
     The seventh top-level command (decision 4's six plus this), still down
     from eleven. Built as step 8b, after step 8 and before step 6's docs

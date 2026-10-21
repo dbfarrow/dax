@@ -392,9 +392,11 @@ dax config                     # break the YAML (e.g. delete a colon), save, qui
 
 | Check | Pass |
 |---|---|
-| first run | opens your editor on `~/.dax.yaml`; `~/.dax.yaml.prev` now exists and matches the file |
-| `bogus: 1` | after quitting: a warning naming `dxt-a` and `bogus`; then remove the line with `dax config` again |
-| broken YAML | after quitting: the parse error is printed and you're offered the editor again; fix it there. `~/.dax.yaml.prev` holds the last good version if needed |
+| first run, no change | opens your editor on `~/.dax.yaml`; says "no changes" |
+| `bogus: 1` | after quitting: "saved", `~/.dax.yaml.prev` now holds the version without it, and a warning names `dxt-a` and `bogus`; then remove the line with `dax config` again |
+| broken YAML | after quitting: the parse error is printed and you're offered the editor again; fix it there. `~/.dax.yaml.prev` holds the version from before that edit if needed |
+| `dax config` again, quit without changing anything | "no changes"; `~/.dax.yaml.prev` is untouched (opening the file just to look never costs the undo copy) |
+| `dax config` from a shell **inside** a dax container | refuses immediately with "only runs on the host"; no editor opens. The container's own `dax` is the image's frozen copy, so before the end-of-branch rebuild run the branch's code directly: `python3 ~/dax/dax.py config` |
 
 ## Step 6 — docs sweep (run last, after step 8)
 
@@ -424,6 +426,7 @@ cd <fabric's dir> && dax run           # a real env, plain restart; exit
 | Check | Pass |
 |---|---|
 | build | succeeds |
+| in a freshly started container, `dax config` | refuses with "only runs on the host" (the rebuilt image's own `dax` now has the command) |
 | `fabric` | launches, `claude` starts logged in, `/resume` shows its history |
 | full pass on a fresh scratch env | `mkdir ~/test/dxt-z && cd ~/test/dxt-z && dax run` → `dax env archive` → `mkdir ~/test/dxt-z2 && cd ~/test/dxt-z2 && dax env restore dxt-z` → `dax env destroy dxt-z dxt-z2` |
 
