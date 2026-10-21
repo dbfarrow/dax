@@ -416,12 +416,23 @@ cd <ys-augmentcode's folder> && dax -t run
 
 ## Step 8d — `mounts:` switches its feature on; one global substrate
 
-Setup with `dax config`:
+**Before migrating**, see what today's config gets:
+
+```bash
+cd ~/test/dxt-e && dax -t run
+```
+
+| Check | Pass |
+|---|---|
+| `dax -t run` in `dxt-e` (it has a per-env `substrate:`, no top-level one) | refused before launch; names its per-env path and says to move it to a top-level `substrate:` |
+| the launch warning | calls `substrate` a retired key and says to *move* its path to a top-level `substrate:`, not just remove it |
+
+Then migrate with `dax config`:
 - add a top-level line: `substrate: /Users/dfarrow/fatsec/discernment`;
+- remove the per-env `substrate:` lines (leave one for now, to see the
+  warning below);
 - under `dxt-a`, add `mounts: [~/test]` and remove `mounts` from its
   `features:` if present;
-- leave one real substrate env's per-env `substrate:` line in for now, to
-  see the retired-key warning.
 
 ```bash
 cd ~/test/dxt-a && dax -t run
@@ -434,7 +445,7 @@ dax env show dxt-e
 | `dax -t run` in `dxt-a` | the docker command mounts `~/test`; no `mounts` in `features:` needed |
 | `mounts` left in some env's `features:` | each `dax run` warns it's no longer used and to remove it; nothing is mounted twice |
 | `dax -t run` in `dxt-e` (`features: [substrate]`, no per-env path) | mounts `/Users/dfarrow/fatsec/discernment` and sets `SUBSTRATE_ROOT` |
-| an env still carrying a per-env `substrate:` line | the launch warning calls it a retired key: ignored, remove it |
+| an env still carrying a per-env `substrate:` line | the launch warning still names it; it launches with the global path; remove the line |
 | `dax env show dxt-e` | shows the global substrate path |
 | temporarily remove the top-level `substrate:`, `dax -t run` in `dxt-e` | refused before launch, saying to add `substrate: <path>` via `dax config`; put it back |
 | new substrate env: `mkdir ~/test/dxt-i && cd ~/test/dxt-i && dax run` (process branch) | doesn't ask for a substrate path (the global one is used); decline at the confirm, then `rm -r ~/test/dxt-i` |

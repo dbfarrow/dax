@@ -552,6 +552,24 @@ the shared mount, which is the intended fallback.
 
     Live migration: add `substrate: /Users/dfarrow/fatsec/discernment` and
     remove the 8 identical per-env lines.
+  - **Step 8d built 2026-10-21, suite 702 (from 694):**
+    - Mounts: `cmd_run` adds `mounts` when the entry's `mounts:` is
+      non-empty; `mounts` joins `RETIRED_FEATURES` for every other source.
+    - Substrate:
+      - `feature_substrate` reads the top-level `substrate:` and refuses
+        when it's unset;
+      - `substrate` is in `RETIRED_ENV_KEYS` and out of `ENV_FIELDS`;
+      - the wizard uses the global path, or asks once and saves it as a
+        top-level key in the same single save;
+      - archives stop writing the path and restore ignores one;
+      - `env show` shows the global path or NOT SET, and the two
+        "feature not active" notes are gone.
+    - `/code-review` fixes:
+      - `cmd_run` takes the global substrate from the just-saved registry, so
+        a first process's first launch works;
+      - the retired-`substrate` warning, and the refusal, say to *move* the
+        per-env path to the top level, not just remove it.
+    - Awaiting the runbook's step 8d manual checks before step 6.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.
