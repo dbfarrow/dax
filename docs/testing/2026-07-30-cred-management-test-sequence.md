@@ -1,5 +1,16 @@
 # Credential Management — Manual Test Sequence
 
+> **Command names changed since this was written (env-lifecycle
+> consolidation, 2026-10):**
+> - `dax envs list` is `dax env list`, and `dax env set` is gone (edit with
+>   `dax config`).
+> - Every env's Claude credential is now implied (`claude-<tenant>-<env>`),
+>   not listed in `creds:`.
+> - `claude_tenant_state` is the always-on `claude` feature.
+>
+> The credential checks below still apply; for the current end-to-end pass
+> see `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
+
 Written 2026-07-30, after the container rebuild that picked up the C2/C3/C4
 credential work (see `docs/design/2026-07-27-tenant-isolation.md` decisions
 C, C2, C3, C4 and G2).

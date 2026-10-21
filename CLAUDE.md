@@ -5,6 +5,51 @@ dax is a Docker-based development environment manager. It reads `~/.dax.yaml`
 features (volume mounts, port mappings, etc.) assembled from named feature
 functions in `dax.py`.
 
+## Current state — read this first (2026-10-21)
+
+The env-lifecycle consolidation (`feature/env-lifecycle-consolidation`; design
+and all 41 decisions in `docs/design/2026-10-18-env-bootstrap-consolidation.md`)
+reshaped dax's CLI and env model. **Sections further down are history: their
+command names and mechanisms often predate this**; trust this section and
+the code over them.
+
+- **Commands:** `build`, `run`, `features`, `backup`, `creds`
+  (`add`/`list`/`update`/`login`/`remove`), `config`, `env`
+  (`list`/`show`/`archive`/`restore`/`destroy`).
+  - **Gone:** `dax init`, `dax process`, `dax envs`, `dax tenant`/`tenants`,
+    `dax env set`, `dax env accept-shared-files`, every `--dry-run`, and
+    `--include-credential`.
+- **Creating an env:** `dax run` in an unregistered folder runs the
+  `_bootstrap_env` wizard. The env is named after the folder. A process env
+  gets `new-process.sh` run after the confirm.
+- **Editing:** `dax config` (host only), which keeps `~/.dax.yaml.prev` and
+  checks the result.
+- **An env entry:** `dir` and `tenant` (both required), `image`, `creds`
+  (non-Claude only), `features` (opt-ins), `mounts`. A missing list key
+  counts as empty.
+- **Claude:** always on (`feature_claude`, formerly `claude_tenant_state`),
+  per env.
+  - The state tree lives at `~/.local/state/dax/tenants/<tenant>/<env>/`,
+    and the credential `claude-<tenant>-<env>` is implied, resolved
+    centrally in `resolve_credential_names`.
+  - Logins write to a temp folder under `~/.local/state/dax/login/`, never
+    the host `~/.claude`.
+  - Shared `CLAUDE.md`/settings are copied in once.
+- **Mounts:** a non-empty `mounts:` turns them on.
+- **Substrate:** one global top-level `substrate:`; a process opts in with
+  `features: [substrate]`.
+- **Retired names:** `claude`/`claude_tenant_state`/`auggie`/`mounts` in
+  `features:`, Claude or auggie entries in `creds:`, and the per-env keys
+  `substrate`, `multi_tenant` and `tenant_subdir`. All are ignored and
+  warned about on every `dax run`.
+- **Archive and restore:** archives never hold credentials. Restore only goes
+  into an empty, unregistered folder, never overwrites anything, and is named
+  after that folder.
+- **Removed outright:** auggie support, and the multi-tenant model
+  (`dax_creds/tenant.py`).
+- **Tests:** 704 passing. Manual runbook:
+  `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
+
 ## Baseline features replace the top-level `features:` list
 
 **Settled and built 2026-08-04**, on `feature/baseline-features` (branched
@@ -283,6 +328,10 @@ by hand to the real script in that repo.
   did. Confirmed working.
 
 ## Where this stands — 2026-07-31
+
+> *Historical. Its next-actions list predates the env-lifecycle
+> consolidation. `dax env set`, `accept-shared-files` and the shared `claude`
+> mount it refers to are gone; see "Current state" at the top.*
 
 Nine commits on `feature/tenant-isolation` since `4c8fb6c`, plus uncommitted
 work from today (shared-files sync + locale fix, below). **423 tests passing.**
@@ -569,7 +618,18 @@ the shared mount, which is the intended fallback.
         a first process's first launch works;
       - the retired-`substrate` warning, and the refusal, say to *move* the
         per-env path to the top level, not just remove it.
-    - Awaiting the runbook's step 8d manual checks before step 6.
+    - Manual checks passed; committed as `d014236`.
+  - **Step 6 built 2026-10-21, suite 704 (from 702), uncommitted:**
+    - Docs: README rewritten; `.dax.yaml.example` updated; superseded notes
+      added to four dated docs; a "Current state" section at the top of
+      this file.
+    - Help text and stale comments fixed.
+    - Review fixes:
+      - an empty `creds:` (null) no longer crashes `env list`/`creds list`;
+      - `env show` says "never used" for an empty state tree;
+      - the README documents top-level `image` and `githubdir`/`awsdir`/
+        `optdir`/`msfdir`;
+      - the example's `.settings.json` backup typo is fixed.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.
@@ -592,7 +652,12 @@ the shared mount, which is the intended fallback.
   replaced by a one-time seed. The doc's own "Implementation plan" section
   (8 steps) is the build order; nothing here has started.
 
-- **Tenant isolation for Claude Code state** — design and status in
+- **Tenant isolation for Claude Code state** *(largely complete: the
+  consolidation deleted the multi-tenant code this item said was "slated
+  for deletion" (step 8), made `claude_tenant_state` the always-on `claude`
+  feature (step 7), and replaced the drift-tracking shared-files sync
+  described below with a copy-once seed (decision 13). The narrative is
+  kept as history.)* — design and status in
   `docs/design/2026-07-27-tenant-isolation.md`. **Read that doc's
   "Redesign 2026-07-29 — multi-tenant abandoned" section before touching
   anything tenant-related.**
@@ -1107,8 +1172,9 @@ the shared mount, which is the intended fallback.
 
 ## Backlog
 
-- **`dax creds login` leaves the newest Claude grant in plaintext at the
-  host's `~/.claude/.credentials.json`.** Found 2026-10-19 during the
+- **~~`dax creds login` leaves the newest Claude grant in plaintext at the
+  host's `~/.claude/.credentials.json`~~ — fixed in the consolidation's step
+  7 (decision 32).** Found 2026-10-19 during the
   env-lifecycle review. The login container mounts the real host
   `~/.claude` rw, `claude auth login` writes the token there, and
   `_post_login_import` copies it into Keychain but never deletes the file.
@@ -1147,8 +1213,9 @@ the shared mount, which is the intended fallback.
   options. See decision 13's "Known gap" note in
   `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
 
-- **Collapse `dax process` into `dax env` — "process" isn't a distinct
-  concept, it's an env with `substrate` in its `features`.** Raised
+- **~~Collapse `dax process` into `dax env`~~ — done by the env-lifecycle
+  consolidation (all of `dax process` is gone).** "process" isn't a distinct
+  concept, it's an env with `substrate` in its `features`. Raised
   2026-08-31, during the discernment-processes migration (deregistering the
   discernment monorepo env to register its sub-processes individually —
   which is what surfaced the question in the first place: why do processes
@@ -1205,8 +1272,8 @@ the shared mount, which is the intended fallback.
   `test_dax_creds_add_flow.py`'s scripted-`Answers` pattern rather than
   mocking questionary directly.
 
-- **Retire `dax tenants` and `dax tenant classify`** — superseded by the merged
-  `dax envs list`.
+- **~~Retire `dax tenants` and `dax tenant classify`~~ — done in the
+  consolidation's step 8** (now `dax env list`).
 
 - **~~Container shell lands in `$HOME`, not the project mount~~ — resolved
   2026-08-04.** `cmd_run` now passes `-w <container_home>/<workdir_name>` —

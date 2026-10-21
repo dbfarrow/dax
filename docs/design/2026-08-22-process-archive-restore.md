@@ -1,5 +1,18 @@
 # `dax process archive` / `dax process restore`
 
+> **Superseded in part by the env-lifecycle consolidation (2026-10,
+> `docs/design/2026-10-18-env-bootstrap-consolidation.md`, decisions 3 and
+> 23–34).** Kept for its reasoning. What changed:
+> - `dax process archive`/`export` became **`dax env archive`**, a wizard: no
+>   `--all`/`--remove`/`--dry-run` flags, credentials never archived, and
+>   removal only after every tarball reads back.
+> - `dax process restore`/`import` became **`dax env restore`**: only into an
+>   empty, unregistered current folder, named after that folder, never
+>   overwriting anything. Rollback is `dax env destroy`, then restore. A
+>   renamed restore re-keys the Claude state.
+> - New archives' manifest is `dax-env-manifest.json`; old
+>   `dax-export-manifest.json` archives still restore.
+
 ## Context
 
 This feature exists for BCP/DR, full stop — it is not a tidiness convenience

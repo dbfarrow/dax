@@ -5,26 +5,34 @@ image: dax:latest
 # top-level `image:` above). `timezone` backstops `dax run`'s own
 # host-timezone detection (read from /etc/localtime at every launch) when
 # the host doesn't use that convention and nothing can be detected.
-# `relogin_cooldown_hours` controls how long `dax run` waits, per credential,
-# before running the Claude login flow again for a `claude_tenant_state` env
-# — it runs unconditionally before every launch unless the last login flow
-# (for that exact credential) ran more recently than this. Defaults to 24.
+# `relogin_cooldown_hours` controls how long `dax run` waits, per env,
+# before running that env's Claude login flow again — it runs before every
+# launch unless the last login flow for that env's credential ran more
+# recently than this. Defaults to 24.
 # defaults:
 #   image: dax-base
 #   timezone: America/New_York
 #   relogin_cooldown_hours: 24
 
 # workdir, dotfiles, webpreview, and claude are always on — no top-level
-# features: list needed for them. Everything else (github, mounts, substrate,
-# auto_claude, ...) is opt-in per project: add it
-# to that project's own `features:` list, a cwd-local .dax.yaml, or pass -f.
-# e.g.:
+# features: list needed for them. Claude needs nothing in `creds:` either: every
+# env's Claude credential is implied by its `tenant` (claude-<tenant>-<env>).
+# Everything else (github, substrate, auto_claude, ...) is opt-in per project:
+# add it to that project's own `features:` list, a cwd-local .dax.yaml, or pass
+# -f. `mounts` is the exception: a non-empty `mounts:` list turns it on by
+# itself. e.g.:
 #
 # projects:
 #   myproject:
 #     dir: /Users/you/code/myproject
-#     features:
-#       - claude
+#     image: dax-base
+#     tenant: personal           # required
+#     creds: [github-you]        # optional; leave out when empty
+#     features: [auto_claude]    # optional
+#     mounts: [~/notes]          # optional; turns mounting on by itself
+#
+# Projects are normally created by running `dax run` in their folder (a short
+# wizard), and edited with `dax config`.
 #
 # SSH agent forwarding is not a feature at all — it turns on purely because a
 # project's `creds:` list resolves to an `ssh`-provider credential (`dax
@@ -55,9 +63,9 @@ dotfiles:
 
 backup:
   - ~/.claude/CLAUDE.md
-  - ~/.claude/.settings.json
+  - ~/.claude/settings.json
 
-# Base directory `dax backup` and `dax process archive`/`restore` write
+# Base directory `dax backup` and `dax env archive`/`restore` write
 # into. Defaults to backup/ inside this repo checkout if omitted — that
 # default exists specifically because it's bind-mounted into the container
 # and survives a rebuild. Pointing this elsewhere (an external drive, a NAS
@@ -65,3 +73,9 @@ backup:
 # up if this container is ever rebuilt or lost, so make sure it's somewhere
 # that survives independently.
 # backup_dir: ~/backups/dax
+
+# The one virgil-style substrate repo every process env shares. An env opts in
+# with `features: [substrate]`; dax mounts this path and sets $SUBSTRATE_ROOT.
+# The bootstrap wizard asks for it, and saves it here, the first time you
+# create a process env if it isn't set yet.
+# substrate: ~/src/virgil
