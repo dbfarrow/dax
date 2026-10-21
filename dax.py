@@ -320,8 +320,9 @@ def feature_claude(config):
     # rather than left for Docker to auto-create - on native Linux that
     # happens as root, which then locks the container's non-root user out
     # of its own state tree with EACCES. Idempotent and harmless if it
-    # already exists.
-    Path(host_tree).mkdir(parents=True, exist_ok=True)
+    # already exists. Not under -t, which is a pure preview.
+    if not config.get('_test_only'):
+        Path(host_tree).mkdir(parents=True, exist_ok=True)
 
     opts = [
         '-e', 'CLAUDE_CONFIG_DIR={}'.format(cfg_dir),
@@ -345,7 +346,8 @@ def feature_claude(config):
 
     # Copied in rather than mounted (see the comment on _CLAUDE_HOST_SHARED_FILES
     # above), once: a file the tree already has is never touched (decision 13).
-    sync_claude_shared_files(tenant, project_name)
+    if not config.get('_test_only'):
+        sync_claude_shared_files(tenant, project_name)
 
     return opts
 
@@ -1066,6 +1068,12 @@ def cmd_run(args):
                     "inside the container.".format(
                         Path.cwd(), enclosing_name, project_dir, project_dir))
                 sys.exit(1)
+            if args.test_only:
+                # -t is a preview; the wizard registers an env and, for a
+                # process, scaffolds files, so it never runs under -t.
+                dax_print("[!] {} isn't a registered env yet. -t only previews a launch; "
+                          'run `dax run` without -t to set it up.'.format(Path.cwd()))
+                sys.exit(1)
             dax_print("[+] {} isn't a registered env yet — setting it up".format(Path.cwd()))
             bootstrapped = _bootstrap_env(dax_config, Path.cwd().resolve())
             if bootstrapped is None:
@@ -1107,6 +1115,7 @@ def cmd_run(args):
         # path from — no `.dax-tenant` file, no cwd resolution.
         config['tenant'] = project.get('tenant')
         config['env_name'] = project_name
+        config['_test_only'] = args.test_only
 
         # The env's own `features:` (per-env opt-ins on top of the always-on
         # baseline), merged so nothing applies twice and the retired Claude
@@ -2295,7 +2304,7 @@ def _bootstrap_env(config, env_dir):
         print('This env will be named {!r}, after its folder. To name it something else,'.format(name))
         print('Ctrl-C now, rename the folder, and run `dax run` again.')
         print()
-        image = _q_text('Image:', default=config.get('defaults', {}).get('image', 'dax-base'))
+        image = _q_text('Image:', default=config.get('defaults', {}).get('image', 'dax:latest'))
 
         tenant = _prompt_tenant(env_dir, _known_tenant_names())
         used_tenants = {(p or {}).get('tenant') for p in projects.values()}
@@ -3310,7 +3319,7 @@ def _restored_entry(config, manifest, env_dir, tenant):
 
     entry = CommentedMap()
     entry['dir'] = str(env_dir)
-    entry['image'] = manifest.get('image') or 'dax-base'
+    entry['image'] = manifest.get('image') or 'dax:latest'
     entry['creds'] = creds
     if tenant:
         entry['tenant'] = tenant

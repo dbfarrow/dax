@@ -77,7 +77,8 @@ def _new_project_setup(tmp_path, monkeypatch):
     return home, new_repo
 
 
-def test_cmd_run_bootstraps_a_genuinely_new_project(tmp_path, monkeypatch, capsys):
+def test_cmd_run_bootstraps_a_genuinely_new_project(tmp_path, monkeypatch, capsys,
+                                                     launch_without_docker):
     home, new_repo = _new_project_setup(tmp_path, monkeypatch)
     calls = []
 
@@ -94,7 +95,7 @@ def test_cmd_run_bootstraps_a_genuinely_new_project(tmp_path, monkeypatch, capsy
     # machinery next, which this test has no interest in exercising - only
     # that it took the bootstrap branch, not the refusal branch.
     try:
-        cmd_run(_args())
+        cmd_run(argparse.Namespace(features=None, ports=None, test_only=False))
     except SystemExit as e:
         assert e.code != 1
     except Exception:
@@ -119,3 +120,17 @@ def test_declining_the_bootstrap_launches_nothing(tmp_path, monkeypatch, capsys)
 
     assert excinfo.value.code == 0
     assert launched == []
+
+
+def test_dash_t_never_starts_the_wizard(tmp_path, monkeypatch, capsys):
+    """-t is a preview; the wizard registers an env and scaffolds files."""
+    home, new_repo = _new_project_setup(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr('dax._bootstrap_env', lambda *a: calls.append(a))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cmd_run(_args())
+
+    assert excinfo.value.code == 1
+    assert calls == []
+    assert "run `dax run` without -t to set it up" in capsys.readouterr().out

@@ -77,7 +77,32 @@ def test_an_env_that_mentions_nothing_about_claude_still_gets_it(tmp_path, monke
     assert '.local/state/dax/tenants/personal/fabric:' in out
     assert 'CLAUDE_CONFIG_DIR=' in out
     assert 'DAX_CREDS_CLAUDE=claude-personal-fabric' in out
-    assert (home / '.local/state/dax/tenants/personal/fabric').is_dir()
+
+
+def test_a_real_launch_creates_and_seeds_the_state_tree(tmp_path, monkeypatch, launch_without_docker):
+    home, _ = _setup(tmp_path, monkeypatch)
+    (home / '.claude').mkdir()
+    (home / '.claude' / 'CLAUDE.md').write_text('global')
+
+    cmd_run(argparse.Namespace(features=None, ports=None, test_only=False))
+
+    tree = home / '.local/state/dax/tenants/personal/fabric'
+    assert tree.is_dir()
+    assert (tree / 'CLAUDE.md').read_text() == 'global'
+    assert any(c[:2] == ['docker', 'run'] for c in launch_without_docker)
+
+
+def test_dash_t_creates_and_seeds_nothing(tmp_path, monkeypatch, capsys):
+    """-t is a pure preview: the command still names the tree, but nothing
+    is made on disk."""
+    home, _ = _setup(tmp_path, monkeypatch)
+    (home / '.claude').mkdir()
+    (home / '.claude' / 'CLAUDE.md').write_text('global')
+
+    cmd_run(_args())
+
+    assert '.local/state/dax/tenants/personal/fabric:' in capsys.readouterr().out
+    assert not (home / '.local/state/dax/tenants').exists()
 
 
 @pytest.mark.parametrize('listed', [['claude'], ['claude_tenant_state'],

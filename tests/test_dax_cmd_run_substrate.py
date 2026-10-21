@@ -108,7 +108,7 @@ def test_a_refusal_names_the_per_env_path_to_move(tmp_path, monkeypatch, capsys)
 
 
 def test_a_global_substrate_saved_by_the_wizard_is_used_on_the_same_launch(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, launch_without_docker):
     """The wizard saves the first global path after cmd_run already read its
     config; the launch right after must still see it."""
     import dax
@@ -126,7 +126,7 @@ def test_a_global_substrate_saved_by_the_wizard_is_used_on_the_same_launch(
         return 'new-proc', entry
     monkeypatch.setattr(dax, '_bootstrap_env', fake_bootstrap)
 
-    cmd_run(_args())
+    cmd_run(argparse.Namespace(features=None, ports=None, test_only=False))
 
     out = capsys.readouterr().out
     assert 'no substrate is set' not in out

@@ -303,7 +303,7 @@ def missing_config_message():
 dax needs a ~/.dax.yaml and never creates one itself. A minimal one:
 
     defaults:
-      image: dax-base
+      image: dax:latest
     # Where `dax env archive` writes and `dax env restore` reads (optional;
     # defaults to backup/ inside the dax repo checkout):
     # backup_dir: ~/backups/dax

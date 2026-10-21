@@ -69,3 +69,18 @@ def _no_image_version_lookup(monkeypatch):
     test_dax_version.py tests the real lookup directly."""
     import dax
     monkeypatch.setattr(dax, '_image_version', lambda image: None)
+
+
+@pytest.fixture
+def launch_without_docker(monkeypatch):
+    """Lets a test run `cmd_run` for real (not -t) without docker: the
+    `docker run` is recorded instead of executed, and nothing reaches
+    Keychain. Needed where -t is the wrong tool: under -t, `dax run` never
+    starts the bootstrap wizard and never touches a state tree. Returns the
+    list of commands `subprocess.run` was given."""
+    import dax
+    ran = []
+    monkeypatch.setattr(dax.subprocess, 'run', lambda cmd, *a, **k: ran.append(cmd))
+    monkeypatch.setattr(dax, '_keyring_importable', lambda: False)
+    monkeypatch.setattr(dax, '_sync_and_clear_claude_credential', lambda *a, **k: None)
+    return ran
