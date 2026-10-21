@@ -140,7 +140,7 @@ projects:
 | `backup_dir` | Where `dax env archive` writes and `dax env restore` reads; defaults to `backup/` in this checkout |
 | `substrate` | The one substrate repo every process env shares (see the `substrate` feature) |
 | `credential_defaults` | Per-provider browser settings for derived credentials, e.g. every env's Claude login |
-| `tenants` | Per-tenant settings, merged over `credential_defaults`: today, which browser a tenant's Claude logins open |
+| `tenants` | Per-tenant settings: which browser a tenant's Claude logins open (merged over `credential_defaults`), and `hidden: true` to leave a tenant out of `dax env list` unless `--all`. Its order is the order `dax env list` shows tenants in |
 | `credentials` | Named credential definitions (managed by `dax creds`) |
 | `projects` | Registered environments (created by `dax run`'s wizard, edited with `dax config`) |
 
@@ -363,23 +363,46 @@ dax -t run                 # preview: print the docker command, change nothing
 
 Run it from an env's own folder: from a subfolder of a registered env it refuses and tells you where the env's root is.
 
-#### `dax env list`
+#### `dax env list [--all]`
 
 List registered envs, plus any Claude state tree no registered env claims:
 
 ```
-       tenant    name         image     dir                 creds                      state  used
-       --------  -----------  --------  ------------------  -------------------------  -----  ----
-  [ ]  personal  my-project   dax-base  ~/work/my-project   github-me, ssh-id-ed25519  2.1M   3d
-  [*]  acme      client-work  dax-base  ~/work/client-work  (none)                     84K    now
-  [!]  personal  old-thing    dax-base  ~/work/old-thing    (none)                     -      -
+       tenant    name         kind        dir                 creds                      state  used  archived
+       --------  -----------  ----------  ------------------  -------------------------  -----  ----  --------
+  [*]  acme      client-work  code        ~/work/client-work  (none)                     84K    now   never
+
+  [ ]  personal  job-offer    commitment  ~/work/job-offer    (none)                     310K   2d    2d
+  [ ]  personal  my-project   code        ~/work/my-project   github-me, ssh-id-ed25519  2.1M   3d    1w
+  [!]  personal  old-thing    code        ~/work/old-thing    (none)                     -      -     5w
 ```
 
-`[*]` running, `[!]` folder missing, `[?]` a state tree with no env (orphaned).
+`kind` is `code` for a code project. Anything else is a substrate-backed process, shown by its type, which is read from the `type:` line at the top of the process's own `context.md` (written by `new-process.sh`), or `?` if that's missing.
+
+Envs are grouped by tenant, with a blank line between tenants, and sorted by name within each. An orphaned state tree sits with its tenant. Tenants appear in the order the top-level `tenants:` block lists them, then any it doesn't list, alphabetically. To order a tenant that has no settings, list just its name:
+
+```yaml
+tenants:
+  personal:
+  ysecurity:
+    claude:
+      chrome_profile: Profile 5
+  acme:
+  parked:
+    hidden: true
+```
+
+A tenant with `hidden: true` is left out of `dax env list`; a footer line counts what's hidden. `dax env list --all` shows it again, together with archive-only envs. Hiding only affects the listing: every other command, and every picker, still sees those envs.
+
+`[*]` running, `[!]` folder missing, `[?]` a state tree with no env (orphaned), `[a]` an env that exists only as an archive (with `--all`).
+
+`used` is how long ago the env's Claude state last changed. `archived` is how long ago its newest archive was written by `dax env archive` to `backup_dir/daily/`, or `never`. An archive saved to a file elsewhere isn't counted. If `backup_dir` isn't there (an unmounted drive, say), the column shows `?` and a note.
+
+An env with no `~/.dax.yaml` entry and no state tree, only archives, is counted in the same footer line. `dax env list --all` lists each one under the tenant `(archive-only)`, after every other group. Its real tenant is recorded inside the archive, but dax doesn't open archives to find it: on OneDrive, opening one can download the whole file. To bring one back, `cd` into an empty folder with its name and run `dax env restore`.
 
 #### `dax env show [name]`
 
-One env's settings plus what isn't in `~/.dax.yaml`: its implied Claude credential, whether the folder exists, the container's state, and its state tree's size and age. Defaults to the env containing the current folder.
+One env's settings plus what isn't in `~/.dax.yaml`: what kind of env it is (a code project, or a process with its type, skill and title from its `context.md`), its implied Claude credential and which browser its login opens, whether the folder exists, the container's state, and its state tree's size and age. Defaults to the env containing the current folder.
 
 #### `dax env archive [name ...]`
 
@@ -396,6 +419,13 @@ Permanently remove envs: folder, Claude state tree, derived credential, and regi
 #### `dax config`
 
 Edit `~/.dax.yaml` safely (see [Configuration](#configuration)). Runs on the host only: inside a dax container the file is a single-file bind mount that some editors' saves silently detach.
+
+**Changing an env's tenant.** The tenant names the env's Claude state tree (`~/.local/state/dax/tenants/<tenant>/<env>/`) and its Claude credential (`claude-<tenant>-<env>`). So when you change an env's `tenant:` and save, `dax config` offers to move both:
+- **State tree:** moved to the new tenant's folder.
+- **Credential:** renamed in Keychain. It's the same login, so there's nothing to redo, and no old secret is left behind.
+- **Login record:** moved along with the credential.
+
+The env's own folder doesn't move. The env's container has to be stopped first. If either new name already exists, nothing moves and dax prints the steps to do it by hand.
 
 ---
 

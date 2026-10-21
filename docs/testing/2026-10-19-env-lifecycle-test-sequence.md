@@ -518,6 +518,57 @@ the `tenants:` block with `dax config`.
 
 ---
 
+## Step 11 — last-archived column in `dax env list`
+
+Host terminal; read-only apart from one scratch archive.
+
+```bash
+dax env list
+mkdir -p ~/test/dxt-a && cd ~/test/dxt-a && dax env archive   # archive just dxt-a (register it first with dax run if needed)
+dax env list
+```
+
+| Check | Pass |
+|---|---|
+| first `dax env list` | has an `archived` column; envs you've archived show an age, the rest `never` |
+| grouping | envs grouped by tenant with a blank line between tenants, and names in alphabetical order within each |
+| tenant order | tenants in the order your `tenants:` block lists them, then any unlisted ones alphabetically |
+| archive-only envs | if any archived env isn't registered and has no state tree, plain `dax env list` ends with `N more env(s) exist only as archives (dax env list --all)` |
+| `kind` column | `code` for your code projects; for each substrate process, its type, matching the `type:` in its `context.md` |
+| `dax env show <a process>` | `kind     substrate-backed process, type <type> (skill <skill>)` and a `title` line with its context.md heading |
+| `hidden: true` on `parked` and `test` (via `dax config`) | plain `dax env list` leaves both out and ends with `N envs hidden in test, parked (dax env list --all)` (in your `tenants:` order) |
+| `dax env show <a parked env>` | still works; hiding only affects the listing |
+| `dax env list --all` | shows the hidden tenants again, in `tenants:` order, and archive-only envs as `[a]` rows under `(archive-only)` after every other group, with their archive age; the legend says how to restore one |
+| after archiving `dxt-a` | its row shows `now` |
+| `dax config`, point `backup_dir:` at a path that doesn't exist, `dax env list`, then put it back | the column shows `?` with a `backup_dir … not found` note, not `never` |
+
+---
+
+## Step 12 — changing an env's tenant
+
+Host terminal, on a scratch env (never a real one).
+
+```bash
+mkdir -p ~/test/dxt-m && cd ~/test/dxt-m && dax run     # tenant dxt-one; log in; exit the container
+dax creds list | grep dxt-m                             # claude-dxt-one-dxt-m, stored
+dax config                                              # change dxt-m's tenant to dxt-two; save; answer Y
+dax creds list | grep dxt-m
+ls ~/.local/state/dax/tenants/ | grep dxt
+cd ~/test/dxt-m && dax run                              # exit again
+```
+
+| Check | Pass |
+|---|---|
+| after the save | asks `Move them to 'dxt-two'?`, then reports the state tree and Keychain moves |
+| `dax creds list` | shows `claude-dxt-two-dxt-m` stored; `claude-dxt-one-dxt-m` is gone |
+| `tenants/` | has `dxt-two`, and no `dxt-one` (it was that tenant's only env) |
+| the second `dax run` | no login prompt; `claude` starts logged in, and `/resume` shows the session from before |
+| with the container running, change the tenant back | refused: `is running; stop it first`, nothing moved |
+
+Cleanup: `dax env destroy dxt-m`.
+
+---
+
 ## End of branch
 
 ```bash

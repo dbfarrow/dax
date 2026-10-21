@@ -948,6 +948,76 @@ working.
     - **`dax env show`** says which browser the env's Claude login opens and
       where that setting comes from (tenant or default).
 
+44. **Changing an env's tenant: `dax config` carries its Claude state
+    along.** Decided 2026-10-21 (user: "if i want to change the tenant on an
+    env i have to change the tenant value in the .dax.yaml and i need to move
+    the state tree. is there anything else? perhaps we should automate that").
+    Built as step 12.
+    - **What depends on the tenant:**
+      - the state tree path `tenants/<tenant>/<env>/`;
+      - the implied credential name `claude-<tenant>-<env>`, which is its
+        Keychain secret;
+      - the relogin record `creds-login/<name>.json`.
+
+      Nothing inside the tree does: it's keyed by the container path
+      `/home/<user>/<env>`. The env's own folder never moves.
+    - **Trigger:** after a `dax config` save, every env whose `tenant:`
+      changed from one value to another gets the offer "Move them to <new>?"
+      (default yes). An env gaining its first tenant had nothing to move. No
+      new command, and no `dax run` fallback; declining prints the manual
+      steps.
+    - **The move:**
+      - the tree goes to the new tenant's folder, and the old tenant's
+        folder is removed if it's now empty;
+      - the Keychain secret is renamed, set under the new name and then
+        deleted under the old: the same grant, so no login, and nothing is
+        orphaned;
+      - the relogin record follows;
+      - a pre-3.0 shared-files manifest beside the old tree is deleted.
+    - **Refused before anything moves** when:
+      - the env's container is running (its tree is mounted at the old
+        path, and stopping it syncs the credential back under the old name);
+      - the new tree path exists;
+      - the new credential name already has a Keychain secret.
+
+      Never a merge. A failure partway through is reported step by step, not
+      rolled back.
+    - **Review fixes, 2026-10-21:**
+      - The running check covers both the old and the new `dir:`, in case
+        the same edit changed it. A `docker ps` that times out counts as
+        "can't tell", and refuses.
+      - The old config is parsed with the same ruamel loader as the new, so a
+        YAML 1.1 value like `on` never reads as a change. A non-string
+        tenant (`2025`) is skipped with "quote it".
+      - The manifest is deleted before the old tenant folder is removed.
+      - A failed tree move stops before Keychain, and says what's at each
+        path.
+      - The Keychain delete is retried once.
+      - Every manual fallback names a raw `keyring.delete_password` command,
+        never `dax creds remove`: once the tenant changed, the old name is
+        neither registered nor derived, so dax refuses it.
+      - Two notes: a registered `credentials:` entry under the old name
+        (left holding nothing), and an env that left the registry in the
+        same edit (renamed or removed) while its tree is still on disk.
+
+45. **Hiding tenants from `dax env list`.** Decided 2026-10-21 (user: "don't
+    show parked or test envs unless the --all flag is present"). Built into
+    step 11.
+    - **A per-tenant `hidden: true`** in the `tenants:` block, next to the
+      browser setting, rather than a separate top-level list naming tenants
+      a second time. A missing `hidden`, or `false`, shows the tenant.
+    - **Plain `dax env list`** leaves out every row filed under a hidden
+      tenant (orphaned trees included) and says so in a footer:
+      `N envs hidden in parked, test` (in `tenants:` order). This is
+      combined with the archive-only count on one line.
+    - **`--all`** shows hidden tenants in their `tenants:` order, and the
+      archive-only group. One flag, because both mean "envs I'm not working
+      on".
+    - **Only the listing is affected.** `show`, `run`, `archive`, `restore`,
+      `destroy` and their pickers treat hidden envs like any other.
+    - **Checked:** `hidden` must be a boolean. Anything else is warned about
+      by `dax run` and `dax config`, and doesn't hide.
+
 ## The full env lifecycle, end to end
 
 Every stage, naming the exact command and the decision behind its shape.

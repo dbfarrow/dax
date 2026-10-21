@@ -8,7 +8,7 @@ functions in `dax.py`.
 ## Current state — read this first (2026-10-21)
 
 The env-lifecycle consolidation (`feature/env-lifecycle-consolidation`; design
-and all 43 decisions in `docs/design/2026-10-18-env-bootstrap-consolidation.md`)
+and all 45 decisions in `docs/design/2026-10-18-env-bootstrap-consolidation.md`)
 reshaped dax's CLI and env model. **Sections further down are history: their
 command names and mechanisms often predate this**; trust this section and
 the code over them.
@@ -55,7 +55,7 @@ the code over them.
   `dax --version` and `CHANGELOG.md`. `dax build` labels the image
   `dax.version`, and `dax run` warns when the label differs from the host's
   version (decision 42).
-- **Tests:** 752 passing. Manual runbook:
+- **Tests:** 810 passing. Manual runbook:
   `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
 
 ## Baseline features replace the top-level `features:` list
@@ -395,7 +395,7 @@ the shared mount, which is the intended fallback.
 - **`dax env` lifecycle consolidation** — full design in
   `docs/design/2026-10-18-env-bootstrap-consolidation.md`, branch
   `feature/env-lifecycle-consolidation` (off `master`; steps 1–5 built,
-  43 decisions; see "Build progress" below).
+  45 decisions; see "Build progress" below).
   Decisions 25–37 came from a 2026-10-19 pre-implementation risk review:
   env-name collisions are fatal; restore only targets an empty,
   unregistered cwd and never overwrites anything (rollback = destroy, then
@@ -413,7 +413,7 @@ the shared mount, which is the intended fallback.
   reviews found and fixed ~55 issues on 2026-10-19; execution order is
   1, 2, 3, 4, 5, 7, 8, 6. Manual runbook:
   `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
-  **Build progress (uncommitted, on the branch):**
+  **Build progress (on the branch):**
   - **Step 1 built 2026-10-19, suite 687 (from 671):**
     - `dax env destroy` replaces `dax process destroy`, with no `--dry-run`.
     - `cmd_env` now resolves the env name per subcommand, so `destroy`
@@ -627,7 +627,7 @@ the shared mount, which is the intended fallback.
       - the retired-`substrate` warning, and the refusal, say to *move* the
         per-env path to the top level, not just remove it.
     - Manual checks passed; committed as `d014236`.
-  - **Step 6 built 2026-10-21, suite 704 (from 702), uncommitted:**
+  - **Step 6 built 2026-10-21, suite 704 (from 702):**
     - Docs: README rewritten; `.dax.yaml.example` updated; superseded notes
       added to four dated docs; a "Current state" section at the top of
       this file.
@@ -677,6 +677,70 @@ the shared mount, which is the intended fallback.
       - the daemon opens plain Chrome rather than a profile named "None";
       - the `creds add` note and the decision-43 doc are corrected.
     - Manual checks passed 2026-10-21; committed.
+  - **Step 11 (`dax env list`: archived and kind columns, tenant grouping
+    and order, `--all`, hidden tenants) built 2026-10-21, suite 785 (from
+    752):**
+    - `_last_archived(config)` (`dax.py`) maps each env name to the mtime of
+      its newest `backup_dir/daily/<name>-<date>.tar.gz`, from
+      `_available_archives`. It's None when backup_dir is missing.
+    - `run_env_list(config, archived=, missing_backup_dir=)` adds the column:
+      an age, `never`, or `?` plus a note when backup_dir isn't there.
+      Orphaned trees get it too. With neither argument there's no column.
+    - Only daily archives count; one written to a file elsewhere isn't
+      tracked.
+    - Rows are grouped by tenant (blank line between), sorted by tenant then
+      name; orphaned trees sit with their tenant, and tenantless envs come
+      last (the user's request).
+    - Tenant order follows the top-level `tenants:` block's key order, then
+      alphabetical for unlisted tenants. A bare `personal:` key (null value)
+      just holds a place. A non-map `tenants:` falls back to alphabetical.
+    - `dax env list --all`: an env with archives but no registry entry and no
+      state tree gets an `[a]` row under the synthetic tenant
+      `(archive-only)` (`ARCHIVE_ONLY_TENANT`), sorted after every group.
+      Without `--all` there's a footer count instead. Archives are never
+      opened for their recorded tenant: on OneDrive, a read can download the
+      whole file (the user's call, 2026-10-21).
+    - `kind`: a column in `dax env list` (`code`, or a process's type, `?` if
+      unknown; the user dropped a `process:` prefix as redundant) and a
+      line in `dax env show` (plus skill and title). `process_info(dir)`
+      reads the frontmatter `type`/`skill` and the `# Title` from the first
+      40 lines of the process's own `context.md`, read-only. dax keeps no
+      copy of the type: the process's file is the record.
+    - The `image` column was dropped from `dax env list` (the user's
+      request); `dax env show` still shows it.
+    - Decision 45: `hidden: true` on a tenant in `tenants:` leaves its rows
+      (orphaned trees included) out of plain `dax env list`, with a footer
+      combined with the archive-only count. `--all` (`show_all`) shows
+      everything. `hidden_tenants()`/`TENANT_SETTINGS` live in
+      `dax_creds/config.py`; a non-boolean `hidden` is warned about and
+      doesn't hide.
+    - Manual checks passed 2026-10-21; committed with step 12.
+  - **Step 12 (decision 44, tenant change carries Claude state) built
+    2026-10-21, suite 784 (from 759):**
+    - `cmd_config` ends with `_offer_tenant_moves(_tenant_changes(before,
+      config), config)`. `_tenant_changes` diffs the pre-edit bytes (pyyaml)
+      against the saved config.
+    - `_move_env_tenant` checks everything first: container stopped, no
+      destination tree, no destination secret. It then moves the tree
+      (removing the old tenant's folder if empty), renames the Keychain
+      secret (set new, delete old), moves the relogin record, and deletes
+      any pre-3.0 shared-files manifest.
+    - Declining or a refusal prints the manual `mv` and a raw
+      `keyring.delete_password` command. Not `dax creds remove`, which
+      refuses the old name once the tenant has changed.
+    - Review fixes (suite 784), listed in decision 44:
+      - both `dir:` values are checked for a running container, and a docker
+        timeout refuses (`_container_running_or_unknown`);
+      - the old config is parsed by the same ruamel loader, and non-string
+        tenants are skipped;
+      - the manifest is deleted before the old tenant folder's rmdir;
+      - a failed tree move is caught;
+      - the Keychain delete is retried once;
+      - two notes: a registered old entry, and a renamed or removed env's
+        stranded tree.
+    - Mutation-check gotcha: a sed mutation plus `cp` restore within the same
+      second can leave a stale `.pyc`. Clear `__pycache__` after restoring.
+    - Manual checks passed 2026-10-21; committed with step 11.
   - **Decision 38 added 2026-10-20:** `dax config` (editor on
     `~/.dax.yaml`, `.prev` backup, parse and unknown-key checks after
     saving), built as step 8b, before step 6's docs sweep.

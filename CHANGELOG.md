@@ -38,6 +38,13 @@ The env-lifecycle consolidation. Design and every decision behind it: `docs/desi
 
 - `dax config`, which opens `~/.dax.yaml` in `$VISUAL`/`$EDITOR`, keeps the previous version as `~/.dax.yaml.prev`, and checks the result. It runs on the host only.
 - Per-tenant browser profiles for Claude logins: a top-level `tenants:` block, merged over `credential_defaults`. The `dax run` wizard asks for one when it sees a new tenant.
+- `dax env list` changes:
+  - a `kind` column: `code`, or a process's type, read from its `context.md` (also in `dax env show`, with skill and title);
+  - an `archived` column, showing how long ago each env was last archived to `backup_dir`;
+  - tenants grouped in your `tenants:` order;
+  - `hidden: true` on a tenant in `tenants:` leaves its envs out of the list;
+  - `--all`, which lists hidden tenants and envs that exist only as archives.
+- Changing an env's `tenant:` in `dax config` offers to move its Claude state tree and rename its credential in Keychain to match.
 - `dax --version`. `dax build` labels the image with its version, and `dax run` warns when the image was built by a different version.
 
 ### Updating `~/.dax.yaml` from 2.x

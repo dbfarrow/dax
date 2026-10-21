@@ -88,7 +88,9 @@ backup:
 #   claude:
 #     browser: chrome
 #     chrome_profile: Profile 2
-# tenants:
+# tenants:                      # also the order `dax env list` shows tenants in
 #   ysecurity:
 #     claude:
 #       chrome_profile: Profile 5
+#   parked:
+#     hidden: true               # left out of `dax env list` unless --all
