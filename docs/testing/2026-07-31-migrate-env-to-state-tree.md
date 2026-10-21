@@ -1,5 +1,12 @@
 # Migrating an Env's Claude State Into Its Own Tree
 
+> **Mostly historical (env-lifecycle consolidation, 2026-10).** Every env
+> now gets its own state tree automatically (the always-on `claude` feature,
+> formerly the opt-in `claude_tenant_state`), and the shared `~/.claude` mount
+> this runbook migrates away from is deleted. There's no config switch left to
+> flip; `tools/migrate_env_state.py` is still the tool for copying an env's
+> old history into its tree, if that's ever wanted.
+
 Runbook for moving one env off `feature_claude`'s shared `~/.claude` mount and onto
 `claude_tenant_state` (decision B) **without losing its accumulated session
 state**. Written 2026-07-31 while migrating `dax`; `fabric` was switched over

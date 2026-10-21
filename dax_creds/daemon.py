@@ -186,11 +186,14 @@ def handle_request(request, credentials, token_store, token_exchanger, cache):
 
 def _default_url_opener(url, browser, chrome_profile):
     import subprocess
-    if browser == 'chrome':
+    if browser == 'chrome' and chrome_profile:
         from dax_creds.chrome import open_url_in_profile
         open_url_in_profile(url, chrome_profile)
     elif browser and browser != 'default':
+        # Chrome with no profile opens like any other app: passing it
+        # `--profile-directory=None` would name a profile called "None".
         _app = {
+            'chrome':  'Google Chrome',
             'firefox': 'Firefox',
             'safari':  'Safari',
             'arc':     'Arc',

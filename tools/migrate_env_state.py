@@ -10,8 +10,9 @@ writing to.
     python3 tools/migrate_env_state.py dax --apply
 
 Dry run is the default because every step writes into a tree that a live session
-would then adopt. Nothing here touches `~/.dax.yaml`: switching the env over is
-one `dax env set` call, printed at the end, kept manual because config edits are
+would then adopt. Nothing here touches `~/.dax.yaml`: switching the env over
+needs no config edit at all any more (Claude's state tree is baseline), so the
+end of a run just says how to launch it; kept manual because config edits are
 the part with real blast radius (a test without HOME isolation destroyed that file
 on 2026-07-31).
 
@@ -236,7 +237,7 @@ def plan(env_name, args):
     tenant = project.get('tenant')
     if not tenant:
         fail(f'env {env_name!r} has no tenant, so it has no tree path.\n'
-             f'      Set one first: dax env set {env_name} tenant <name>')
+             f'      Add `tenant: <name>` to its entry in ~/.dax.yaml first.')
 
     container = container_name_for(project.get('dir', ''))
     if is_running(container):
@@ -411,7 +412,6 @@ def main():
     check_claude_json(tree, user, args.env)
 
     print(f'\n  Next, if the above looks right:')
-    print(f'    dax env set {args.env} features claude_tenant_state')
     print(f'    cd {project.get("dir", "<env dir>")} && dax -t run')
     print(f'  Then inside the container:')
     print(f'    ls ~/.claude/projects/   # {", ".join(keys)}')

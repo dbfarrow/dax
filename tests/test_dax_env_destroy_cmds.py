@@ -1,6 +1,7 @@
-"""Tests for `dax process destroy` (docs/design/VALIDATION.md's `destroy-process`,
-item 6): tear down a registered process's directory, Claude state tree, any
-derived credential, and its ~/.dax.yaml entry.
+"""Tests for `dax env destroy` (docs/design/VALIDATION.md's `destroy-process`,
+item 6, moved from `dax process destroy`): tear down a registered env's
+directory, Claude state tree, any derived credential, and its ~/.dax.yaml
+entry.
 
 Generalized past substrate processes specifically — plain projects (no
 `substrate`/`claude_tenant_state`) are valid destroy targets too, since the
@@ -11,8 +12,8 @@ import subprocess
 
 import pytest
 
-from dax import _run_process_destroy
-from dax_creds.config import load_dax_config, state_tree_path, _shared_files_manifest_path
+from dax import _run_env_destroy
+from dax_creds.config import load_dax_config, state_tree_path, shared_files_manifest_path
 
 
 @pytest.fixture
@@ -60,21 +61,21 @@ def _register(home, name, tenant='acme', creds=None, make_dir=True, make_state=T
     return process_dir, load_dax_config()
 
 
-def _args(name=None, dry_run=False):
-    return argparse.Namespace(name=name or [], dry_run=dry_run)
+def _args(name=None):
+    return argparse.Namespace(name=name or [])
 
 
 def test_destroy_single_name_removes_everything(home, monkeypatch):
     process_dir, config = _register(home, 'demo')
     removed = []
     monkeypatch.setattr('dax_creds.init.run_creds_remove',
-                        lambda cfg, cred_name: removed.append(cred_name))
+                        lambda cfg, cred_name, **k: removed.append(cred_name))
 
     state = state_tree_path('acme', 'demo')
-    manifest = _shared_files_manifest_path('acme', 'demo')
+    manifest = shared_files_manifest_path('acme', 'demo')
     manifest.write_text('{}')
 
-    _run_process_destroy(config, _args(['demo']))
+    _run_env_destroy(config, _args(['demo']))
 
     assert not process_dir.exists()
     assert not state.exists()
@@ -87,7 +88,7 @@ def test_destroy_multiple_names_in_one_call(home):
     dir_a, config = _register(home, 'proc-a')
     dir_b, config = _register(home, 'proc-b')
 
-    _run_process_destroy(config, _args(['proc-a', 'proc-b']))
+    _run_env_destroy(config, _args(['proc-a', 'proc-b']))
 
     assert not dir_a.exists()
     assert not dir_b.exists()
@@ -102,7 +103,7 @@ def test_no_args_uses_checkbox_picker(home, monkeypatch):
 
     monkeypatch.setattr('dax_creds.init._q_checkbox', lambda prompt, choices: ['proc-a'])
 
-    _run_process_destroy(config, _args())
+    _run_env_destroy(config, _args())
 
     assert not dir_a.exists()
     assert dir_b.exists()
@@ -115,7 +116,7 @@ def test_no_args_nothing_selected_changes_nothing(home, monkeypatch):
     process_dir, config = _register(home, 'demo')
     monkeypatch.setattr('dax_creds.init._q_checkbox', lambda prompt, choices: [])
 
-    _run_process_destroy(config, _args())
+    _run_env_destroy(config, _args())
 
     assert process_dir.exists()
     assert 'demo' in load_dax_config().get('projects', {})
@@ -123,28 +124,15 @@ def test_no_args_nothing_selected_changes_nothing(home, monkeypatch):
 
 def test_no_registered_envs_at_all(home, capsys):
     config = load_dax_config()
-    _run_process_destroy(config, _args())
+    _run_env_destroy(config, _args())
     assert 'no registered envs' in capsys.readouterr().out
-
-
-def test_dry_run_touches_nothing(home, capsys):
-    process_dir, config = _register(home, 'demo')
-
-    _run_process_destroy(config, _args(['demo'], dry_run=True))
-
-    out = capsys.readouterr().out
-    assert process_dir.name in out  # table shows ~/-relative paths, not the raw absolute one
-    assert 'dry run' in out
-    assert process_dir.exists()
-    assert state_tree_path('acme', 'demo').exists()
-    assert 'demo' in load_dax_config().get('projects', {})
 
 
 def test_declining_confirmation_changes_nothing(home, monkeypatch, capsys):
     process_dir, config = _register(home, 'demo')
     monkeypatch.setattr('builtins.input', lambda *a, **k: 'not destroy')
 
-    _run_process_destroy(config, _args(['demo']))
+    _run_env_destroy(config, _args(['demo']))
 
     assert 'aborted' in capsys.readouterr().out
     assert process_dir.exists()
@@ -156,7 +144,7 @@ def test_refuses_if_container_is_running(home, monkeypatch, capsys):
     monkeypatch.setattr('dax_creds.init._is_container_running', lambda name: True)
 
     with pytest.raises(SystemExit):
-        _run_process_destroy(config, _args(['demo']))
+        _run_env_destroy(config, _args(['demo']))
 
     out = capsys.readouterr().out
     assert 'stop it first' in out
@@ -168,7 +156,7 @@ def test_unknown_name_aborts_before_anything(home, capsys):
     process_dir, config = _register(home, 'demo')
 
     with pytest.raises(SystemExit):
-        _run_process_destroy(config, _args(['demo', 'not-a-real-env']))
+        _run_env_destroy(config, _args(['demo', 'not-a-real-env']))
 
     assert 'not registered' in capsys.readouterr().out
     assert process_dir.exists()
@@ -180,7 +168,7 @@ def test_uncommitted_git_changes_are_warned_not_blocked(home, capsys):
     subprocess.run(['git', 'init', '-q'], cwd=process_dir, check=True)
     (process_dir / 'dirty.txt').write_text('uncommitted')
 
-    _run_process_destroy(config, _args(['demo']))
+    _run_env_destroy(config, _args(['demo']))
 
     out = capsys.readouterr().out
     assert 'uncommitted git change' in out
@@ -192,7 +180,7 @@ def test_already_deleted_directory_still_cleans_up_rest(home):
     process_dir, config = _register(home, 'demo')
     process_dir.rmdir()
 
-    _run_process_destroy(config, _args(['demo']))
+    _run_env_destroy(config, _args(['demo']))
 
     assert not state_tree_path('acme', 'demo').exists()
     assert 'demo' not in load_dax_config().get('projects', {})
@@ -201,7 +189,7 @@ def test_already_deleted_directory_still_cleans_up_rest(home):
 def test_no_tenant_skips_state_tree_cleanly(home, capsys):
     process_dir, config = _register(home, 'demo', tenant=None, creds=[], make_state=False)
 
-    _run_process_destroy(config, _args(['demo']))
+    _run_env_destroy(config, _args(['demo']))
 
     assert not process_dir.exists()
     assert 'demo' not in load_dax_config().get('projects', {})
@@ -216,9 +204,124 @@ def test_explicit_credential_is_never_auto_removed(home, monkeypatch):
 
     removed = []
     monkeypatch.setattr('dax_creds.init.run_creds_remove',
-                        lambda cfg, cred_name: removed.append(cred_name))
+                        lambda cfg, cred_name, **k: removed.append(cred_name))
 
-    _run_process_destroy(config, _args(['demo']))
+    _run_env_destroy(config, _args(['demo']))
 
-    assert removed == []
+    # Only the env's own implied Claude credential goes; the explicitly named
+    # github one it merely listed is never touched.
+    assert removed == ['claude-acme-demo']
     assert 'github-dfarrow' in load_dax_config().get('credentials', {})
+
+
+def test_an_implied_name_that_is_also_registered_is_removed_without_refusing(home, monkeypatch):
+    """`ot`'s shape: its implied name, claude-acme-ot, is also an explicit
+    registry entry listed in its own creds. Destroying `ot` must not refuse
+    because `ot` itself still "uses" it, and must clear both stores."""
+    from dax_creds.init import save_config
+
+    class FakeKeyring:
+        def __init__(self):
+            self.stored = {('dax-creds', 'claude-acme-ot'): 'blob'}
+
+        def get_password(self, service, name):
+            return self.stored.get((service, name))
+
+        def delete_password(self, service, name):
+            del self.stored[(service, name)]
+
+    kr = FakeKeyring()
+    monkeypatch.setattr('dax_creds.init._keyring_module', kr)
+    process_dir, config = _register(home, 'ot', creds=['claude-acme-ot'])
+    config.setdefault('credentials', {})['claude-acme-ot'] = {'provider': 'claude'}
+    save_config(config)
+
+    _run_env_destroy(load_dax_config(), _args(['ot']))
+
+    assert kr.stored == {}
+    assert 'claude-acme-ot' not in (load_dax_config().get('credentials') or {})
+    assert 'ot' not in load_dax_config().get('projects', {})
+
+
+# --- reached through `dax env` ---------------------------------------------
+
+def test_cmd_env_destroy_from_an_unregistered_cwd_shows_the_picker(home, monkeypatch, capsys):
+    """`cmd_env` used to resolve an env name from cwd before dispatching,
+    exiting outside a registered env. That would make destroy's no-argument
+    picker unreachable from exactly where it's normally run."""
+    import dax
+    _register(home, 'demo')
+    elsewhere = home / 'not-an-env'
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    asked = []
+    monkeypatch.setattr('dax_creds.init._q_checkbox',
+                        lambda prompt, choices: asked.append(prompt) or [])
+
+    dax.cmd_env(argparse.Namespace(env_command='destroy', name=[]))
+
+    assert asked, 'picker was never shown'
+    assert 'demo' in load_dax_config().get('projects', {})
+
+
+def test_cmd_env_destroy_by_name_from_an_unregistered_cwd(home, monkeypatch):
+    import dax
+    process_dir, _ = _register(home, 'demo')
+    elsewhere = home / 'not-an-env'
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    dax.cmd_env(argparse.Namespace(env_command='destroy', name=['demo']))
+
+    assert not process_dir.exists()
+    assert 'demo' not in load_dax_config().get('projects', {})
+
+
+def test_cmd_env_show_still_resolves_cwd(home, monkeypatch, capsys):
+    import dax
+    process_dir, _ = _register(home, 'demo')
+    monkeypatch.chdir(process_dir)
+
+    dax.cmd_env(argparse.Namespace(env_command='show', name=None))
+
+    assert 'demo' in capsys.readouterr().out
+
+
+def test_cmd_env_show_outside_an_env_still_exits(home, monkeypatch):
+    import dax
+    elsewhere = home / 'not-an-env'
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    with pytest.raises(SystemExit):
+        dax.cmd_env(argparse.Namespace(env_command='show', name=None))
+
+
+# --- the CLI surface ---------------------------------------------------------
+
+def _cli(home, *argv):
+    import os
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, HOME=str(home))
+    return subprocess.run([sys.executable, str(repo / 'dax.py'), *argv],
+                          capture_output=True, text=True, env=env, cwd=str(home))
+
+
+def test_env_destroy_has_no_dry_run_flag(home):
+    result = _cli(home, 'env', 'destroy', 'demo', '--dry-run')
+    assert result.returncode == 2
+    assert 'unrecognized arguments: --dry-run' in result.stderr
+
+
+def test_env_set_is_gone(home):
+    result = _cli(home, 'env', 'set', 'demo', 'tenant', 'x')
+    assert result.returncode == 2
+    assert "invalid choice: 'set'" in result.stderr
+
+
+def test_process_destroy_is_gone(home):
+    result = _cli(home, 'process', 'destroy', 'demo')
+    assert result.returncode == 2
+    assert 'invalid choice' in result.stderr  # `process` itself is gone since step 4

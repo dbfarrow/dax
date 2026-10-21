@@ -131,7 +131,7 @@ def test_cmd_run_calls_backup_check_quietly(tmp_path, monkeypatch):
     repo = home / 'myproj'
     repo.mkdir()
     with open(home / '.dax.yaml', 'w') as f:
-        yaml.dump({'image': 'test/dax:latest', 'projects': {'myproj': {'dir': str(repo), 'creds': []}}}, f)
+        yaml.dump({'image': 'test/dax:latest', 'projects': {'myproj': {'dir': str(repo), 'creds': [], 'tenant': 'personal'}}}, f)
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.chdir(repo)
 
@@ -169,13 +169,13 @@ def test_explain_mentions_the_config_keys_and_gitignore_safety(tmp_path, monkeyp
     cmd_backup(argparse.Namespace(explain=True))
     out = capsys.readouterr().out
     for term in ('dotfiles.ro', 'dotfiles.rw', 'backup:', 'backup_dir',
-                 '.gitignore', 'dax process archive'):
+                 '.gitignore', 'dax env archive'):
         assert term in out
 
 
-def test_explain_leads_with_the_process_archive_disambiguation(tmp_path, monkeypatch, capsys):
+def test_explain_leads_with_the_env_archive_disambiguation(tmp_path, monkeypatch, capsys):
     """The two commands are easy to confuse by name alone — found live,
-    2026-10 — so the redirect to `dax process archive` must be the first
+    2026-10 — so the redirect to `dax env archive` must be the first
     thing printed, not a footnote after the dotfile-copying detail."""
     home = tmp_path / 'home'
     home.mkdir()
@@ -183,7 +183,8 @@ def test_explain_leads_with_the_process_archive_disambiguation(tmp_path, monkeyp
 
     cmd_backup(argparse.Namespace(explain=True))
     out = capsys.readouterr().out
-    assert out.index('dax process archive') < out.index('Copies a fixed list')
+    assert out.index('dax env archive') < out.index('Copies a fixed list')
+    assert 'dax process' not in out
 
 
 def test_explain_shows_the_real_configured_values(tmp_path, monkeypatch, capsys):

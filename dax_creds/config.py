@@ -1,16 +1,15 @@
-import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import yaml
 
 
-# Settable through `dax env set`. Deliberately not the full set of keys that
-# may appear on a registry entry: `multi_tenant`/`tenant_subdir` are slated for
-# deletion with the multi-tenant model (see the design doc's 2026-07-29
-# redesign) and are not worth teaching anyone to set. `features` is not here
-# either — it lives at the top level of ~/.dax.yaml or in a project-local
-# .dax.yaml, not on the registry entry.
+# Every key dax reads or writes on a project (env) entry in ~/.dax.yaml. Any
+# other key is unknown, almost always a typo, and `unknown_env_keys` below
+# reports it (from `dax env show` and, quietly, from every `dax run`). The
+# retired multi-tenant `multi_tenant`/`tenant_subdir` keys are deliberately
+# absent, so an entry still carrying them is flagged too. A new per-env field
+# must be added here, or it starts being flagged on its own legitimate use.
 #
 # Lives here rather than in init.py so building the argument parser, which
 # needs the field names, does not pull in init.py's keyring/provider imports on
@@ -19,17 +18,15 @@ ENV_FIELDS = {
     'tenant': 'grouping label used for state-tree paths and credential names',
     'dir': 'absolute path to the project directory on the host',
     'image': 'docker image to run for this env',
-    'creds': 'comma-separated credential names (replaces the whole list)',
-    'features': 'comma-separated features for this env, on top of the global list',
-    'mounts': 'comma-separated host paths, each mounted at $HOME/<name> in the '
-              'container (needs "mounts" in features too). A path may be '
+    'creds': 'credential names (the Claude one is implied)',
+    'features': 'features for this env, on top of the always-on baseline',
+    'mounts': 'host paths, each mounted at $HOME/<name> in the container (a '
+              'non-empty list switches the feature on by itself). A path may be '
               '<host>:<container_name> to mount under a name other than its own '
               'basename, e.g. ~/.claude:host-claude, and/or end in :ro to mount '
               'read-only instead of the read-write default, e.g. '
               '~/discernment::ro (empty middle field keeps the default name) '
               'or ~/.claude:host-claude:ro',
-    'substrate': 'host path to a virgil-style substrate repo, mounted read-write and '
-                 'exposed as $SUBSTRATE_ROOT (needs "substrate" in features too)',
 }
 
 
@@ -118,7 +115,7 @@ def relogin_due(cred_name, config, now=None):
     return (now - last) > timedelta(hours=cooldown_hours)
 
 
-# User-level files a `claude_tenant_state` tree mount replaces wholesale, taking
+# User-level files the Claude state-tree mount replaces wholesale, taking
 # your global CLAUDE.md/settings with it. A nested read-only *file* bind mount
 # was tried first (2026-07-31) and abandoned within hours: unlike a nested
 # directory mount, it didn't deliver the host's content at all — the container
@@ -126,92 +123,128 @@ def relogin_due(cred_name, config, now=None):
 CLAUDE_SHARED_FILES = ('CLAUDE.md', 'settings.json', 'settings.local.json')
 
 
-def _shared_files_manifest_path(tenant, project):
-    # A sibling of the tree, not inside it — anything under state_tree_path()
-    # is mounted straight into the container's ~/.claude, and this bookkeeping
-    # has no business showing up there.
+def shared_files_manifest_path(tenant, project):
+    """Where the retired drift-tracking sync kept its per-env manifest: a
+    sibling of the state tree. Nothing writes it any more; teardown still
+    deletes a leftover one, since real envs have them on disk."""
     return state_root() / tenant / '{}.shared-files.json'.format(project)
 
 
-def _load_shared_files_manifest(tenant, project):
-    path = _shared_files_manifest_path(tenant, project)
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
+def sync_claude_shared_files(tenant, project):
+    """Seed the host's CLAUDE_SHARED_FILES into <tenant>/<project>'s state
+    tree, once: each file is copied only if the tree doesn't have it yet, and
+    never touched again (decision 13). A tree's copy is its own state from
+    then on, like everything else in the tree.
 
-
-def _save_shared_files_manifest(tenant, project, manifest):
-    path = _shared_files_manifest_path(tenant, project)
-    path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
-
-
-def _sha256_bytes(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def sync_claude_shared_files(tenant, project, force=False):
-    """Copy the host's CLAUDE_SHARED_FILES into <tenant>/<project>'s state tree.
-
-    Three-way comparison against a small manifest (filename -> sha256 of what
-    was last synced in), because a plain host-vs-tree diff can't tell "host
-    moved on since last sync" (safe to overwrite) apart from "something changed
-    the tree's copy independently" (a container editing it directly, now that
-    it's a plain file and not a mount — exactly what should not be clobbered
-    silently). force=True (the `accept-shared-files` escape hatch) skips that
-    distinction and always takes the host's version.
-
-    Returns the list of filenames left alone because they'd drifted and
-    force was False — the caller's cue to warn.
+    Replaced a three-way drift check (host vs tree vs a last-synced
+    manifest) whose only trigger, a session under the retired shared
+    `claude` mount writing the real host file, no longer exists. Known gap,
+    deferred on purpose: a later edit to the host's global CLAUDE.md doesn't
+    reach an already-seeded tree (see decision 13's note).
     """
     host_claude = Path.home() / '.claude'
     tree = state_tree_path(tenant, project)
-    manifest = _load_shared_files_manifest(tenant, project)
-    warnings = []
-    changed = False
-
     for filename in CLAUDE_SHARED_FILES:
         host_file = host_claude / filename
-        if not host_file.is_file():
-            continue
-        host_bytes = host_file.read_bytes()
-        host_hash = _sha256_bytes(host_bytes)
         tree_file = tree / filename
-
-        if not tree_file.is_file():
+        # An empty file counts as missing: a 0-byte copy is never a real
+        # one (a failed nested-mount experiment left exactly that in a real
+        # tree), and with no drift tracking left, re-seeding it is the only
+        # repair. To refresh any other copy, delete it; the next launch
+        # re-seeds it.
+        if host_file.is_file() and (not tree_file.exists() or tree_file.stat().st_size == 0):
             tree.mkdir(parents=True, exist_ok=True)
-            tree_file.write_bytes(host_bytes)
-            manifest[filename] = host_hash
-            changed = True
-            continue
-
-        tree_bytes = tree_file.read_bytes()
-        tree_hash = _sha256_bytes(tree_bytes)
-        if tree_hash == host_hash:
-            if manifest.get(filename) != tree_hash:
-                manifest[filename] = tree_hash
-                changed = True
-            continue
-
-        if force or manifest.get(filename) == tree_hash:
-            tree_file.write_bytes(host_bytes)
-            manifest[filename] = host_hash
-            changed = True
-        else:
-            warnings.append(filename)
-
-    if changed:
-        _save_shared_files_manifest(tenant, project, manifest)
-
-    return warnings
+            tree_file.write_bytes(host_file.read_bytes())
 
 
-def env_field_help():
-    width = max(len(f) for f in ENV_FIELDS)
-    return 'fields:\n' + '\n'.join(
-        f'  {f:<{width}}  {desc}' for f, desc in ENV_FIELDS.items())
+# Per-env entries dax no longer uses, filtered out wherever an env's
+# `features:`/`creds:` are read and reported until hand-removed (decisions
+# 36, 39, 40): `claude`/`claude_tenant_state` because Claude is a baseline
+# feature with an implied credential, `auggie` because its support was
+# removed, `mounts` because a non-empty `mounts:` switches it on by itself.
+RETIRED_FEATURES = ('claude', 'claude_tenant_state', 'auggie', 'mounts')
+
+
+def is_claude_credential(config, cred_name):
+    """A bare `claude`, a name registered with provider claude, or an
+    unregistered `claude-...` name (e.g. from an archive made on another
+    machine, where it was registered). Registered names go by their
+    provider, never by spelling."""
+    if cred_name == 'claude':
+        return True
+    credentials = (config or {}).get('credentials') or {}
+    if cred_name in credentials:
+        return (credentials[cred_name] or {}).get('provider') == 'claude'
+    return cred_name.startswith('claude-')
+
+
+def is_retired_credential(config, cred_name):
+    """A `creds:` entry dax no longer uses: any Claude one (the env's Claude
+    credential is implied), or an auggie one (support removed). An auggie
+    credential is a bare `auggie` or any name registered with provider
+    auggie."""
+    if is_claude_credential(config, cred_name):
+        return True
+    credentials = (config or {}).get('credentials') or {}
+    if cred_name in credentials:
+        return (credentials[cred_name] or {}).get('provider') == 'auggie'
+    return cred_name == 'auggie'
+
+
+def retired_entries(config):
+    """{env name: ['<entry> (features)' / '<entry> (creds)', ...]} for every
+    env still listing a retired feature or credential. Envs with none are
+    omitted."""
+    found = {}
+    for name, proj in (config.get('projects') or {}).items():
+        proj = proj or {}
+        entries = ['{} (features)'.format(f) for f in (proj.get('features') or [])
+                   if f in RETIRED_FEATURES]
+        entries += ['{} (creds)'.format(c) for c in (proj.get('creds') or [])
+                    if is_retired_credential(config, c)]
+        if entries:
+            found[name] = entries
+    return found
+
+
+# Retired per-env keys: the multi-tenant `multi_tenant`/`tenant_subdir` (the
+# model was abandoned 2026-07-29 and its code deleted in the env-lifecycle
+# consolidation's step 8), and `substrate`, which is one global top-level
+# setting now (decision 41). Outside ENV_FIELDS, and named separately in the
+# warning so they don't read as typos.
+RETIRED_ENV_KEYS = ('multi_tenant', 'tenant_subdir', 'substrate')
+
+
+def describe_unknown_env_keys(keys):
+    """One phrase for a list of unknown keys, telling retired ones apart from
+    plain unknowns (almost always typos), which dax genuinely ignores."""
+    retired = [k for k in keys if k in RETIRED_ENV_KEYS and k != 'substrate']
+    other = [k for k in keys if k not in RETIRED_ENV_KEYS]
+    parts = []
+    if other:
+        parts.append('unknown key(s) {} — ignored (typo?)'.format(', '.join(other)))
+    if retired:
+        parts.append('retired key(s) {} — ignored; remove them'.format(', '.join(retired)))
+    if 'substrate' in keys:
+        # "Remove it" alone would delete the only copy of the path for an
+        # env from before decision 41, so say where it goes instead.
+        parts.append('retired key substrate — ignored; move its path to a top-level '
+                     '`substrate:` (one shared by every process), then remove it')
+    return '; '.join(parts)
+
+
+def unknown_env_keys(config):
+    """{env name: [unknown key, ...]} for every registered env whose entry
+    carries a key outside ENV_FIELDS, in registry order; envs with none are
+    omitted. Typos are the point: a misspelled key is otherwise silently
+    ignored, the same way a misspelled credential name (`claud-fre`) once sat
+    unused in ~/.dax.yaml for weeks."""
+    found = {}
+    for name, proj in (config.get('projects') or {}).items():
+        unknown = [k for k in (proj or {}) if k not in ENV_FIELDS]
+        if unknown:
+            found[name] = unknown
+    return found
 
 
 def yaml_round_trip(required_by):
@@ -221,7 +254,7 @@ def yaml_round_trip(required_by):
     put them back, and its default `sort_keys=True` alphabetises everything on
     the way out. Rewriting ~/.dax.yaml through pyyaml therefore deletes every
     comment in it — including commented-out feature lines like
-    `#- claude_tenant_state`, which are configuration, not decoration.
+    `#- auto_claude`, which are configuration, not decoration.
 
     `required_by` names the caller in the error, since a missing dependency
     here surfaces at `dax creds add` time rather than at import time.
@@ -259,7 +292,25 @@ def load_dax_config():
                 f.seek(0)
                 return yaml.safe_load(f)
     except FileNotFoundError:
-        raise FileNotFoundError('~/.dax.yaml not found — run `dax init` to create it')
+        raise FileNotFoundError(missing_config_message())
+
+
+def missing_config_message():
+    """What to do about a missing ~/.dax.yaml (decision 37). dax never
+    creates one itself: `dax init`, which used to, is gone, and a silently
+    invented config is worse than a clear instruction."""
+    return """\
+dax needs a ~/.dax.yaml and never creates one itself. A minimal one:
+
+    defaults:
+      image: dax:latest
+    # Where `dax env archive` writes and `dax env restore` reads (optional;
+    # defaults to backup/ inside the dax repo checkout):
+    # backup_dir: ~/backups/dax
+    projects: {}
+
+Create it, then run the command again. .dax.yaml.example in the dax repo
+shows every setting."""
 
 
 def find_named_project_by_dir(config, cwd):
@@ -272,7 +323,7 @@ def find_named_project_by_dir(config, cwd):
     for name, project in config.get('projects', {}).items():
         if Path(project['dir']).expanduser() == cwd:
             return name, project
-    raise KeyError(f'no project configured for {cwd} — run `dax init` first')
+    raise KeyError(f'no project configured for {cwd} — run `dax run` there to register it')
 
 
 def find_project_by_dir(config, cwd):
@@ -284,8 +335,8 @@ def find_enclosing_project(config, cwd):
 
     Distinct from `find_project_by_dir`'s exact-match lookup: this catches
     the case where `dax run` is invoked from *inside* an already-registered
-    project (e.g. a multi-tenant repo's tenant_subdir child) rather than
-    from its root. Returns `(name, project)` or `None`.
+    project (any subdirectory of it) rather than from its root. Returns
+    `(name, project)` or `None`.
     """
     cwd = Path(cwd)
     for name, project in config.get('projects', {}).items():
@@ -311,49 +362,151 @@ def derived_credential_name(provider, tenant, project):
     return f'{provider}-{tenant}-{project}'
 
 
-def resolve_credential_names(project, project_name):
-    """[(name, derived_provider)] for each entry in an env's `creds:` list.
+def resolve_credential_names(project, project_name, config=None):
+    """[(name, derived_provider)] for an env's credentials: always its
+    implied Claude credential, `claude-<tenant>-<env>` (decision 35), then
+    each non-Claude entry in its `creds:` list.
 
     `derived_provider` is the provider string when dax built the name, None
     when the user named the credential explicitly.
 
-    An explicitly named credential always wins over the convention, which keeps
-    existing configs working and leaves an escape hatch for deliberately
-    sharing one credential across two envs.
+    Claude entries in `creds:` (a bare `claude`, or an explicitly named
+    Claude credential) are redundant now and skipped (decision 36); `config`
+    is what identifies an explicit name as a Claude one. An env with no
+    tenant raises ValueError: there's no name to derive and no state tree to
+    mount, and pooling into a shared default is the isolation failure the
+    per-env naming exists to prevent.
     """
-    resolved = []
+    tenant = project.get('tenant')
+    if not tenant:
+        raise ValueError(
+            f"env '{project_name}' has no tenant. Every env needs one: its Claude "
+            f"credential is named claude-<tenant>-{project_name} and its Claude state "
+            f"lives under ~/.local/state/dax/tenants/<tenant>/. "
+            f"Add `tenant: <tenant>` to its entry in ~/.dax.yaml.")
+    resolved = [(derived_credential_name('claude', tenant, project_name), 'claude')]
     for entry in project.get('creds', []) or []:
-        if entry not in BARE_PROVIDER_CREDS:
+        if not is_retired_credential(config, entry):
             resolved.append((entry, None))
-            continue
-        tenant = project.get('tenant')
-        if not tenant:
-            raise ValueError(
-                f"env '{project_name}' asks for a '{entry}' credential by convention, "
-                f"but has no tenant — the name is derived as {entry}-<tenant>-<project>. "
-                f"Set one with `dax env set {project_name} tenant <tenant>`.")
-        resolved.append((derived_credential_name(entry, tenant, project_name), entry))
     return resolved
 
 
-def synthesized_credential(config, provider):
+def tenant_credential_settings(config, tenant, provider):
+    """The `tenants.<tenant>.<provider>` block (decision 43), or {}. A level
+    that isn't a map is ignored here (and reported by
+    unknown_tenant_entries), so a hand-editing slip never crashes a launch."""
+    block = config.get('tenants') if tenant else None
+    for key in (tenant, provider):
+        if not isinstance(block, dict):
+            return {}
+        block = block.get(key)
+    return dict(block) if isinstance(block, dict) else {}
+
+
+def synthesized_credential(config, provider, tenant=None):
     """The definition dax uses for a derived credential.
 
     Per-provider settings come from a top-level `credential_defaults:` block,
-    because a derived credential has no entry of its own to hold them:
+    because a derived credential has no entry of its own to hold them, with
+    the env's tenant's own block (decision 43) merged over it, so a tenant
+    only states what differs:
 
         credential_defaults:
           claude:
             browser: chrome
             chrome_profile: Profile 2
 
+        tenants:
+          ysecurity:
+            claude:
+              chrome_profile: Profile 5
+
     Browser and profile are properties of the human doing the authenticating,
-    not of the env, so one setting covering every derived Claude credential is
-    the right shape — and without it every per-env login would silently open
-    the default browser instead of the profile the account lives in.
+    and that human uses a different browser profile per client, which is
+    what the tenant marks. Without a setting, every per-env login would
+    silently open the default browser instead of the profile the account
+    lives in.
     """
-    defaults = (config.get('credential_defaults') or {}).get(provider) or {}
-    return dict(defaults, provider=provider)
+    defaults = (config.get('credential_defaults') or {}).get(provider)
+    merged = dict(defaults) if isinstance(defaults, dict) else {}
+    own = tenant_credential_settings(config, tenant, provider)
+    if 'browser' in own and 'chrome_profile' not in own:
+        # A browser and its profile are overridden together: a tenant that
+        # picks plain Chrome (or Firefox) must not inherit the default's
+        # Chrome profile.
+        merged.pop('chrome_profile', None)
+    merged.update(own)
+    merged['provider'] = provider
+    return merged
+
+
+def credential_settings_source(config, tenant, provider):
+    """Where a derived credential's browser setting comes from: 'tenant',
+    'default' (credential_defaults), or None when neither sets one."""
+    if tenant_credential_settings(config, tenant, provider):
+        return 'tenant'
+    if (config.get('credential_defaults') or {}).get(provider):
+        return 'default'
+    return None
+
+
+# Per-tenant settings that aren't a provider block (decision 45).
+TENANT_SETTINGS = ('hidden',)
+
+
+def hidden_tenants(config):
+    """Tenants whose `tenants:` block says `hidden: true`: left out of `dax
+    env list` unless `--all`. A missing `hidden`, or `false`, shows it."""
+    tenants = config.get('tenants')
+    if not isinstance(tenants, dict):
+        return set()
+    return {t for t, block in tenants.items()
+            if isinstance(block, dict) and block.get('hidden') is True}
+
+
+def unknown_tenant_entries(config):
+    """Problems in the top-level `tenants:` block, as messages: a tenant no
+    registered env uses (almost always a typo, and otherwise silently
+    ignored), or a provider dax never derives a credential for."""
+    tenants = config.get('tenants')
+    if tenants is None:
+        return []
+    if not isinstance(tenants, dict):
+        return ['`tenants:` should be a map of tenant names — ignored']
+    used = {(p or {}).get('tenant') for p in (config.get('projects') or {}).values()
+            if isinstance(p, dict)}
+    problems = []
+    for tenant, block in tenants.items():
+        if tenant not in used:
+            problems.append(f'tenant {tenant!r} in `tenants:` is used by no env yet '
+                            '(typo?)')
+            continue
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            problems.append(f'`tenants.{tenant}` should be a map of providers — ignored')
+            continue
+        for provider, settings in block.items():
+            if provider in TENANT_SETTINGS:
+                if not isinstance(settings, bool):
+                    problems.append(f'`tenants.{tenant}.{provider}` should be true or '
+                                    f'false, not {settings!r} — ignored')
+                continue
+            if provider not in BARE_PROVIDER_CREDS:
+                problems.append(f'`tenants.{tenant}.{provider}` — ignored (a tenant takes '
+                                f'{", ".join(BARE_PROVIDER_CREDS + TENANT_SETTINGS)})')
+            elif settings is not None and not isinstance(settings, dict):
+                problems.append(f'`tenants.{tenant}.{provider}` should be a map '
+                                '(browser, chrome_profile) — ignored')
+            else:
+                merged = synthesized_credential(config, provider, tenant)
+                if merged.get('chrome_profile') and merged.get('browser') != 'chrome':
+                    problems.append(
+                        f'`tenants.{tenant}.{provider}` sets chrome_profile '
+                        f'{merged["chrome_profile"]!r}, but its browser is '
+                        f'{merged.get("browser", "default")!r}, so the profile is '
+                        'ignored — add `browser: chrome`')
+    return problems
 
 
 def derived_credentials(config):
@@ -367,12 +520,12 @@ def derived_credentials(config):
     found = {}
     for project_name, project in (config.get('projects') or {}).items():
         try:
-            resolved = resolve_credential_names(project, project_name)
+            resolved = resolve_credential_names(project, project_name, config)
         except ValueError:
             continue  # unresolvable; reported by `dax env show` and `dax run`
         for name, provider in resolved:
             if provider and name not in registry:
-                found[name] = synthesized_credential(config, provider)
+                found[name] = synthesized_credential(config, provider, project.get('tenant'))
     return found
 
 
@@ -395,9 +548,13 @@ def credential_users(config, name):
     users = []
     for project_name, project in (config.get('projects') or {}).items():
         try:
-            resolved = resolve_credential_names(project, project_name)
+            resolved = resolve_credential_names(project, project_name, config)
         except ValueError:
-            continue
+            # No tenant, so no implied name, but the explicit non-Claude
+            # names it lists are still in use: without this, `dax creds
+            # remove` would delete a credential a tenantless env still names.
+            resolved = [(c, None) for c in (project.get('creds') or [])
+                        if not is_retired_credential(config, c)]
         if any(resolved_name == name for resolved_name, _ in resolved):
             users.append(project_name)
     return users
@@ -414,14 +571,14 @@ def get_project_credentials(config, project, project_name=None):
         return {name: registry[name] for name in project.get('creds', []) or []}
 
     creds = {}
-    for name, provider in resolve_credential_names(project, project_name):
+    for name, provider in resolve_credential_names(project, project_name, config):
         if name in registry:
             creds[name] = registry[name]
         elif provider:
             # No entry of its own — synthesized rather than written to
-            # ~/.dax.yaml so this stays a pure read. Per-provider defaults are
-            # what carry browser/chrome_profile onto it.
-            creds[name] = synthesized_credential(config, provider)
+            # ~/.dax.yaml so this stays a pure read. Per-provider defaults,
+            # then the tenant's own (decision 43), carry browser/chrome_profile.
+            creds[name] = synthesized_credential(config, provider, project.get('tenant'))
         else:
             raise KeyError(name)
     return creds

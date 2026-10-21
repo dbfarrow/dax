@@ -70,19 +70,6 @@ def test_flags_due_once_cooldown_elapses(home, capsys):
     assert 'due' in out
 
 
-def test_dash_when_credential_is_not_used_by_a_tenant_state_env(home, capsys):
-    """A plain shared `claude` mount env never consults the cooldown, so the
-    column should say so rather than imply a freshness tracked status that
-    `dax run` never actually checks."""
-    record_login('claude-acme-myenv', when=datetime.now(timezone.utc) - timedelta(hours=100))
-    run_creds_list(_config(tenant_state=False))
-    out = capsys.readouterr().out
-    lines = [l for l in out.splitlines() if 'claude-acme-myenv' in l]
-    assert len(lines) == 1
-    assert lines[0].split()[-1:] != ['due']
-    assert 'never' not in lines[0]
-
-
 def test_dash_for_non_claude_providers(home, capsys):
     config = {
         'credentials': {'gh-acme': {'provider': 'github'}},
@@ -90,7 +77,8 @@ def test_dash_for_non_claude_providers(home, capsys):
     }
     run_creds_list(config)
     out = capsys.readouterr().out
-    assert 'never' not in out
+    gh_line = [l for l in out.splitlines() if 'gh-acme' in l]
+    assert len(gh_line) == 1 and 'never' not in gh_line[0]
 
 
 VALID_BLOB = '{"claudeAiOauth": {"refreshToken": "fake-refresh-token"}}'
@@ -127,13 +115,6 @@ def test_key_on_disk_silent_when_tree_file_absent_even_with_stale_shared_file(ho
     run_creds_list(_config())
     out = capsys.readouterr().out
     assert 'key on disk' not in out
-
-
-def test_key_on_disk_still_checks_shared_path_for_non_tenant_state_env(home, capsys):
-    _write_shared_credential(home)
-    run_creds_list(_config(tenant_state=False))
-    out = capsys.readouterr().out
-    assert 'key on disk' in out
 
 
 def test_key_on_disk_silent_when_neither_location_has_anything(home, capsys):

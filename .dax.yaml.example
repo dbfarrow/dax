@@ -1,30 +1,35 @@
-image: dax:latest
-
 # Fallback values, used only when something else can't resolve its own
-# answer. `image` backstops a project with no image of its own (and no
-# top-level `image:` above). `timezone` backstops `dax run`'s own
+# answer. `image` is the image for a project with no image of its own
+# (`dax build` tags dax:<version> and dax:latest). `timezone` backstops `dax run`'s own
 # host-timezone detection (read from /etc/localtime at every launch) when
 # the host doesn't use that convention and nothing can be detected.
-# `relogin_cooldown_hours` controls how long `dax run` waits, per credential,
-# before running the Claude login flow again for a `claude_tenant_state` env
-# — it runs unconditionally before every launch unless the last login flow
-# (for that exact credential) ran more recently than this. Defaults to 24.
-# defaults:
-#   image: dax-base
+# `relogin_cooldown_hours` controls how long `dax run` waits, per env,
+# before running that env's Claude login flow again — it runs before every
+# launch unless the last login flow for that env's credential ran more
+# recently than this. Defaults to 24.
+defaults:
+  image: dax:latest
 #   timezone: America/New_York
 #   relogin_cooldown_hours: 24
 
-# workdir, dotfiles, and webpreview are always on — no top-level features:
-# list needed for them. Everything else (claude, claude_tenant_state, auggie,
-# github, mounts, substrate, auto_claude, ...) is opt-in per project: add it
-# to that project's own `features:` list, a cwd-local .dax.yaml, or pass -f.
-# e.g.:
+# workdir, dotfiles, webpreview, and claude are always on — no top-level
+# features: list needed for them. Claude needs nothing in `creds:` either: every
+# env's Claude credential is implied by its `tenant` (claude-<tenant>-<env>).
+# Everything else (github, substrate, auto_claude, ...) is opt-in per project:
+# add it to that project's own `features:` list, a cwd-local .dax.yaml, or pass
+# -f. `mounts` is the exception: a non-empty `mounts:` list turns it on by
+# itself. e.g.:
 #
 # projects:
 #   myproject:
 #     dir: /Users/you/code/myproject
-#     features:
-#       - claude
+#     tenant: personal           # required
+#     creds: [github-you]        # optional; leave out when empty
+#     features: [auto_claude]    # optional
+#     mounts: [~/notes]          # optional; turns mounting on by itself
+#
+# Projects are normally created by running `dax run` in their folder (a short
+# wizard), and edited with `dax config`.
 #
 # SSH agent forwarding is not a feature at all — it turns on purely because a
 # project's `creds:` list resolves to an `ssh`-provider credential (`dax
@@ -36,12 +41,6 @@ image: dax:latest
 # claude closes the window, ends the (only) tmux session, ends the
 # container's foreground process, and (docker run --rm) tears the container
 # down. No shell left behind and nothing to reattach to, by design.
-
-claudedir:
-  mount: ~/.claude
-
-auggiedir:
-  mount: ~/.augment
 
 githubdir:
   mount: ~/.config/gh
@@ -57,17 +56,38 @@ dotfiles:
     - ~/.tmux.conf
   rw:
     - ~/.gitconfig
-    - ~/.claude.json
 
 backup:
   - ~/.claude/CLAUDE.md
-  - ~/.claude/.settings.json
+  - ~/.claude/settings.json
 
-# Base directory `dax backup` and `dax process archive`/`restore` write
-# into. Defaults to backup/ inside this repo checkout if omitted — that
+# Base directory `dax env archive` writes into and `dax env restore` reads
+# from. (`dax backup` always writes to backup/ in this checkout.) Defaults to
+# backup/ inside this repo checkout if omitted — that
 # default exists specifically because it's bind-mounted into the container
 # and survives a rebuild. Pointing this elsewhere (an external drive, a NAS
 # share) is the point for real BCP/DR media, but only that path is backed
 # up if this container is ever rebuilt or lost, so make sure it's somewhere
 # that survives independently.
 # backup_dir: ~/backups/dax
+
+# The one virgil-style substrate repo every process env shares. An env opts in
+# with `features: [substrate]`; dax mounts this path and sets $SUBSTRATE_ROOT.
+# The bootstrap wizard asks for it, and saves it here, the first time you
+# create a process env if it isn't set yet.
+# substrate: ~/src/virgil
+
+# Which browser each env's Claude login opens. credential_defaults covers
+# every env; a tenant's own block under `tenants:` is merged over it, so it
+# only needs what differs. The `dax run` wizard asks the first time you use a
+# new tenant. `dax env show` says which browser an env's login will open.
+# credential_defaults:
+#   claude:
+#     browser: chrome
+#     chrome_profile: Profile 2
+# tenants:                      # also the order `dax env list` shows tenants in
+#   ysecurity:
+#     claude:
+#       chrome_profile: Profile 5
+#   parked:
+#     hidden: true               # left out of `dax env list` unless --all

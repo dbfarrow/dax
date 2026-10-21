@@ -21,12 +21,12 @@ The core idea: your environment should be cattle, not pets. Spin one up, do the 
 
 ## Install & Build
 
-**Prerequisites:** Python 3.7+, Docker Desktop
+**Prerequisites:** a Mac (credentials live in the macOS Keychain), Python 3.7+, Docker Desktop
 
 ```bash
 git clone https://github.com/dbfarrow/dax.git
 cd dax
-pip install -e .
+pip install -e .           # also installs keyring, for the Keychain
 ```
 
 Build the image:
@@ -43,40 +43,47 @@ dax build -c
 
 The build prompts for a container password unless a `.daxpw` file exists with `0600` permissions.
 
+### Versions
+
+dax uses semantic versioning; the current version is in `VERSION`, and `dax --version` prints it. Each `dax build` labels the image with the version it was built from, and `dax run` warns when the image it's about to launch was built by a different version — the dax code inside the image only changes on a rebuild, so that warning means it's time for `dax build`. What changed in each release is in [CHANGELOG.md](CHANGELOG.md), including what to change in `~/.dax.yaml` when coming from 2.x.
+
 ---
 
 ## Quick Start
 
-Register the current directory as a dax project:
+dax needs a `~/.dax.yaml`, and never creates one itself. A minimal one:
 
-```bash
-cd ~/work/my-project
-dax init
+```yaml
+defaults:
+  image: dax:latest
+projects: {}
 ```
 
-`dax init` asks for an image, lets you select or define credentials, and writes the project to `~/.dax.yaml`. After that:
+`dax build` tags the image `dax:<version>` and `dax:latest`. (`dax-base`, which older configs carry, still works as another name for `dax:latest`.)
+
+Then make a folder for the env and run it there:
 
 ```bash
+mkdir ~/work/my-project && cd ~/work/my-project
 dax run
 ```
 
-That's it. You're in a container with your project mounted, dotfiles present, and credentials available.
+The first `dax run` in a folder that isn't registered yet starts a short wizard: image, tenant, which of your existing credentials to attach, and whether this is a plain coding project or a substrate-backed process (see [`substrate`](#features-reference)). It shows a summary, registers the env (named after its folder) on confirm, and launches straight into it. Every later `dax run` there just launches.
+
+You're in a container with your project mounted, dotfiles present, Claude Code set up with this env's own state and credential, and any credentials you attached available.
 
 ---
 
 ## Configuration
 
-All configuration lives in `~/.dax.yaml`. A local `.dax.yaml` in the current directory can override or extend it.
+All configuration lives in `~/.dax.yaml`. Edit it with `dax config`, which opens it in `$VISUAL`/`$EDITOR`/`vi`, keeps the version from before your edit as `~/.dax.yaml.prev`, and checks the result (syntax, duplicate keys, shape, unknown keys) before you leave. A `.dax.yaml` in the folder you run `dax run` from can add `features:` for launches from there, and override any top-level setting, such as `ports:`.
 
-### Minimal example
+### Example
 
 ```yaml
-image: dax:latest
-
-features:
-  - workdir
-  - dotfiles
-  - ssh
+defaults:
+  image: dax:latest
+  relogin_cooldown_hours: 24
 
 dotfiles:
   ro:
@@ -85,83 +92,71 @@ dotfiles:
     - ~/.tmux.conf
   rw:
     - ~/.gitconfig
-```
 
-### Full example
+backup_dir: ~/backups/dax       # where `dax env archive` writes (optional)
+substrate: ~/src/virgil         # the one substrate every process shares (optional)
 
-```yaml
-image: dax:latest
+credential_defaults:
+  claude:
+    browser: chrome
+    chrome_profile: Profile 2
 
-features:
-  - workdir
-  - dotfiles
-  - ssh
-  - claude
-  - auggie
-  - webpreview
-
-dotfiles:
-  ro:
-    - ~/.zshrc
-    - ~/.vimrc
-    - ~/.vim/
-    - ~/.tmux.conf
-  rw:
-    - ~/.dax.yaml
-    - ~/.gitconfig
-    - ~/.claude.json
-
-claudedir:
-  mount: ~/.claude
-
-auggiedir:
-  mount: ~/.augment
-
-awsdir:
-  mount: ~/.aws
-
-backup:
-  - ~/.claude/CLAUDE.md
-  - ~/.claude/settings.json
+tenants:                        # per-tenant overrides of credential_defaults (optional)
+  ysecurity:
+    claude:
+      chrome_profile: Profile 5
 
 credentials:
-  ssh-id-rsa:
-    provider: ssh
-    key: ~/.ssh/id_rsa
   github-dfarrow:
     provider: github
     browser: firefox
-  claude-work:
-    provider: claude
-    browser: default
-  gmail-personal:
-    provider: gmail
-    client_id: 1234567890-abc.apps.googleusercontent.com
-    client_secret: GOCSPX-...
-    scopes:
-      - gmail.readonly
-    browser: default
+  ssh-id-ed25519:
+    provider: ssh
+    key: ~/.ssh/id_ed25519
 
 projects:
   my-project:
     dir: /Users/dfarrow/work/my-project
-    image: dax:latest
+    tenant: personal
     creds:
-      - ssh-id-rsa
       - github-dfarrow
-      - claude-work
+      - ssh-id-ed25519
+  some-process:
+    dir: /Users/dfarrow/work/some-process
+    tenant: ysecurity
+    features: [substrate]
+    mounts: [~/discernment]
 ```
 
 ### Top-level keys
 
 | Key | Description |
 | --- | --- |
-| `image` | Default Docker image to use |
-| `features` | Default feature list for `dax run` |
-| `dotfiles` | Files to mount into the container (`ro` / `rw`) |
+| `image` | Image for envs that don't set their own (wins over `defaults.image`) |
+| `defaults` | `image` (fallback image), `timezone` (used only when the host's can't be detected) and `relogin_cooldown_hours` (how often `dax run` refreshes an env's Claude login; default 24) |
+| `githubdir`, `awsdir`, `optdir`, `msfdir` | What the `github`, `aws`, `optdir` and `msf` features mount, each as `{mount: ~/.aws}` (same path inside) or `{host: ~/x, container: ~/y}`; required only by the feature that uses it |
+| `ports` | Extra `host:container` port mappings for the `ports` feature, e.g. `["8080:80"]` |
+| `dotfiles` | Files to mount into every container (`ro` / `rw`) |
+| `backup` | Host paths `dax backup` copies into `backup/` in this checkout (gitignored, local only) |
+| `backup_dir` | Where `dax env archive` writes and `dax env restore` reads; defaults to `backup/` in this checkout |
+| `substrate` | The one substrate repo every process env shares (see the `substrate` feature) |
+| `credential_defaults` | Per-provider browser settings for derived credentials, e.g. every env's Claude login |
+| `tenants` | Per-tenant settings: which browser a tenant's Claude logins open (merged over `credential_defaults`), and `hidden: true` to leave a tenant out of `dax env list` unless `--all`. Its order is the order `dax env list` shows tenants in |
 | `credentials` | Named credential definitions (managed by `dax creds`) |
-| `projects` | Registered environments (managed by `dax init`) |
-| `backup` | Host paths to copy into `backup/` in this checkout - gitignored, local only (`dax backup`, and quietly on every `dax run`) |
+| `projects` | Registered environments (created by `dax run`'s wizard, edited with `dax config`) |
+
+### Env keys
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `dir` | yes | Absolute path to the env's folder on the host |
+| `tenant` | yes | Grouping label. Names the env's Claude credential (`claude-<tenant>-<env>`) and its state tree (`~/.local/state/dax/tenants/<tenant>/<env>/`) |
+| `image` | no | Docker image for this env (the wizard fills in `dax:latest`) |
+| `creds` | no | Credentials to make available. Claude's is implied; don't list it |
+| `features` | no | Opt-in features beyond the always-on ones, e.g. `[substrate, auto_claude]` |
+| `mounts` | no | Extra host paths, each mounted read-write at `$HOME/<name>`. `~/x:other` mounts it as `$HOME/other`, and a trailing `:ro` (`~/x:other:ro`, or `~/x::ro` to keep its name) makes it read-only. A non-empty list turns mounting on by itself |
+
+A list key that would be empty can just be left out, or left as `creds:` with nothing after it. `dax run` warns about any key it doesn't recognize, and about entries that are no longer needed: `claude`, `claude_tenant_state`, `auggie` or `mounts` in `features:`; Claude or auggie credentials in `creds:`; and a per-env `substrate:`, `multi_tenant` or `tenant_subdir`. CHANGELOG.md's "Updating `~/.dax.yaml` from 2.x" lists what to do about each.
 
 ---
 
@@ -169,7 +164,7 @@ projects:
 
 Dax includes a credential brokering system so tools inside the container can authenticate without secrets ever being written into the image or passed on the command line.
 
-**How it works:** When `dax run` starts, a credential daemon launches on the host. The container connects to it over a Unix socket and requests tokens by name. Each credential type has its own provider that handles storage and acquisition.
+**How it works:** When `dax run` starts, a credential daemon launches on the host. The container connects to it and requests tokens by name. Each credential type has its own provider that handles storage and acquisition. Secrets live in macOS Keychain.
 
 ### Providers
 
@@ -201,16 +196,26 @@ credentials:
 
 #### claude
 
-Authenticates using Claude's OAuth flow — the same credentials that Claude Code uses, stored in `~/.claude/credentials.json`. Dax does **not** use Anthropic API keys. API keys are static long-lived secrets; the OAuth flow issues short-lived access tokens backed by a refresh token, which is more secure and consistent with how Claude Code itself authenticates.
+Every env has its own Claude credential, named `claude-<tenant>-<env>`, created by its own login so it's an independent OAuth grant: a token refresh in one env can never invalidate another's. You never list it in `creds:`; it's implied by the env's `tenant`. Dax does **not** use Anthropic API keys.
 
-The `claude` wrapper inside the container fetches the credentials blob from the daemon and writes it to `~/.claude/credentials.json`. Claude Code then authenticates natively and handles token refresh on its own.
+The login runs in a throwaway container against a private temporary folder (never your host `~/.claude`), and the token goes straight into Keychain. On each launch the `claude` wrapper writes it into the env's own state tree, and on container stop dax syncs the refreshed token back to Keychain and removes it from disk. `dax run` reruns the login before launch when the last one is older than `defaults.relogin_cooldown_hours`.
+
+Browser and Chrome profile for these logins come from `credential_defaults.claude`, with the env's tenant's own `tenants.<tenant>.claude` merged over it. So a client's envs can log in through that client's Chrome profile while everything else uses your default:
 
 ```yaml
-credentials:
-  claude-work:
-    provider: claude
-    browser: default
+credential_defaults:
+  claude:
+    browser: chrome
+    chrome_profile: Profile 2
+tenants:
+  ysecurity:
+    claude:
+      chrome_profile: Profile 5
 ```
+
+A tenant that sets `browser` replaces the default's `chrome_profile` too, unless it sets its own. A `chrome_profile` only takes effect with `browser: chrome`; set on its own, as above, it relies on the default's browser being Chrome.
+
+The `dax run` wizard asks which browser to use the first time it sees a new tenant ("Same as default" writes nothing). `dax env show` says which browser an env's login opens and where that setting came from. `dax run` and `dax config` warn about a `tenants:` entry that no env uses, or one that can't take effect.
 
 #### gmail
 
@@ -240,71 +245,56 @@ credentials:
 | `DAX_CREDS_NAMES` | Comma-separated list of all credential names available |
 | `DAX_CREDS_GMAIL` | Name of the first Gmail credential (e.g. `gmail-personal`) |
 
-#### auggie
-
-Authenticates using Augment Code's OAuth flow. The session JSON (including the access token) is stored in macOS Keychain. Inside the container, the `auggie` wrapper fetches the session blob from the daemon and sets `AUGMENT_SESSION_AUTH` — Augment prefers this environment variable over `~/.augment/session.json`.
-
-```yaml
-credentials:
-  auggie-work:
-    provider: auggie
-    login_url: https://auth-staging.augmentcode.com  # omit for production
-```
-
-`login_url` controls which OAuth server auggie authenticates against (maps to `auggie --login-url`). Omit it to use the production default (`https://auth.augmentcode.com`).
-
-**Note on re-authentication:** Auggie's OAuth flow uses a localhost callback that cannot be automatically brokered across the container/host boundary. `dax creds login` prints step-by-step instructions for completing the flow manually using `socat`. The easiest path for initial setup is to authenticate natively with auggie on any machine, then copy `~/.augment/session.json` to the host and run `dax creds add` to import it into Keychain.
-
 ### Commands
 
 #### `dax creds add`
 
-Interactively define a new credential: name, provider, and provider-specific options. Imports an existing token from disk into Keychain if one is found (e.g. from `~/.config/gh/hosts.yml` for GitHub, `~/.claude/credentials.json` for Claude, or `~/.augment/session.json` for Auggie).
+Interactively define a credential: provider first, then provider-specific options. For Claude it asks which env the credential is for, derives the name, and hands off to `dax creds login`. It never copies an existing token off disk, since that would share a grant.
 
 #### `dax creds list`
 
-Show all credentials with status:
+Show every credential, registered and derived (each env's Claude credential), with status:
 
 ```
-  name            provider  stored  detail        used by     warnings
-  --------------  --------  ------  ------------  ----------  ----------------
-  ssh-id-rsa      ssh       yes     ~/.ssh/id_rsa my-project
-  github-dfarrow  github    yes     firefox       my-project
-  claude-work     claude    yes     default       my-project  [!] key on disk
+  name                          provider  stored  detail                        used by                         relogin     warnings
+  ----------------------------  --------  ------  ----------------------------  ------------------------------  ----------  ------------------------
+  github-me                     github    yes     Firefox                       my-project                      -
+  ssh-id-ed25519                ssh       yes     ~/.ssh/id_ed25519             my-project                      -
+  claude-personal-my-project    claude    yes     default browser               my-project                      3h
 ```
 
 | Column | Meaning |
 | --- | --- |
-| stored | Whether the token is in macOS Keychain |
-| detail | Key path (ssh) or browser config (github/claude) |
-| used by | Projects that reference this credential |
-| warnings | Plaintext copy of the token exists on disk (see below) |
+| stored | Whether the secret is in macOS Keychain |
+| detail | Key path (ssh) or browser config |
+| used by | Envs that use this credential |
+| relogin | For Claude: when its login last ran, and `due` once past the cooldown |
+| warnings | A plaintext copy of the token on disk (see below) |
 
 #### `dax creds update [name]`
 
-Update credential metadata (browser, Chrome profile, key path). Omit `name` to pick interactively. Shows current configuration before prompting.
+Update credential metadata (browser, Chrome profile, key path). Omit `name` to pick interactively.
 
 #### `dax creds login <name>`
 
 Run the first-party auth flow for a credential and store the result in Keychain:
 
-- **ssh** — loads the key via `ssh-add --apple-use-keychain`
-- **github** — opens the OAuth device flow in the configured browser; polls until authorized
-- **claude** — opens the Claude OAuth flow in the configured browser
-- **gmail** — opens the Google OAuth consent screen in the configured browser; stores the refresh token in Keychain on completion
-- **auggie** — prints manual re-authentication instructions (see auggie provider note above)
+- **ssh**: loads the key via `ssh-add --apple-use-keychain`
+- **github**: the OAuth device flow in the configured browser
+- **claude**: the Claude OAuth flow in the configured browser, into a private temporary folder
+- **gmail**: the Google OAuth consent screen; stores the refresh token
 
 #### `dax creds remove <name>`
 
-Remove a credential's token from Keychain. Does not delete the credential definition from `~/.dax.yaml`.
+Remove a credential from both Keychain and `~/.dax.yaml`. Refuses while any env still uses it. A derived Claude credential has no config entry, so only its Keychain secret is removed (the env is offered a fresh login on its next `dax run`).
 
 ### Warnings
 
 `dax creds list` flags credentials where a plaintext copy of the token exists on disk:
 
-- **`[!] token on disk`** (github) — `~/.config/gh/hosts.yml` contains an `oauth_token`. Written by `gh auth login` and persists until explicitly removed. The token in Keychain is what dax uses; the one in `hosts.yml` is redundant and a minor security risk.
-- **`[!] key on disk`** (claude) — `~/.anthropic/api_key` or `~/.claude/credentials.json` exists. The `credentials.json` file is written by Claude Code's own auth flow and is expected to be present on the host; the warning is a reminder that it contains live credentials.
-- **`[!] session on disk`** (auggie) — `~/.augment/session.json` contains an `accessToken`. After `dax creds login` imports the session to Keychain it deletes this file; if it reappears (e.g. after a native auggie login) the Keychain copy may be stale.
+- **`[!] no passphrase`** (ssh): the key file isn't passphrase-protected.
+- **`[!] token on disk`** (github): `~/.config/gh/hosts.yml` contains an `oauth_token`. Written by `gh auth login`; the copy in Keychain is what dax uses.
+- **`[!] key on disk`** (claude): the env's state tree holds a `.credentials.json`. Normal while its container runs; after it stops, it means a teardown didn't get to sync it back to Keychain and clear it.
 
 ---
 
@@ -360,54 +350,117 @@ Returns the attachment in a format Claude can read directly:
 
 ## Environment Management
 
-A dax **environment** (or project) is a directory registered in `~/.dax.yaml` with an image and a set of credentials.
+A dax **environment** is a folder registered in `~/.dax.yaml`, named after the folder. Each one has its own Claude state tree and credential.
 
-#### `dax init`
+### `dax run`
 
-Run from any directory to register it as a dax project. Prompts for image and credentials (checkbox — space to toggle, enter to confirm). Re-running `dax init` in an already-registered directory lets you update the image or change which credentials are attached.
-
-#### `dax envs list`
-
-List all registered environments:
-
-```
-  [ ]  my-project   dax:latest  /Users/dfarrow/work/my-project   ssh-id-rsa, github-dfarrow
-  [*]  client-work  dax:latest  /Users/dfarrow/work/client-work  ssh-id-rsa, github-work
-  [!]  old-thing    dax:latest  /Users/dfarrow/work/old-thing    (none)
-```
-
-| Status | Meaning |
-| --- | --- |
-| `[ ]` | Directory exists, container not running |
-| `[*]` | Container currently running |
-| `[!]` | Directory does not exist |
-
-#### `dax run`
-
-Launch a container for the current directory. Dax looks up the project in `~/.dax.yaml`, starts the credential daemon, and assembles the `docker run` command from the configured features and credentials.
+Launch a container for the current folder, creating the env first with a short wizard if the folder isn't registered yet.
 
 ```bash
-dax run                    # use project config
-dax run -f ssh,webpreview  # add features on the fly
+dax run                    # launch (or create, then launch)
+dax run -f github          # add features on the fly
 dax run -p 8080:80         # expose an extra port
+dax -t run                 # preview: print the docker command instead of launching
 ```
+
+`-t` changes nothing: in a folder that isn't registered it refuses rather than starting the wizard, and it never creates or seeds a state tree.
+
+Run it from an env's own folder: from a subfolder of a registered env it refuses and tells you where the env's root is.
+
+### `dax env list [--all]`
+
+List registered envs, plus any Claude state tree no registered env claims:
+
+```
+       tenant    name         kind        dir                 creds                      state  used  archived
+       --------  -----------  ----------  ------------------  -------------------------  -----  ----  --------
+  [*]  acme      client-work  code        ~/work/client-work  (none)                     84K    now   never
+
+  [ ]  personal  job-offer    commitment  ~/work/job-offer    (none)                     310K   2d    2d
+  [ ]  personal  my-project   code        ~/work/my-project   github-me, ssh-id-ed25519  2.1M   3d    1w
+  [!]  personal  old-thing    code        ~/work/old-thing    (none)                     -      -     5w
+```
+
+`kind` is `code` for a code project. Anything else is a substrate-backed process, shown by its type, which is read from the `type:` line at the top of the process's own `context.md` (written by `new-process.sh`), or `?` if that's missing.
+
+Envs are grouped by tenant, with a blank line between tenants, and sorted by name within each. An orphaned state tree sits with its tenant. Tenants appear in the order the top-level `tenants:` block lists them, then any it doesn't list, alphabetically. To order a tenant that has no settings, list just its name:
+
+```yaml
+tenants:
+  personal:
+  ysecurity:
+    claude:
+      chrome_profile: Profile 5
+  acme:
+  parked:
+    hidden: true
+```
+
+A tenant with `hidden: true` is left out of `dax env list`; a footer line counts what's hidden. `dax env list --all` shows it again, together with archive-only envs. Hiding only affects the listing: every other command, and every picker, still sees those envs.
+
+`[*]` running, `[!]` folder missing, `[?]` a state tree with no env (orphaned), `[a]` an env that exists only as an archive (with `--all`).
+
+`used` is how long ago the env's Claude state last changed. `archived` is how long ago its newest archive was written by `dax env archive` to `backup_dir/daily/`, or `never`. An archive saved to a file elsewhere isn't counted. If `backup_dir` isn't there (an unmounted drive, say), the column shows `?` and a note.
+
+An env with no `~/.dax.yaml` entry and no state tree, only archives, is counted in the same footer line. `dax env list --all` lists each one under the tenant `(archive-only)`, after every other group. Its real tenant is recorded inside the archive, but dax doesn't open archives to find it: on OneDrive, opening one can download the whole file. To bring one back, `cd` into an empty folder with its name and run `dax env restore`.
+
+### `dax env show [name]`
+
+One env's settings plus what isn't in `~/.dax.yaml`: what kind of env it is (a code project, or a process with its type, skill and title from its `context.md`), its implied Claude credential and which browser its login opens, whether the folder exists, the container's state, and its state tree's size and age. Defaults to the env containing the current folder.
+
+### `dax env archive [name ...]`
+
+Snapshot envs (folder, Claude state tree, registry entry) for backup. A short wizard: which envs, then (for one env) dax's managed backups under `backup_dir/daily/` or a specific file, then for managed backups whether to remove the envs afterwards. Removal happens only once every archive has been read back successfully. Credentials are never archived. `dax env archive --explain` describes it in full.
+
+### `dax env restore [name|path]`
+
+Recover one archived env into the current folder, which must be empty and not a registered env. Restore never deletes or overwrites anything. The env is named after the folder, so restoring `fabric` from `~/fabric-check` registers `fabric-check` next to the live `fabric`. Pick dax's managed backups (env, then date, newest first) or a specific file; a name or path argument skips straight ahead. To roll a live env back: `dax env destroy` it, then restore into an empty folder. `dax env restore --explain` describes it in full.
+
+### `dax env destroy [name ...]`
+
+Permanently remove envs: folder, Claude state tree, derived credential, and registry entry. Refuses while an env's container is running, and asks you to type `DESTROY`. With no names, shows a picker.
+
+### `dax backup [--explain]`
+
+Copies your `dotfiles:` and `backup:` paths into `backup/` in this checkout (gitignored), writing only files that changed. `dax run` does the same quietly on every launch. Env archives are a separate command, `dax env archive`.
+
+### `dax config`
+
+Edit `~/.dax.yaml` safely (see [Configuration](#configuration)). Runs on the host only: inside a dax container the file is a single-file bind mount that some editors' saves silently detach.
+
+**Changing an env's tenant.** The tenant names the env's Claude state tree (`~/.local/state/dax/tenants/<tenant>/<env>/`) and its Claude credential (`claude-<tenant>-<env>`). So when you change an env's `tenant:` and save, `dax config` offers to move both:
+- **State tree:** moved to the new tenant's folder.
+- **Credential:** renamed in Keychain. It's the same login, so there's nothing to redo, and no old secret is left behind.
+- **Login record:** moved along with the credential.
+
+The env's own folder doesn't move. The env's container has to be stopped first. If either new name already exists, nothing moves and dax prints the steps to do it by hand.
 
 ---
 
 ## Features Reference
 
+`dax features` lists every feature with a short note on each.
+
+Always on for every env: `workdir`, `dotfiles`, `webpreview`, `claude`.
+
 | Feature | Description |
 | --- | --- |
-| `workdir` | Mounts the current host directory into the container, at a path named after the host directory's own basename |
+| `workdir` | Mounts the env's folder into the container, at a path named after the folder |
 | `dotfiles` | Mounts dotfiles from `~/.dax.yaml` into the container (`ro` or `rw`) |
-| `ssh` | Forwards the SSH agent into the container; keys stay on the host |
-| `claude` | Mounts `~/.claude` into the container for Claude Code config |
-| `auggie` | Mounts `~/.augment` into the container for Augment Code |
-| `github` | Mounts `~/.config/gh` into the container for gh CLI config |
-| `aws` | Mounts `~/.aws` into the container (warns that credentials are exposed) |
-| `webpreview` | Starts `dax-preview` — a rendered file browser served on a stable port (8000–8999, derived from the project directory) |
+| `webpreview` | Starts `dax-preview`, a rendered file browser served on a stable port (8000–8999, derived from the env's folder) |
+| `claude` | Mounts the env's own Claude state tree at `~/.claude`, seeds your global `CLAUDE.md`/settings into it once, and wires in its implied credential |
+| `mounts` | Mounts each path in the env's `mounts:` list at `$HOME/<name>`. On whenever that list is non-empty |
+| `substrate` | Opt in per env, for a *substrate-backed process*: an env scaffolded by the substrate's own `shared/new-process.sh` (which the `dax run` wizard runs for you) and worked with its skills. Mounts the top-level `substrate:` repo and sets `$SUBSTRATE_ROOT`. Claude refuses to start unless the substrate's `shared/wire.sh --check` passes |
+| `auto_claude` | Opt in per env: the container starts straight into `claude` in tmux instead of a shell |
+| `github` | Mounts `githubdir` (e.g. `~/.config/gh`) for gh CLI config |
+| `aws` | Mounts `awsdir` (e.g. `~/.aws`; warns that credentials are exposed) |
 | `ports` | Exposes additional ports; configure in `~/.dax.yaml` or pass `-p host:container` |
-| `optdir` | Mounts a directory of additional tools into the container |
+| `optdir` | Mounts `optdir`, a directory of additional tools |
+| `X11` | Forwards X11 display to the host |
+| `msf` | Mounts the configured `msfdir` and publishes port 4444, for Metasploit |
+| `ovpn` | Adds the capabilities a VPN client needs (not fully implemented) |
+
+SSH needs no feature: attaching an `ssh` credential forwards an agent holding that key.
 
 ### webpreview
 

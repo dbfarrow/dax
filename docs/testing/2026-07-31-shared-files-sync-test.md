@@ -1,5 +1,11 @@
 # Manual test: shared-files sync (`sync_claude_shared_files`)
 
+> **Superseded (env-lifecycle consolidation, 2026-10, decision 13).** The
+> drift-detecting sync this tests, and `dax env accept-shared-files`, are
+> gone. `CLAUDE.md`/`settings.json`/`settings.local.json` are now copied into a
+> state tree once, when missing or empty, and never touched again; delete a
+> tree's copy to have the next launch re-seed it. Kept as a record only.
+
 Verifies the copy-with-drift-detection mechanism that replaced the abandoned
 read-only file mount (see `CLAUDE.md`'s "Built, same day" note under decision
 B2). All host commands — the sync runs while `dax run` assembles the docker

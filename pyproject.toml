@@ -6,7 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "dax"
 dynamic = ["version"]
 requires-python = ">=3.7"
-dependencies = ["pyyaml", "ruamel.yaml", "questionary"]
+# keyring holds every credential in the macOS Keychain, so the host needs it;
+# the image (Linux) never reads Keychain directly, so it's left out there.
+dependencies = ["pyyaml", "ruamel.yaml", "questionary", "keyring; sys_platform == 'darwin'"]
 
 [project.optional-dependencies]
 container = ["mcp", "python-docx", "lxml"]

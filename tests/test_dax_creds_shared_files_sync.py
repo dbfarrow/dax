@@ -1,151 +1,106 @@
-"""`sync_claude_shared_files` copies the host's user-level CLAUDE.md/settings.json/
-settings.local.json into a `claude_tenant_state` env's state tree.
+"""`sync_claude_shared_files` seeds the host's user-level CLAUDE.md,
+settings.json and settings.local.json into an env's state tree, once
+(env-lifecycle consolidation, decision 13).
 
-Replaces a nested read-only file bind mount (decision B2), abandoned 2026-07-31
-after it turned out not to deliver the host's content at all. A plain byte-diff
-between host and tree can't tell "host moved on since last sync" (safe to
-overwrite) apart from "something changed the tree's copy independently" (unsafe
-to clobber) — that's what the manifest of last-synced hashes is for.
+It replaced a three-way drift check (host vs tree vs a last-synced
+manifest), whose only trigger was the retired shared `claude` mount. Now each
+file is copied only if the tree doesn't have it yet, and the tree's copy is
+never touched again. A later host edit not reaching a seeded tree is the
+documented, deliberately deferred gap.
 """
 from dax_creds.config import (
-    CLAUDE_SHARED_FILES, state_tree_path, sync_claude_shared_files,
+    CLAUDE_SHARED_FILES, shared_files_manifest_path, state_tree_path,
+    sync_claude_shared_files,
 )
 
 
-def _write_host_claude_md(tmp_path, content):
+def _host(tmp_path, name='CLAUDE.md', content='global instructions'):
     (tmp_path / '.claude').mkdir(exist_ok=True)
-    (tmp_path / '.claude' / 'CLAUDE.md').write_text(content)
+    (tmp_path / '.claude' / name).write_text(content)
 
 
-def test_first_sync_copies_the_host_file_into_the_tree(tmp_path, monkeypatch):
+def test_seeds_a_missing_file_into_the_tree(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
-    _write_host_claude_md(tmp_path, 'global instructions')
+    _host(tmp_path)
 
-    warnings = sync_claude_shared_files('personal', 'fabric')
+    sync_claude_shared_files('personal', 'fabric')
+
+    assert (state_tree_path('personal', 'fabric') / 'CLAUDE.md').read_text() == 'global instructions'
+
+
+def test_seeds_every_shared_file_present_on_the_host(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    for name in CLAUDE_SHARED_FILES:
+        _host(tmp_path, name, 'host ' + name)
+
+    sync_claude_shared_files('personal', 'fabric')
 
     tree = state_tree_path('personal', 'fabric')
-    assert (tree / 'CLAUDE.md').read_text() == 'global instructions'
-    assert warnings == []
+    for name in CLAUDE_SHARED_FILES:
+        assert (tree / name).read_text() == 'host ' + name
 
 
-def test_absent_host_file_is_skipped_without_creating_anything(tmp_path, monkeypatch):
+def test_an_absent_host_file_creates_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
 
-    warnings = sync_claude_shared_files('personal', 'fabric')
+    sync_claude_shared_files('personal', 'fabric')
 
     tree = state_tree_path('personal', 'fabric')
     assert not tree.exists() or list(tree.iterdir()) == []
-    assert warnings == []
 
 
-def test_second_sync_is_a_no_op_when_nothing_changed(tmp_path, monkeypatch):
+def test_a_seeded_file_is_never_touched_again(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
-    _write_host_claude_md(tmp_path, 'v1')
+    _host(tmp_path, content='v1')
     sync_claude_shared_files('personal', 'fabric')
 
+    _host(tmp_path, content='v2')
+    sync_claude_shared_files('personal', 'fabric')
+
+    assert (state_tree_path('personal', 'fabric') / 'CLAUDE.md').read_text() == 'v1'
+
+
+def test_a_tree_copy_edited_in_a_container_is_left_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    _host(tmp_path)
+    sync_claude_shared_files('personal', 'fabric')
     tree_file = state_tree_path('personal', 'fabric') / 'CLAUDE.md'
-    mtime_before = tree_file.stat().st_mtime_ns
-
-    warnings = sync_claude_shared_files('personal', 'fabric')
-
-    assert tree_file.stat().st_mtime_ns == mtime_before
-    assert warnings == []
-
-
-def test_host_update_is_picked_up_when_tree_copy_is_untouched(tmp_path, monkeypatch):
-    monkeypatch.setenv('HOME', str(tmp_path))
-    _write_host_claude_md(tmp_path, 'v1')
-    sync_claude_shared_files('personal', 'fabric')
-
-    _write_host_claude_md(tmp_path, 'v2')
-    warnings = sync_claude_shared_files('personal', 'fabric')
-
-    tree_file = state_tree_path('personal', 'fabric') / 'CLAUDE.md'
-    assert tree_file.read_text() == 'v2'
-    assert warnings == []
-
-
-def test_independently_edited_tree_copy_is_left_alone_and_warned(tmp_path, monkeypatch):
-    monkeypatch.setenv('HOME', str(tmp_path))
-    _write_host_claude_md(tmp_path, 'v1')
-    sync_claude_shared_files('personal', 'fabric')
-
-    tree_file = state_tree_path('personal', 'fabric') / 'CLAUDE.md'
-    tree_file.write_text('edited independently in a container')
-    _write_host_claude_md(tmp_path, 'v2')
-
-    warnings = sync_claude_shared_files('personal', 'fabric')
-
-    assert tree_file.read_text() == 'edited independently in a container'
-    assert warnings == ['CLAUDE.md']
-
-
-def test_force_overwrites_drifted_tree_copy_with_the_host_version(tmp_path, monkeypatch):
-    monkeypatch.setenv('HOME', str(tmp_path))
-    _write_host_claude_md(tmp_path, 'v1')
-    sync_claude_shared_files('personal', 'fabric')
-
-    tree_file = state_tree_path('personal', 'fabric') / 'CLAUDE.md'
-    tree_file.write_text('edited independently in a container')
-    _write_host_claude_md(tmp_path, 'v2')
-
-    warnings = sync_claude_shared_files('personal', 'fabric', force=True)
-
-    assert tree_file.read_text() == 'v2'
-    assert warnings == []
-
-
-def test_force_resyncs_after_a_previous_drift_warning(tmp_path, monkeypatch):
-    """Once forced, the manifest reflects the adopted content, so a later
-    ordinary sync doesn't immediately re-flag it as drifted."""
-    monkeypatch.setenv('HOME', str(tmp_path))
-    _write_host_claude_md(tmp_path, 'v1')
-    sync_claude_shared_files('personal', 'fabric')
-    (state_tree_path('personal', 'fabric') / 'CLAUDE.md').write_text('drifted')
-    sync_claude_shared_files('personal', 'fabric', force=True)
-
-    warnings = sync_claude_shared_files('personal', 'fabric')
-
-    assert warnings == []
-
-
-def test_manifest_lives_beside_the_tree_not_inside_it(tmp_path, monkeypatch):
-    """It must not appear inside the tree the container mounts at ~/.claude."""
-    monkeypatch.setenv('HOME', str(tmp_path))
-    _write_host_claude_md(tmp_path, 'v1')
+    tree_file.write_text('edited in the container')
 
     sync_claude_shared_files('personal', 'fabric')
 
-    tree = state_tree_path('personal', 'fabric')
-    assert not any(p.name.endswith('.json') for p in tree.iterdir())
-    manifest = tree.parent / 'fabric.shared-files.json'
-    assert manifest.is_file()
+    assert tree_file.read_text() == 'edited in the container'
 
 
-def test_two_envs_get_independent_manifests(tmp_path, monkeypatch):
+def test_no_manifest_is_written(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
-    _write_host_claude_md(tmp_path, 'v1')
+    _host(tmp_path)
+
     sync_claude_shared_files('personal', 'fabric')
 
-    (state_tree_path('personal', 'fabric') / 'CLAUDE.md').write_text('drifted for fabric only')
-    _write_host_claude_md(tmp_path, 'v2')
+    assert not shared_files_manifest_path('personal', 'fabric').exists()
 
-    fabric_warnings = sync_claude_shared_files('personal', 'fabric')
-    dax_warnings = sync_claude_shared_files('personal', 'dax')
 
-    assert fabric_warnings == ['CLAUDE.md']
-    assert dax_warnings == []
+def test_two_envs_are_seeded_independently(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    _host(tmp_path, content='v1')
+    sync_claude_shared_files('personal', 'fabric')
+    _host(tmp_path, content='v2')
+    sync_claude_shared_files('personal', 'dax')
+
+    assert (state_tree_path('personal', 'fabric') / 'CLAUDE.md').read_text() == 'v1'
     assert (state_tree_path('personal', 'dax') / 'CLAUDE.md').read_text() == 'v2'
 
 
-def test_all_three_shared_filenames_are_covered(tmp_path, monkeypatch):
+def test_an_empty_tree_copy_is_re_seeded(tmp_path, monkeypatch):
+    """A 0-byte copy is never real (a failed nested-mount experiment left one
+    in a real tree), and with no drift tracking left this is its only repair."""
     monkeypatch.setenv('HOME', str(tmp_path))
-    (tmp_path / '.claude').mkdir()
-    for f in CLAUDE_SHARED_FILES:
-        (tmp_path / '.claude' / f).write_text(f'host {f}')
+    _host(tmp_path)
+    tree_file = state_tree_path('personal', 'fabric') / 'CLAUDE.md'
+    tree_file.parent.mkdir(parents=True)
+    tree_file.write_text('')
 
     sync_claude_shared_files('personal', 'fabric')
 
-    tree = state_tree_path('personal', 'fabric')
-    for f in CLAUDE_SHARED_FILES:
-        assert (tree / f).read_text() == f'host {f}'
+    assert tree_file.read_text() == 'global instructions'

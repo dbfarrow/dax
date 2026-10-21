@@ -1,4 +1,4 @@
-"""`feature_claude_tenant_state` mounts this env's state tree at `~/.claude`.
+"""`feature_claude` mounts this env's state tree at `~/.claude`.
 
 Decision B. The feature previously mounted trees at
 `~/.local/state/dax/tenants/<t>/<p>` and left the container-side `claude` wrapper
@@ -15,7 +15,7 @@ import pytest
 import dax as dax_module
 from dax import (
     _CLAUDE_HOST_SHARED_DIRS, _CLAUDE_HOST_SHARED_FILES,
-    feature_claude_tenant_state,
+    feature_claude,
 )
 
 
@@ -43,7 +43,7 @@ def env_vars(opts):
 def test_the_tree_mounts_at_the_config_dir_itself(config):
     """Not at a `~/.local/state/dax/...` path inside the container: Claude Code
     scans `~/.claude`, and the whole point is that it finds this env's tree there."""
-    vols = volumes(feature_claude_tenant_state(config))
+    vols = volumes(feature_claude(config))
 
     assert vols[0].endswith(':/home/dfarrow/.claude')
     assert vols[0].startswith(os.path.expanduser(
@@ -53,7 +53,7 @@ def test_the_tree_mounts_at_the_config_dir_itself(config):
 def test_config_dir_is_a_constant_pointing_at_the_mount(config):
     """Kept only because it relocates .claude.json *into* the tree — unset, that
     file lands at ~/.claude.json, outside the mount, and is lost on teardown."""
-    assert env_vars(feature_claude_tenant_state(config))['CLAUDE_CONFIG_DIR'] == \
+    assert env_vars(feature_claude(config))['CLAUDE_CONFIG_DIR'] == \
         '/home/dfarrow/.claude'
 
 
@@ -61,7 +61,7 @@ def test_no_tenant_state_switch_is_exported(config):
     """`dax run` must not set DAX_TENANT_STATE any more: a wrapper from an image
     built before decision B still contains Gate B and would resolve its own path,
     overriding the mount. Not setting it is what makes this work unrebuilt."""
-    exported = env_vars(feature_claude_tenant_state(config))
+    exported = env_vars(feature_claude(config))
 
     assert 'DAX_TENANT_STATE' not in exported
     assert 'DAX_PROJECT_NAME' not in exported
@@ -75,7 +75,7 @@ def test_the_tenant_comes_from_the_registry_not_the_filesystem(config, tmp_path)
     (tmp_path / '.dax-tenant').write_text('some-other-tenant\n')
     config['cwd'] = str(tmp_path)
 
-    assert 'tenants/personal/fabric' in volumes(feature_claude_tenant_state(config))[0]
+    assert 'tenants/personal/fabric' in volumes(feature_claude(config))[0]
 
 
 def test_a_missing_tenant_refuses_rather_than_pooling(config, capsys):
@@ -84,11 +84,11 @@ def test_a_missing_tenant_refuses_rather_than_pooling(config, capsys):
     config['tenant'] = None
 
     with pytest.raises(SystemExit) as excinfo:
-        feature_claude_tenant_state(config)
+        feature_claude(config)
 
     assert excinfo.value.code != 0
     out = capsys.readouterr().out
-    assert 'dax env set fabric tenant' in out
+    assert 'tenant: <name>' in out and '~/.dax.yaml' in out
 
 
 # --- the two host directories (decision B2) ---------------------------------
@@ -97,7 +97,7 @@ def test_host_commands_and_plugins_nest_inside_the_tree(config, tmp_path):
     for d in _CLAUDE_HOST_SHARED_DIRS:
         (tmp_path / '.claude' / d).mkdir(parents=True)
 
-    vols = volumes(feature_claude_tenant_state(config))
+    vols = volumes(feature_claude(config))
 
     assert f'{tmp_path}/.claude/commands:/home/dfarrow/.claude/commands' in vols
     assert f'{tmp_path}/.claude/plugins:/home/dfarrow/.claude/plugins' in vols
@@ -108,7 +108,7 @@ def test_they_are_mounted_from_the_host_claude_dir_not_a_shared_tree(config, tmp
     seeding step that can silently leave a project with empty directories."""
     (tmp_path / '.claude' / 'commands').mkdir(parents=True)
 
-    vols = volumes(feature_claude_tenant_state(config))
+    vols = volumes(feature_claude(config))
 
     assert not any('/state/dax/shared/' in v for v in vols)
 
@@ -118,7 +118,7 @@ def test_the_tree_mount_comes_first(config, tmp_path):
     intent legible in `docker run` output and in any future ordering change."""
     (tmp_path / '.claude' / 'commands').mkdir(parents=True)
 
-    vols = volumes(feature_claude_tenant_state(config))
+    vols = volumes(feature_claude(config))
 
     assert vols[0].endswith(':/home/dfarrow/.claude')
 
@@ -126,7 +126,7 @@ def test_the_tree_mount_comes_first(config, tmp_path):
 def test_absent_host_directories_are_skipped(config):
     """A host with no commands of its own should not acquire an empty
     ~/.claude/commands as a side effect of running a container."""
-    vols = volumes(feature_claude_tenant_state(config))
+    vols = volumes(feature_claude(config))
 
     assert len(vols) == 1
 
@@ -145,7 +145,7 @@ def test_creates_the_host_tree_itself_even_with_no_shared_files_to_seed(config):
     host_tree = os.path.expanduser('~/.local/state/dax/tenants/personal/fabric')
     assert not os.path.isdir(host_tree)  # nothing pre-seeded it, by construction
 
-    feature_claude_tenant_state(config)
+    feature_claude(config)
 
     assert os.path.isdir(host_tree)
 
@@ -157,7 +157,7 @@ def test_skills_and_cache_are_not_shared(config, tmp_path):
     for d in ('skills', 'cache', 'commands'):
         (tmp_path / '.claude' / d).mkdir(parents=True)
 
-    vols = volumes(feature_claude_tenant_state(config))
+    vols = volumes(feature_claude(config))
 
     assert not any(v.endswith('/skills') or v.endswith('/cache') for v in vols)
     assert 'skills' not in _CLAUDE_HOST_SHARED_DIRS
@@ -166,16 +166,16 @@ def test_skills_and_cache_are_not_shared(config, tmp_path):
 
 def test_each_env_gets_its_own_tree(config, monkeypatch):
     """The property the whole design is for: two envs must not share a path."""
-    fabric = volumes(feature_claude_tenant_state(config))[0]
+    fabric = volumes(feature_claude(config))[0]
 
     other = dict(config, workdir_name='dax')
-    assert volumes(feature_claude_tenant_state(other))[0] != fabric
+    assert volumes(feature_claude(other))[0] != fabric
 
 
 def test_a_different_tenant_changes_the_path(config):
     """`tenant` is the outer key, so ending an engagement is one rm -rf."""
-    a = volumes(feature_claude_tenant_state(config))[0]
-    b = volumes(feature_claude_tenant_state(dict(config, tenant='acme')))[0]
+    a = volumes(feature_claude(config))[0]
+    b = volumes(feature_claude(dict(config, tenant='acme')))[0]
 
     assert '/tenants/personal/' in a
     assert '/tenants/acme/' in b
@@ -201,7 +201,7 @@ def test_global_claude_md_and_settings_are_copied_into_the_tree(config, tmp_path
         (tmp_path / '.claude').mkdir(exist_ok=True)
         (tmp_path / '.claude' / f).write_text(f'host {f}')
 
-    feature_claude_tenant_state(config)
+    feature_claude(config)
 
     tree = _tree_dir(tmp_path)
     for f in _CLAUDE_HOST_SHARED_FILES:
@@ -215,7 +215,7 @@ def test_copied_files_are_not_mounted(config, tmp_path):
     (tmp_path / '.claude').mkdir()
     (tmp_path / '.claude' / 'settings.json').write_text('{}')
 
-    vols = volumes(feature_claude_tenant_state(config))
+    vols = volumes(feature_claude(config))
 
     assert not any('settings.json' in v for v in vols)
     assert len(vols) == 1
@@ -225,24 +225,26 @@ def test_absent_user_files_are_skipped(config, tmp_path):
     (tmp_path / '.claude').mkdir()
     (tmp_path / '.claude' / 'CLAUDE.md').write_text('x')
 
-    feature_claude_tenant_state(config)
+    feature_claude(config)
 
     tree = _tree_dir(tmp_path)
     assert (tree / 'CLAUDE.md').read_text() == 'x'
     assert not (tree / 'settings.json').exists()
 
 
-def test_a_host_update_is_picked_up_on_the_next_run(config, tmp_path):
-    """The common case: host content moves on, and the tree — untouched since
-    dax last synced it — should just follow along."""
+def test_a_host_update_is_not_copied_into_an_already_seeded_tree(config, tmp_path):
+    """Decision 13: the shared files are copied in once, then the tree's copy
+    is its own. A later host edit not reaching the tree is the documented,
+    deliberately deferred gap (substrate envs' CLAUDE.md is rewired in the
+    tree, which rules out the simple sync options)."""
     (tmp_path / '.claude').mkdir()
     (tmp_path / '.claude' / 'CLAUDE.md').write_text('v1')
-    feature_claude_tenant_state(config)
+    feature_claude(config)
 
     (tmp_path / '.claude' / 'CLAUDE.md').write_text('v2')
-    feature_claude_tenant_state(config)
+    feature_claude(config)
 
-    assert (_tree_dir(tmp_path) / 'CLAUDE.md').read_text() == 'v2'
+    assert (_tree_dir(tmp_path) / 'CLAUDE.md').read_text() == 'v1'
 
 
 def test_a_tree_copy_touched_independently_of_dax_is_left_alone(config, tmp_path, capsys):
@@ -251,16 +253,14 @@ def test_a_tree_copy_touched_independently_of_dax_is_left_alone(config, tmp_path
     not clobber it — even though the host has since moved on too."""
     (tmp_path / '.claude').mkdir()
     (tmp_path / '.claude' / 'CLAUDE.md').write_text('v1')
-    feature_claude_tenant_state(config)
+    feature_claude(config)
 
     (_tree_dir(tmp_path) / 'CLAUDE.md').write_text('edited independently in a container')
     (tmp_path / '.claude' / 'CLAUDE.md').write_text('v2')
-    feature_claude_tenant_state(config)
+    feature_claude(config)
 
     assert (_tree_dir(tmp_path) / 'CLAUDE.md').read_text() == 'edited independently in a container'
-    out = capsys.readouterr().out
-    assert 'CLAUDE.md' in out
-    assert 'dax env accept-shared-files fabric' in out
+    assert 'accept-shared-files' not in capsys.readouterr().out  # no drift warning any more
 
 
 def test_directories_stay_writable(config, tmp_path):
@@ -268,7 +268,20 @@ def test_directories_stay_writable(config, tmp_path):
     and having it persist is worth more than insulating the host directory."""
     (tmp_path / '.claude' / 'commands').mkdir(parents=True)
 
-    vols = volumes(feature_claude_tenant_state(config))
+    vols = volumes(feature_claude(config))
 
     commands = next(v for v in vols if v.endswith('/commands'))
     assert not commands.endswith(':ro')
+
+
+def test_the_state_tree_follows_the_registry_name_not_the_folder(config, tmp_path):
+    """An env registered as `ys-augmentcode` in folder `augmentcode` must get
+    the tree destroy/archive/restore and its credential name all use."""
+    config['workdir_name'] = 'augmentcode'
+    config['env_name'] = 'ys-augmentcode'
+
+    opts = feature_claude(config)
+
+    volume = next(o for o in opts if o.startswith('--volume=') and o.endswith('/.claude'))
+    assert '/ys-augmentcode:' in volume
+    assert '/augmentcode:' not in volume

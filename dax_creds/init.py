@@ -5,9 +5,11 @@ from pathlib import Path
 
 from dax_creds.config import (
     BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
-    credential_users, derived_credentials, env_field_help,
+    credential_users, derived_credentials,
     last_login_at, relogin_due, resolve_credential_names, state_tree_path,
-    state_trees, sync_claude_shared_files,
+    state_trees, unknown_env_keys, retired_entries,
+    describe_unknown_env_keys, synthesized_credential, credential_settings_source,
+    hidden_tenants,
 )
 from dax_creds.providers.ssh import SshProvider
 
@@ -17,16 +19,6 @@ except ImportError:
     _keyring_module = None
 
 _KEYCHAIN_SERVICE = 'dax-creds'
-
-
-def register_project(config, name, project_dir, image, creds):
-    existing = config.setdefault('projects', {}).get(name, {})
-    existing.update({
-        'dir': str(project_dir),
-        'image': image,
-        'creds': creds,
-    })
-    config['projects'][name] = existing
 
 
 def save_config(config):
@@ -94,10 +86,11 @@ def _q_text(prompt, default=None):
     return result.strip() or default
 
 
-def _q_select(prompt, choices):
+def _q_select(prompt, choices, default=None):
+    """`default` pre-highlights the choice with that value."""
     import questionary
     _flush_stdin()
-    result = questionary.select(prompt, choices=choices).ask()
+    result = questionary.select(prompt, choices=choices, default=default).ask()
     if result is None:
         raise KeyboardInterrupt
     return result
@@ -106,10 +99,27 @@ def _q_select(prompt, choices):
 def _q_confirm(prompt, default=False):
     import questionary
     _flush_stdin()
-    result = questionary.confirm(prompt, default=default).ask()
+    # questionary's own default (auto_enter=True) commits a y/n answer on the
+    # keypress alone, with no Enter and no moment to reconsider, so a single
+    # stray or too-fast keypress could advance a multi-step wizard with no
+    # recovery (found live, 2026-10). Waiting for Enter complements the
+    # stdin flush above: the flush discards keys typed *before* the prompt,
+    # this stops one typed *at* it from committing on its own.
+    result = questionary.confirm(prompt, default=default, auto_enter=False).ask()
     if result is None:
         raise KeyboardInterrupt
     return result
+
+
+def _q_path(prompt, default=None):
+    """A path prompt with tab completion; ~ is expanded in the result."""
+    import questionary
+    _flush_stdin()
+    result = questionary.path(prompt, default=default or '').ask()
+    if result is None:
+        raise KeyboardInterrupt
+    result = result.strip() or default
+    return os.path.expanduser(result) if result else result
 
 
 def _q_checkbox(prompt, choices):
@@ -149,14 +159,6 @@ def _define_credential(cred_name, provider_name, browser_enumerator=None):
     if provider_name == 'ssh':
         key_path = _prompt('Key file path', default='~/.ssh/id_ed25519')
         cred_def['key'] = key_path
-    elif provider_name == 'auggie':
-        login_url = _prompt('Login URL (blank for production default)', default='')
-        if login_url:
-            cred_def['login_url'] = login_url
-        picked = _pick_browser(browser_enumerator)
-        cred_def['browser'] = picked['browser']
-        if picked['chrome_profile']:
-            cred_def['chrome_profile'] = picked['chrome_profile']
     elif provider_name in ('gmail', 'drive'):
         client_id = _prompt('OAuth client_id')
         cred_def['client_id'] = client_id
@@ -247,58 +249,6 @@ def _setup_github_credential(cred_name, cred_def, config, replace=False):
         return False
 
 
-def _setup_claude_credential(cred_name, cred_def, replace=False, config=None):
-    from dax_creds.providers.claude import ClaudeProvider, grant_collision_message
-    provider = ClaudeProvider()
-
-    if not replace and provider.check(cred_def, cred_name):
-        print(f'  [{cred_name}] token already in Keychain.')
-        return True
-
-    token = provider.import_from_disk(cred_def)
-    if token:
-        # This path copies whatever sits in ~/.claude/.credentials.json, which
-        # under a shared mount is some *other* env's credential — the sharing
-        # decision C exists to prevent, and the one door `dax creds login`'s
-        # before/after guard never covered. Refuse on a grant collision rather
-        # than storing a second name for one grant (decision C6).
-        candidates = (credential_names_for_provider(config, 'claude')
-                      if config is not None else set())
-        clash = provider.grant_collision(cred_name, token, candidates)
-        if clash:
-            lines = grant_collision_message(cred_name, clash)
-            print(f'  [{cred_name}] {lines[0]}')
-            for line in lines[1:]:
-                print(f'  [{cred_name}] {line}')
-            return False
-        print(f'  [{cred_name}] importing existing token from ~/.claude/.credentials.json')
-        provider.store(cred_name, token)
-        print(f'  [{cred_name}] done.')
-        return True
-
-    _report_no_token(cred_name, provider, cred_def, replace)
-    return False
-
-
-def _setup_auggie_credential(cred_name, cred_def, replace=False):
-    from dax_creds.providers.auggie import AuggieProvider
-    provider = AuggieProvider()
-
-    if not replace and provider.check(cred_def, cred_name):
-        print(f'  [{cred_name}] token already in Keychain.')
-        return True
-
-    token = provider.import_from_disk(cred_def)
-    if token:
-        print(f'  [{cred_name}] importing existing token from ~/.augment/session.json')
-        provider.store(cred_name, token)
-        print(f'  [{cred_name}] done.')
-        return True
-
-    _report_no_token(cred_name, provider, cred_def, replace)
-    return False
-
-
 def _setup_google_credential(cred_name, cred_def, replace=False):
     from dax_creds.providers.google import GoogleProvider
     provider = GoogleProvider(cred_def['provider'])
@@ -325,103 +275,6 @@ def _report_no_token(cred_name, provider, cred_def, replace):
         print(f'  [{cred_name}] to clear it anyway: dax creds remove {cred_name}')
 
 
-def run_init(config, cwd):
-    print('\ndax init\n')
-    try:
-        return _run_init(config, cwd)
-    except KeyboardInterrupt:
-        print('\n\nInit cancelled. Nothing was saved.')
-        sys.exit(0)
-
-
-def _run_init(config, cwd):
-    import questionary
-    from dax_creds.config import find_enclosing_project
-
-    existing_project_name = next(
-        (name for name, p in config.get('projects', {}).items()
-         if Path(p['dir']) == cwd),
-        None
-    )
-    existing_project = config.get('projects', {}).get(existing_project_name, {})
-
-    if existing_project_name:
-        print(f'  {cwd.name} is already registered as "{existing_project_name}".')
-        if not _q_confirm('Update it?', default=False):
-            print('Nothing changed.')
-            return config
-    else:
-        # The same blind spot `find_enclosing_project`/Gate 0 closed for
-        # `dax run`: an exact-match lookup alone finds nothing for a
-        # subdirectory of an already-registered project and falls straight
-        # through to registering a duplicate rooted there.
-        enclosing = find_enclosing_project(config, cwd)
-        if enclosing is not None:
-            enclosing_name, enclosing_project = enclosing
-            enclosing_dir = Path(enclosing_project['dir']).expanduser()
-            print(f'  {cwd} is inside already-registered project "{enclosing_name}" '
-                  f'at {enclosing_dir}, not its root.')
-            print(f'  Run `dax init` from {enclosing_dir} instead.')
-            return config
-
-    default_image = existing_project.get('image') or config.get('defaults', {}).get('image', 'dax-base')
-    image = _prompt('Image', default=default_image)
-
-    tenant = _prompt('Tenant (optional grouping label for state-tree paths and '
-                     'credential names)', default=existing_project.get('tenant'))
-
-    existing_creds = list(config.get('credentials', {}).keys())
-    already_selected = set(existing_project.get('creds', []))
-    new_creds = {}
-
-    # Single checkbox — existing creds pre-checked if already attached
-    if existing_creds:
-        choices = [
-            questionary.Choice(name, checked=(name in already_selected))
-            for name in existing_creds
-        ]
-        selected_creds = _q_checkbox('Select credentials for this project:', choices)
-    else:
-        selected_creds = []
-
-    # Define new credentials
-    while _q_confirm('Define a new credential?', default=False):
-        cred_name = _prompt('Credential name (e.g. ssh-github, github-dfarrow)')
-        if not cred_name:
-            continue
-        provider_name = _q_select('Provider:', ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive'])
-        cred_def = _define_credential(cred_name, provider_name)
-        new_creds[cred_name] = cred_def
-        selected_creds.append(cred_name)
-
-    config.setdefault('credentials', {}).update(new_creds)
-
-    for cred_name in selected_creds:
-        cred_def = config['credentials'].get(cred_name) or new_creds.get(cred_name)
-        if not cred_def:
-            continue
-        provider_name = cred_def.get('provider')
-        if provider_name == 'ssh':
-            _setup_ssh_credential(cred_name, cred_def)
-        elif provider_name == 'github':
-            _setup_github_credential(cred_name, cred_def, config)
-        elif provider_name == 'claude':
-            _setup_claude_credential(cred_name, cred_def, config=config)
-        elif provider_name == 'auggie':
-            _setup_auggie_credential(cred_name, cred_def)
-        elif provider_name in ('gmail', 'drive'):
-            _setup_google_credential(cred_name, cred_def)
-
-    project_name = existing_project_name or cwd.name
-    register_project(config, name=project_name, project_dir=cwd,
-                     image=image, creds=selected_creds)
-    save_config(config)
-    if tenant:
-        run_env_set(config, project_name, 'tenant', tenant)
-    print(f'\nRegistered {project_name}. Run `dax run` to launch.')
-    return config
-
-
 def run_creds_add(config, cwd=None):
     """Returns (config, pending_login). See `_run_creds_add`."""
     print('\ndax creds add\n')
@@ -432,7 +285,7 @@ def run_creds_add(config, cwd=None):
         sys.exit(0)
 
 
-_CRED_PROVIDERS = ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive']
+_CRED_PROVIDERS = ['ssh', 'github', 'claude', 'gmail', 'drive']
 
 
 def _run_creds_add(config, cwd=None):
@@ -472,8 +325,6 @@ def _run_creds_add(config, cwd=None):
         stored = _setup_ssh_credential(cred_name, cred_def, replace=replace)
     elif provider_name == 'github':
         stored = _setup_github_credential(cred_name, cred_def, config, replace=replace)
-    elif provider_name == 'auggie':
-        stored = _setup_auggie_credential(cred_name, cred_def, replace=replace)
     else:
         stored = _setup_google_credential(cred_name, cred_def, replace=replace)
 
@@ -522,7 +373,7 @@ def _add_per_env_credential(config, provider, cwd=None):
     projects = config.get('projects') or {}
     if not projects:
         print(f'  no envs registered, so there is nothing to scope a {provider} '
-              f'credential to.\n  Run `dax init` first.')
+              f'credential to.\n  Run `dax run` from the env\'s folder first to register it.')
         return config, None
 
     print(f'\n  {provider} credentials are per env, and dax builds the name from the '
@@ -548,14 +399,8 @@ def _add_per_env_credential(config, provider, cwd=None):
     cred_name = derived_credential_name(provider, tenant, env_name)
     print(f'\n  -> {cred_name}')
 
-    creds = project.setdefault('creds', [])
-    if provider not in creds and cred_name not in creds:
-        print(f'  {env_name} does not use it yet.')
-        if _q_confirm(f'Add `{provider}` to {env_name}\'s creds list?', default=True):
-            creds.append(provider)
-        else:
-            print(f'  leaving {env_name}\'s creds list alone — the credential will '
-                  f'exist but go unused.')
+    # No creds-list edit: every env uses its implied Claude credential
+    # automatically (decision 35), so there is nothing to opt into.
 
     # Browser and profile belong to the human authenticating, not to the env, so
     # they live in one `credential_defaults` block covering every derived
@@ -564,12 +409,15 @@ def _add_per_env_credential(config, provider, cwd=None):
     defaults = (config.get('credential_defaults') or {}).get(provider) or {}
     if not defaults:
         print(f'\n  no credential_defaults for {provider} yet — this applies to every '
-              f'derived\n  {provider} credential, not just this one.')
+              f'derived\n  {provider} credential, except where a tenant sets its own '
+              f'under `tenants:`.')
         picked = _pick_browser()
         entry = {'browser': picked['browser']}
         if picked['chrome_profile']:
             entry['chrome_profile'] = picked['chrome_profile']
-        config.setdefault('credential_defaults', {})[provider] = entry
+        if not isinstance(config.get('credential_defaults'), dict):
+            config['credential_defaults'] = {}  # an emptied key loads as None
+        config['credential_defaults'][provider] = entry
 
     save_config(config)
 
@@ -614,36 +462,19 @@ def _cred_status(config, name, cred_def):
         try:
             from dax_creds.providers.claude import ClaudeProvider
             claude_provider = ClaudeProvider()
-            # Checked per env, not once against a single fixed location: a
-            # claude_tenant_state env's live credential lives in its own
-            # state tree, not the shared `~/.claude/.credentials.json` this
-            # used to check unconditionally — which meant the warning was
-            # checking a path a tenant-state env never writes to at all, and
-            # silently missing the one it actually uses. An env with no
-            # claude_tenant_state (the plain shared `claude` mount, or no
-            # feature info at all) still checks the shared path, since
-            # that's genuinely where its copy would be.
+            # Checked per env, in each env's own state tree: that's where its
+            # live credential sits while a container runs (every env has one
+            # since Claude became baseline, decision 35).
             found = False
             for env_name in envs:
                 proj = config.get('projects', {}).get(env_name, {})
                 tenant = proj.get('tenant')
-                if 'claude_tenant_state' in (proj.get('features') or []) and tenant:
+                if tenant:
                     tree_file = state_tree_path(tenant, env_name) / '.credentials.json'
                     if claude_provider.has_disk_copy(cred_def, disk_locations=[tree_file]):
                         found = True
-                elif claude_provider.has_disk_copy(cred_def):
-                    found = True
-            if not envs and claude_provider.has_disk_copy(cred_def):
-                found = True
             if found:
                 warnings.append('[!] key on disk')
-        except ImportError:
-            pass
-    elif provider == 'auggie':
-        try:
-            from dax_creds.providers.auggie import AuggieProvider
-            if AuggieProvider().has_disk_copy(cred_def):
-                warnings.append('[!] session on disk')
         except ImportError:
             pass
 
@@ -674,7 +505,7 @@ def run_creds_list(config):
     # build reverse map: cred_name -> [project_name, ...]
     cred_envs = {name: [] for name in credentials}
     for proj_name, proj in config.get('projects', {}).items():
-        for c in proj.get('creds', []):
+        for c in proj.get('creds') or []:
             if c in cred_envs:
                 cred_envs[c].append(proj_name)
 
@@ -695,13 +526,13 @@ def run_creds_list(config):
         stored = 'yes' if stored_bool else 'no'
         if provider == 'ssh':
             detail = cred_def.get('key', '')
-        elif provider in ('github', 'claude', 'auggie', 'gmail', 'drive'):
+        elif provider in ('github', 'claude', 'gmail', 'drive'):
             from dax_creds.chrome import browser_label
             detail = browser_label(cred_def.get('browser', 'default'), cred_def.get('chrome_profile'))
         else:
             detail = ''
-        # Only meaningful for a claude credential actually used by a
-        # claude_tenant_state env — that's the only case `dax run` consults
+        # Only meaningful for a claude credential some env actually uses —
+        # that's the only case `dax run` consults
         # the cooldown for at all (see CLAUDE.md's "found live, 2026-10"
         # entry). "stored: yes" above says nothing about this: it is true
         # for a well-formed Keychain blob whose refresh token Anthropic has
@@ -709,9 +540,7 @@ def run_creds_list(config):
         # closes — not a shape check, a "when did the flow last actually run"
         # one, since no local shape check can tell the two apart.
         relogin_col = '-'
-        if provider == 'claude' and any(
-                'claude_tenant_state' in (config.get('projects', {}).get(e, {}).get('features') or [])
-                for e in envs):
+        if provider == 'claude' and envs:
             last = last_login_at(name)
             if last is None:
                 relogin_col = 'never'
@@ -809,6 +638,20 @@ def _home_relative(path):
     except ValueError:
         return str(path)
 
+def _login_browser_note(config, tenant, provider):
+    """Which browser a derived credential's login opens, and why (decision
+    43): the tenant's own setting, credential_defaults, or nothing set."""
+    from dax_creds.chrome import browser_label
+    cred = synthesized_credential(config, provider, tenant)
+    label = browser_label(cred.get('browser', 'default'), cred.get('chrome_profile'))
+    source = credential_settings_source(config, tenant, provider)
+    if source == 'tenant':
+        return f'{label}   (tenant {tenant})'
+    if source == 'default':
+        return f'{label}   (credential_defaults)'
+    return f'{label}   (nothing set)'
+
+
 def run_env_show(config, name):
     """Print one env's full registry entry plus what it resolves to."""
     projects = config.get('projects', {})
@@ -823,41 +666,51 @@ def run_env_show(config, name):
 
     print()
     print(f'  env      {name}')
+    kind, info = env_kind(proj)
+    if kind == 'code':
+        print('  kind     code project')
+    else:
+        if 'type' in info:
+            detail = 'type {}{}'.format(
+                info['type'], f' (skill {info["skill"]})' if 'skill' in info else '')
+        else:
+            detail = 'type unknown: no `type:` in {}/context.md'.format(dir_path or '?')
+        print(f'  kind     substrate-backed process, {detail}')
+        if 'title' in info:
+            print(f'  title    {info["title"]}')
     print(f'  tenant   {tenant or "(unset)"}')
     print(f'  dir      {dir_path}{"" if Path(dir_path).exists() else "   [missing]"}')
     print(f'  image    {proj.get("image", "?")}')
     print(f'  creds    {", ".join(creds) or "(none)"}')
+    # Every env's Claude credential is implied (decision 35), so show the
+    # resolved names rather than leave the convention invisible, and surface
+    # the "no tenant" error here, where it is cheap, rather than at launch.
+    try:
+        for resolved, derived_provider in resolve_credential_names(proj, name, config):
+            if derived_provider:
+                print(f'           -> {resolved}   [implied]' if derived_provider == 'claude'
+                      else f'           -> {resolved}')
+                if resolved not in (config.get('credentials') or {}):
+                    print(f'              login opens {_login_browser_note(config, tenant, derived_provider)}')
+    except ValueError as e:
+        print(f'           -> unresolved: {e.args[0]}')
 
-    # Shown even when empty: whether this env opted into claude_tenant_state is
-    # the difference between its Claude state being its own and being shared with
-    # every other env, and nothing else in this output would reveal it.
+    # Shown even when empty, so it's clear nothing is opted in beyond the
+    # always-on baseline (workdir, dotfiles, webpreview, claude).
     env_features = proj.get('features') or []
-    print(f'  features {", ".join(env_features) or "(none beyond the global list)"}')
+    print(f'  features {", ".join(env_features) or "(none beyond the always-on baseline)"}')
 
+    # A non-empty `mounts:` switches the feature on by itself (decision 40).
     env_mounts = proj.get('mounts') or []
     if env_mounts:
         print(f'  mounts   {", ".join(env_mounts)}')
-        if 'mounts' not in env_features:
-            print('           note: "mounts" feature not in features list above — inactive')
 
-    substrate = proj.get('substrate')
-    if substrate:
-        print(f'  substrate {substrate}')
-        if 'substrate' not in env_features:
-            print('           note: "substrate" feature not in features list above — inactive')
+    # One global substrate, opted into per env (decision 41).
+    if 'substrate' in env_features:
+        global_substrate = config.get('substrate')
+        print(f'  substrate {global_substrate or "NOT SET: add a top-level `substrate: <path>` (dax config)"}'
+              f'{"   (global)" if global_substrate else ""}')
 
-    # A bare provider token in `creds:` is a request for a per-env credential
-    # whose name dax derives. Showing the resolved name keeps the convention
-    # visible rather than magic — and surfaces the "no tenant" error here,
-    # where it is cheap, rather than at launch.
-    if any(c in BARE_PROVIDER_CREDS for c in creds):
-        try:
-            for resolved, derived_provider in resolve_credential_names(proj, name):
-                if derived_provider:
-                    registered = '' if resolved in config.get('credentials', {}) else '   [not registered yet]'
-                    print(f'           -> {resolved}{registered}')
-        except ValueError as e:
-            print(f'           -> unresolved: {e.args[0]}')
 
     container = _container_name_for(dir_path)
     if container:
@@ -868,108 +721,128 @@ def run_env_show(config, name):
         state = state_tree_path(tenant, name)
         if state.exists():
             size, used = _tree_stats(state)
-            suffix = f'   [{_human_size(size)}, last used {_human_age(used)} ago]'
+            age = _human_age(used)
+            if not used:
+                when = 'never used'
+            elif age == 'now':
+                when = 'last used just now'
+            else:
+                when = f'last used {age} ago'
+            suffix = f'   [{_human_size(size)}, {when}]'
         else:
             suffix = '   [not created yet]'
         print(f'  state    {state}{suffix}')
 
-    # Surfaced because these are being removed, so an entry still carrying them
-    # is a migration to-do rather than configuration.
-    legacy = [k for k in ('multi_tenant', 'tenant_subdir') if k in proj]
+    # Anything outside ENV_FIELDS is a typo (ignored) or a retired
+    # multi-tenant key; say which, rather than let it look like configuration.
+    unknown = unknown_env_keys({'projects': {name: proj}}).get(name)
+    if unknown:
+        print()
+        print(f'  note: {describe_unknown_env_keys(unknown)}')
+    legacy = retired_entries(
+        {'projects': {name: proj}, 'credentials': config.get('credentials')}).get(name)
     if legacy:
         print()
-        print(f'  note: entry still carries {", ".join(legacy)} — '
-              'deprecated by the 2026-07-29 redesign')
+        print(f'  note: still lists {", ".join(legacy)} — no longer needed (Claude is '
+              'automatic, `mounts:` switches mounts on by itself, auggie was removed); '
+              'remove them')
     print()
 
 
-def run_env_set(config, name, field, value, valid_features=None):
-    """Set a single field on one env's registry entry. Returns the new value.
-
-    `valid_features` is passed in by the caller rather than imported: the feature
-    functions live in dax.py, which imports this module, and validating against
-    them matters — a per-env feature list is silently ignored when misspelled,
-    the same failure mode a typo'd credential name had.
-    """
-    projects = config.get('projects', {})
-    if name not in projects:
-        known = ', '.join(sorted(projects)) or '(none registered)'
-        raise KeyError(f'no env named {name!r}. Known envs: {known}')
-    if field not in ENV_FIELDS:
-        raise ValueError(
-            f'unknown field {field!r}.\n' + env_field_help())
-
-    if field == 'features':
-        new = [f.strip() for f in value.split(',') if f.strip()]
-        if valid_features is not None:
-            unknown = [f for f in new if f not in valid_features]
-            if unknown:
-                raise ValueError(
-                    'not a dax feature: {} (see `dax features`)'.format(
-                        ', '.join(unknown)))
-    elif field == 'creds':
-        new = [c.strip() for c in value.split(',') if c.strip()]
-        # A bare provider name is not a credential in the registry — it asks
-        # dax to derive one per tenant/project (see BARE_PROVIDER_CREDS).
-        unknown = [c for c in new
-                   if c not in config.get('credentials', {})
-                   and c not in BARE_PROVIDER_CREDS]
-        if unknown:
-            raise ValueError(
-                'not defined in ~/.dax.yaml credentials: {} (or use a bare provider '
-                'name for a per-env credential: {})'.format(
-                    ', '.join(unknown), ', '.join(BARE_PROVIDER_CREDS)))
-    elif field == 'mounts':
-        new = [m.strip() for m in value.split(',') if m.strip()]
-    else:
-        new = value
-
-    old = projects[name].get(field)
-    projects[name][field] = new
-    save_config(config)
-
-    shown_old = ', '.join(old) if isinstance(old, list) else old
-    shown_new = ', '.join(new) if isinstance(new, list) else new
-    print(f'  [{name}] {field}: {shown_old if old is not None else "(unset)"} -> {shown_new}')
-    return new
+ARCHIVE_ONLY_TENANT = '(archive-only)'
 
 
-def run_env_accept_shared_files(config, name):
-    """Force-adopt the host's CLAUDE.md/settings.json/settings.local.json into
-    one env's state tree, resolving a `dax run`-time drift warning.
+def process_info(dir_path):
+    """What a substrate process's own context.md says about it: its
+    frontmatter `type`/`skill` (written by new-process.sh) and its `# Title`
+    heading, as a dict with whichever were found; {} without a readable
+    context.md. Read-only, and only the top of the file."""
+    try:
+        with open(Path(dir_path) / 'context.md', encoding='utf-8') as f:
+            lines = [next(f, '') for _ in range(40)]
+    except (OSError, UnicodeDecodeError):
+        return {}
+    info = {}
+    body = lines
+    if lines and lines[0].strip() == '---':
+        for i, line in enumerate(lines[1:], start=1):
+            if line.strip() == '---':
+                body = lines[i + 1:]
+                break
+            key, sep, value = line.partition(':')
+            if sep and key.strip() in ('type', 'skill') and value.strip():
+                info[key.strip()] = value.strip()
+    for line in body:
+        if line.startswith('# '):
+            info['title'] = line[2:].strip()
+            break
+    return info
 
-    The deliberate escape hatch for `sync_claude_shared_files`'s drift check:
-    that check refuses to guess whether a tree's copy diverged because it's
-    stale or because something meant to change it, so resolving it is always
-    an explicit act, never automatic.
-    """
-    projects = config.get('projects', {})
-    if name not in projects:
-        known = ', '.join(sorted(projects)) or '(none registered)'
-        raise KeyError(f'no env named {name!r}. Known envs: {known}')
 
-    tenant = projects[name].get('tenant')
-    if not tenant:
-        raise ValueError(
-            f'{name!r} has no tenant declared, so it has no state tree — '
-            f'set one with `dax env set {name} tenant <name>`')
+def _left_out_footer(config, hidden_rows, archive_only):
+    """The `dax env list` footer line for what plain listing leaves out, or
+    '': envs in hidden tenants (named in `tenants:` order) and envs that
+    exist only as archives."""
+    parts = []
+    if hidden_rows:
+        n = len(hidden_rows)
+        names = [t for t in (config.get('tenants') or {}) if t in {r[1] for r in hidden_rows}]
+        parts.append('{} env{} hidden in {}'.format(n, '' if n == 1 else 's', ', '.join(names)))
+    if archive_only:
+        n = len(archive_only)
+        if parts:
+            parts.append('{} more exist{} only as archives'.format(n, 's' if n == 1 else ''))
+        else:
+            parts.append('{} more env{} exist{} only as archives'.format(
+                n, '' if n == 1 else 's', 's' if n == 1 else ''))
+    return '  {} (dax env list --all)'.format('; '.join(parts)) if parts else ''
 
-    sync_claude_shared_files(tenant, name, force=True)
-    print(f'  [{name}] CLAUDE.md/settings.json/settings.local.json now match the host.')
+
+def env_kind(proj):
+    """('process', process_info) for a substrate env, else ('code', {})."""
+    if 'substrate' in (proj.get('features') or []):
+        return 'process', process_info(proj.get('dir') or '.')
+    return 'code', {}
 
 
-def run_envs_list(config):
+def _kind_cell(proj):
+    kind, info = env_kind(proj)
+    if kind == 'code':
+        return 'code'
+    return info.get('type', '?')  # any kind but `code` is a process
+
+
+def run_env_list(config, archived=None, missing_backup_dir=None, show_all=False):
+    """`archived` is {env name: time of its newest archive in backup_dir},
+    from `dax env archive`; it adds an `archived` column, 'never' for an env
+    with none. `missing_backup_dir` is a backup_dir that isn't there (an
+    unmounted drive, OneDrive offline): the column shows '?' rather than a
+    misleading 'never'. With neither, there's no column.
+
+    An env that exists only as an archive (no registry entry, no state tree)
+    gets a row under the synthetic tenant `(archive-only)`, and envs in a
+    `hidden: true` tenant get theirs, only with `show_all` (`--all`);
+    otherwise each is just a count in the footer.
+    Archives are never opened, so their recorded tenant isn't read: opening
+    one can make OneDrive download the whole file."""
     # No early return on an empty registry: deregistering every project is
     # precisely when every state tree becomes an orphan, and bailing here would
     # hide them all.
     projects = config.get('projects', {})
     trees = state_trees()
+    show_archived = archived is not None or missing_backup_dir is not None
+
+    def _archived(name):
+        if missing_backup_dir is not None:
+            return '?'
+        when = archived.get(name)
+        return _human_age(when) if when else 'never'
 
     rows = []
     for name, proj in projects.items():
         dir_path = proj.get('dir', '')
         tenant = proj.get('tenant')
-        creds_str = ', '.join(proj.get('creds', [])) or '(none)'
+        creds_str = ', '.join(proj.get('creds') or []) or '(none)'
         dir_exists = Path(dir_path).exists() if dir_path else False
         running = _is_container_running(_container_name_for(dir_path)) if dir_exists else False
 
@@ -982,11 +855,12 @@ def run_envs_list(config):
 
         size, used = _tree_stats(tree) if tree else (None, None)
         status = '*' if running else (' ' if dir_exists else '!')
-        rows.append((status, tenant or '-', name, proj.get('image', '?'),
+        rows.append((status, tenant or '-', name, _kind_cell(proj),
                      _home_relative(dir_path) if dir_path else '-',
                      creds_str,
                      _human_size(size) if tree else '-',
-                     _human_age(used) if tree else '-'))
+                     _human_age(used) if tree else '-')
+                    + ((_archived(name),) if show_archived else ()))
 
     # Anything still on disk has no registry entry pointing at it: the project
     # was deregistered or its tenant renamed, and its transcripts and memory
@@ -994,13 +868,40 @@ def run_envs_list(config):
     for (tenant, name), tree in sorted(trees.items()):
         size, used = _tree_stats(tree)
         rows.append(('?', tenant, name, '-', '-', '-',
-                     _human_size(size), _human_age(used)))
+                     _human_size(size), _human_age(used))
+                    + ((_archived(name),) if show_archived else ()))
+
+    # Envs that survive only as archives: nothing above has a row for them.
+    has_row = set(projects) | {name for _, name in trees}
+    archive_only = sorted(n for n in (archived or {}) if n not in has_row)
+    if show_all:
+        for name in archive_only:
+            rows.append(('a', ARCHIVE_ONLY_TENANT, name, '-', '-', '-', '-', '-',
+                         _archived(name)))
+
+    # Hidden tenants (decision 45) are left out unless --all, and counted.
+    hidden = set() if show_all else hidden_tenants(config)
+    hidden_rows = [r for r in rows if r[1] in hidden]
+    rows = [r for r in rows if r[1] not in hidden]
+    footer = _left_out_footer(config, hidden_rows, [] if show_all else archive_only)
 
     if not rows:
-        print('No environments registered, and no state trees on disk.')
+        print('No environments registered, and no state trees on disk.'
+              if not hidden_rows else 'Every env is in a hidden tenant.')
+        if footer:
+            print(footer.strip() + '.')
         return
 
-    headers = ('', 'tenant', 'name', 'image', 'dir', 'creds', 'state', 'used')
+    # Grouped by tenant, in the order the top-level `tenants:` block lists
+    # them, then alphabetically for any it doesn't; names sorted within each.
+    # Orphaned trees sit with their tenant, and envs with no tenant come last.
+    listed = config.get('tenants') if isinstance(config.get('tenants'), dict) else {}
+    order = {t: i for i, t in enumerate(listed)}
+    rows.sort(key=lambda r: (r[1] == ARCHIVE_ONLY_TENANT, r[1] == '-',
+                             order.get(r[1], len(order)), r[1], r[2]))
+
+    headers = ('', 'tenant', 'name', 'kind', 'dir', 'creds', 'state', 'used') + (
+        ('archived',) if show_archived else ())
     ncols = len(headers)
     widths = [max(len(headers[i]), max(len(r[i]) for r in rows)) for i in range(ncols)]
     widths[5] = min(widths[5], _CREDS_MAX)
@@ -1012,7 +913,9 @@ def run_envs_list(config):
     print()
     print(_line((' ',) + headers[1:]).replace('[ ]', '   ', 1))
     print(_line((' ',) + tuple('-' * widths[i] for i in range(1, ncols))).replace('[ ]', '   ', 1))
-    for row in rows:
+    for i, row in enumerate(rows):
+        if i and row[1] != rows[i - 1][1]:
+            print()
         creds_str = row[5]
         if len(creds_str) > _CREDS_MAX:
             creds_str = creds_str[:_CREDS_MAX - 3] + '...'
@@ -1021,16 +924,25 @@ def run_envs_list(config):
     markers = {r[0] for r in rows}
     legend = [(m, t) for m, t in (('*', 'running'),
                                   ('!', 'directory missing'),
-                                  ('?', 'orphaned state tree — no registry entry'))
+                                  ('?', 'orphaned state tree — no registry entry'),
+                                  ('a', 'archive only — to bring it back, cd into an empty '
+                                        'folder with its name and run `dax env restore`'))
               if m in markers]
     if legend:
         print()
         for marker, text in legend:
             print(f'  [{marker}] {text}')
+    if missing_backup_dir is not None:
+        print()
+        print(f'  archived: backup_dir {_home_relative(str(missing_backup_dir))} not found, '
+              'so archive ages are unknown')
+    if footer:
+        print()
+        print(footer)
     print()
 
 
-def run_creds_remove(config, name, keyring=None):
+def run_creds_remove(config, name, keyring=None, ignore_users=()):
     """Remove a credential from both Keychain and ~/.dax.yaml.
 
     Used to clear only the Keychain secret, leaving the definition in the
@@ -1052,11 +964,12 @@ def run_creds_remove(config, name, keyring=None):
         # would strand the project pointing at it with no error until its next
         # launch. Derived names are exempt — the reference is the *convention*,
         # which survives removal and simply re-mints.
-        referenced = sorted(credential_users(config, name))
+        referenced = sorted(u for u in credential_users(config, name) if u not in ignore_users)
         if referenced:
             raise ValueError(
-                f'{name} is still used by: {", ".join(referenced)}. Detach it first, '
-                f'e.g. `dax env set {referenced[0]} creds <remaining,names>`.')
+                f'{name} is still used by: {", ".join(referenced)}. Detach it first '
+                f'by removing it from `creds:` in ~/.dax.yaml '
+                f'(e.g. under {referenced[0]}).')
 
     kr = keyring or _keyring_module
     if kr is None:
@@ -1085,7 +998,7 @@ def ensure_project_credentials(config, project_creds, keyring=None):
 
     for cred_name, cred_def in project_creds.items():
         provider = cred_def.get('provider')
-        if provider in ('github', 'claude', 'auggie', 'gmail', 'drive'):
+        if provider in ('github', 'claude', 'gmail', 'drive'):
             token = kr.get_password(_KEYCHAIN_SERVICE, cred_name) if kr else None
             if token is None:
                 missing.append(cred_name)
@@ -1098,7 +1011,6 @@ _PROVIDER_FIELDS = {
     'ssh':    ['key'],
     'github': ['browser'],
     'claude': ['browser'],
-    'auggie': ['login_url'],
     'gmail':  ['client_id', 'client_secret', 'scopes', 'browser'],
     'drive':  ['client_id', 'client_secret', 'scopes', 'browser'],
 }
@@ -1125,7 +1037,7 @@ def run_creds_update(config, name=None, _prompter=None, _browser_enumerator=None
             }
             envs_map = {n: [] for n in names}
             for proj_name, proj in config.get('projects', {}).items():
-                for c in proj.get('creds', []):
+                for c in proj.get('creds') or []:
                     if c in envs_map:
                         envs_map[c].append(proj_name)
             choices = [

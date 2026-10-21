@@ -4,7 +4,8 @@
 > "[Redesign 2026-07-29](#redesign-2026-07-29--multi-tenant-abandoned)" first.**
 > The multi-tenant model is abandoned. Decisions 4, 6 (Gate B), 7, 8, and 12
 > below are superseded in whole or in part, and the implemented code they
-> describe is slated for deletion. The decisions are left in place rather than
+> describe was deleted in dax 3.0 (the env-lifecycle consolidation's step 8,
+> `docs/design/2026-10-18-env-bootstrap-consolidation.md`). The decisions are left in place rather than
 > rewritten because the reasoning that produced them — especially decision 4's
 > deletion argument — is what the replacement had to answer, and a reader who
 > only sees the conclusion will re-derive the old model.
@@ -20,6 +21,18 @@ mount) and the multi-day refresh-token rotation soak.
 **Date:** 2026-07-27
 **Motivation:** hygiene today; anticipated contractual obligation later; existing
 obligation to delete customer data when a relationship ends
+
+> **Historical record only, from here to the "Redesign 2026-07-29" heading.**
+> The Problem, Verified findings, and decisions 1–12 below describe the
+> original multi-tenant design. Its code (`dax_creds/tenant.py`, `dax tenant`
+> / `dax tenants`, `.dax-tenant` files, `dax-creds resolve-tenant`, the
+> `multi_tenant`/`tenant_subdir` keys) was deleted in the env-lifecycle
+> consolidation's step 8 (2026-10-20; see
+> `docs/design/2026-10-18-env-bootstrap-consolidation.md`, decisions 19 and
+> 24). Kept for the reasoning, not as a description of current code. The
+> "Redesign 2026-07-29" section onward still describes the live
+> architecture, with `claude_tenant_state` since renamed to the always-on
+> `claude` feature (decision 35 there).
 
 ## Problem
 
@@ -318,7 +331,8 @@ today, and YAGNI argues against building for a second that may never exist.
 
 > **Superseded (redesign A/E).** Interactive classification existed to resolve
 > undeclared subdirectories inside a multi-tenant repo. With one project per
-> repo there are none, and this machinery is slated for deletion.
+> repo there are none, and this machinery was deleted in dax 3.0
+> (consolidation step 8).
 
 **Superseded 2026-07-28.** The original design routed anything undeclared to
 `unattributed/<reponame>/` — a real tenant slot, warn, proceed. Rejected once

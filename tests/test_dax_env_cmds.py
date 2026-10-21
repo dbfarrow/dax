@@ -1,16 +1,13 @@
-"""Tests for `dax env show` / `dax env set`.
-
-These exist so changing one field on a registered env doesn't require walking
-`dax init`'s full wizard (image -> credential checkbox -> new-credential loop)
-just to edit a single string.
+"""Tests for `dax env show` and the unknown-key check (`dax env set` and its
+`run_env_set` helper are gone: env fields are hand-edited in ~/.dax.yaml).
 """
 import pytest
 
 from dax_creds.config import (
-    ENV_FIELDS, env_field_help, load_dax_config, state_tree_path,
-    sync_claude_shared_files,
+    load_dax_config, state_tree_path,
+    unknown_env_keys, describe_unknown_env_keys,
 )
-from dax_creds.init import run_env_accept_shared_files, run_env_set, run_env_show
+from dax_creds.init import run_env_show, save_config
 
 
 CONFIG = """\
@@ -45,62 +42,13 @@ def home(tmp_path, monkeypatch):
     (tmp_path / '.dax.yaml').write_text(CONFIG)
     return tmp_path
 
-
-# --- set -------------------------------------------------------------------
-
-def test_set_tenant_persists_to_disk(home):
-    run_env_set(load_dax_config(), 'fabric', 'tenant', 'personal')
-
-    assert load_dax_config()['projects']['fabric']['tenant'] == 'personal'
-
-
-def test_set_preserves_comments(home):
-    """The whole point of the ruamel prerequisite — `set` is a routine writer."""
-    run_env_set(load_dax_config(), 'fabric', 'tenant', 'personal')
-
-    written = (home / '.dax.yaml').read_text()
-    assert '#- claude_tenant_state' in written
-    assert '# hand-maintained' in written
-
-
-def test_set_creds_splits_a_comma_list(home):
-    run_env_set(load_dax_config(), 'fabric', 'creds',
-                'claude-personal-fabric, github-dfarrow')
-
-    assert load_dax_config()['projects']['fabric']['creds'] == [
-        'claude-personal-fabric', 'github-dfarrow']
-
-
-def test_set_creds_rejects_undefined_credential(home):
-    with pytest.raises(ValueError, match='bogus'):
-        run_env_set(load_dax_config(), 'fabric', 'creds', 'claude-personal-fabric,bogus')
-
-    assert 'bogus' not in (home / '.dax.yaml').read_text()
-
-
-def test_set_unknown_env_names_the_known_ones(home):
-    with pytest.raises(KeyError) as excinfo:
-        run_env_set(load_dax_config(), 'nope', 'tenant', 'x')
-
-    assert 'fabric' in excinfo.value.args[0] and 'legacy' in excinfo.value.args[0]
-
-
-def test_set_unknown_field_lists_valid_fields(home):
-    with pytest.raises(ValueError) as excinfo:
-        run_env_set(load_dax_config(), 'fabric', 'nonsense', 'x')
-
-    message = excinfo.value.args[0]
-    for field in ENV_FIELDS:
-        assert field in message
-
-
-def test_set_does_not_write_when_it_rejects(home):
-    before = (home / '.dax.yaml').read_text()
-
-    with pytest.raises(ValueError):
-        run_env_set(load_dax_config(), 'fabric', 'nonsense', 'x')
-
-    assert (home / '.dax.yaml').read_text() == before
+def _set(config, name, field, value, valid_features=None):
+    """Hand-edit one field of an env entry, the way the user now does in
+    ~/.dax.yaml; list fields take a comma-separated string."""
+    if field in ('creds', 'features', 'mounts'):
+        value = [v.strip() for v in value.split(',') if v.strip()]
+    config['projects'][name][field] = value
+    save_config(config)
 
 
 # --- show ------------------------------------------------------------------
@@ -113,7 +61,7 @@ def test_show_reports_unset_tenant(home, capsys):
 
 def test_show_reports_tenant_and_state_path(home, capsys):
     config = load_dax_config()
-    run_env_set(config, 'fabric', 'tenant', 'personal')
+    _set(config, 'fabric', 'tenant', 'personal')
     run_env_show(load_dax_config(), 'fabric')
 
     out = capsys.readouterr().out
@@ -122,12 +70,45 @@ def test_show_reports_tenant_and_state_path(home, capsys):
     assert 'not created yet' in out
 
 
-def test_show_flags_deprecated_multi_tenant_fields(home, capsys):
+def test_show_flags_retired_multi_tenant_fields_as_retired(home, capsys):
     run_env_show(load_dax_config(), 'legacy')
 
     out = capsys.readouterr().out
-    assert 'multi_tenant' in out and 'tenant_subdir' in out
-    assert 'deprecated' in out
+    assert 'retired key(s) multi_tenant, tenant_subdir — ignored; remove them' in out
+
+
+def test_show_flags_a_typo_d_key(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['tennant'] = 'personal'
+
+    run_env_show(config, 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'unknown key(s) tennant — ignored (typo?)' in out
+
+
+def test_show_is_silent_about_keys_when_all_are_known(home, capsys):
+    run_env_show(load_dax_config(), 'fabric')
+
+    assert 'unknown key' not in capsys.readouterr().out
+
+
+def test_unknown_env_keys_reports_every_env_with_one():
+    config = {'projects': {
+        'clean': {'dir': '/x', 'image': 'i', 'creds': [], 'tenant': 't'},
+        'typo': {'dir': '/y', 'feautres': ['mounts']},
+        'legacy': {'dir': '/z', 'multi_tenant': True, 'tenant_subdir': 'p'},
+    }}
+
+    assert unknown_env_keys(config) == {
+        'typo': ['feautres'],
+        'legacy': ['multi_tenant', 'tenant_subdir'],
+    }
+
+
+def test_unknown_env_keys_handles_no_projects():
+    assert unknown_env_keys({}) == {}
+    assert unknown_env_keys({'projects': None}) == {}
 
 
 def test_show_unknown_env_raises(home):
@@ -137,15 +118,9 @@ def test_show_unknown_env_raises(home):
 
 # --- bare provider tokens --------------------------------------------------
 
-def test_set_accepts_a_bare_provider_token(home):
-    run_env_set(load_dax_config(), 'fabric', 'creds', 'claude,github-dfarrow')
-
-    assert load_dax_config()['projects']['fabric']['creds'] == ['claude', 'github-dfarrow']
-
-
 def test_show_resolves_a_bare_token_to_the_derived_name(home, capsys):
-    run_env_set(load_dax_config(), 'fabric', 'tenant', 'personal')
-    run_env_set(load_dax_config(), 'fabric', 'creds', 'claude')
+    _set(load_dax_config(), 'fabric', 'tenant', 'personal')
+    _set(load_dax_config(), 'fabric', 'creds', 'claude')
     capsys.readouterr()  # drop the `set` echoes
 
     run_env_show(load_dax_config(), 'fabric')
@@ -157,106 +132,29 @@ def test_show_resolves_a_bare_token_to_the_derived_name(home, capsys):
 
 
 def test_show_flags_a_derived_name_that_is_not_registered(home, capsys):
-    run_env_set(load_dax_config(), 'fabric', 'tenant', 'ysecurity')
-    run_env_set(load_dax_config(), 'fabric', 'creds', 'claude')
+    _set(load_dax_config(), 'fabric', 'tenant', 'ysecurity')
+    _set(load_dax_config(), 'fabric', 'creds', 'claude')
     capsys.readouterr()
 
     run_env_show(load_dax_config(), 'fabric')
 
     out = capsys.readouterr().out
-    assert '-> claude-ysecurity-fabric' in out
-    assert 'not registered yet' in out
+    assert '-> claude-ysecurity-fabric   [implied]' in out
 
 
 def test_show_explains_a_bare_token_that_cannot_resolve(home, capsys):
     """No tenant means no derivable name — say so here, not at launch."""
-    run_env_set(load_dax_config(), 'fabric', 'creds', 'claude')
+    _set(load_dax_config(), 'fabric', 'creds', 'claude')
     run_env_show(load_dax_config(), 'fabric')
 
     out = capsys.readouterr().out
     assert 'unresolved' in out and 'no tenant' in out
 
 
-# --- field help ------------------------------------------------------------
-
-def test_field_help_documents_every_settable_field():
-    text = env_field_help()
-    for field, description in ENV_FIELDS.items():
-        assert field in text and description in text
-
-
-# --- env set features -------------------------------------------------------
-#
-# Added once per-env features became load-bearing: `claude_tenant_state` is opted
-# into per env, and switching it on means moving `claude` off the global list and
-# onto the envs that still want the shared mount — four edits, which is YAML
-# surgery without this.
-
-def test_env_set_features_replaces_the_list(home):
-    config = {'projects': {'fabric': {'dir': '/repos/fabric'}}}
-
-    run_env_set(config, 'fabric', 'features', 'claude_tenant_state',
-                valid_features={'claude', 'claude_tenant_state', 'ssh'})
-
-    assert config['projects']['fabric']['features'] == ['claude_tenant_state']
-
-
-def test_env_set_features_accepts_a_comma_separated_list(home):
-    config = {'projects': {'fabric': {'dir': '/repos/fabric'}}}
-
-    run_env_set(config, 'fabric', 'features', 'claude, ssh',
-                valid_features={'claude', 'claude_tenant_state', 'ssh'})
-
-    assert config['projects']['fabric']['features'] == ['claude', 'ssh']
-
-
-def test_env_set_features_rejects_a_misspelled_feature(home):
-    """A misspelled feature in a config is silently ignored at launch — the same
-    failure mode a typo'd credential name had, where `claud-fre` sat unused for
-    weeks."""
-    config = {'projects': {'fabric': {'dir': '/repos/fabric'}}}
-
-    with pytest.raises(ValueError) as excinfo:
-        run_env_set(config, 'fabric', 'features', 'claude_tenant_stat',
-                    valid_features={'claude', 'claude_tenant_state'})
-
-    assert 'not a dax feature' in excinfo.value.args[0]
-    assert 'features' not in config['projects']['fabric']
-
-
-def test_env_set_features_validation_is_skipped_without_a_list(home):
-    """The valid set comes from dax.py, so callers that have none still work."""
-    config = {'projects': {'fabric': {'dir': '/repos/fabric'}}}
-
-    run_env_set(config, 'fabric', 'features', 'anything')
-
-    assert config['projects']['fabric']['features'] == ['anything']
-
-
-def test_features_is_a_documented_field():
-    assert 'features' in ENV_FIELDS
-    assert 'features' in env_field_help()
-
-
-# --- env set mounts ----------------------------------------------------------
-#
-# For migrating discernment's processes: each process becomes its own env, and
-# needs the discernment sidecar repo mounted alongside its own — as a sibling
-# under $HOME (feature_mounts), not nested inside another mount.
-
-def test_env_set_mounts_splits_a_comma_list(home):
-    run_env_set(load_dax_config(), 'fabric', 'mounts', '~/discernment, ~/other')
-
-    assert load_dax_config()['projects']['fabric']['mounts'] == ['~/discernment', '~/other']
-
-
-def test_mounts_is_a_documented_field():
-    assert 'mounts' in ENV_FIELDS
-    assert 'mounts' in env_field_help()
-
+# --- mounts ----------------------------------------------------------------
 
 def test_show_lists_mounts_when_set(home, capsys):
-    run_env_set(load_dax_config(), 'fabric', 'mounts', '~/discernment')
+    _set(load_dax_config(), 'fabric', 'mounts', '~/discernment')
     capsys.readouterr()
 
     run_env_show(load_dax_config(), 'fabric')
@@ -268,78 +166,64 @@ def test_show_lists_mounts_when_set(home, capsys):
 def test_show_omits_mounts_line_when_unset(home, capsys):
     run_env_show(load_dax_config(), 'fabric')
 
-    assert 'mounts' not in capsys.readouterr().out
+    assert '  mounts   ' not in capsys.readouterr().out
 
 
-def test_show_flags_mounts_set_without_the_feature_active(home, capsys):
-    run_env_set(load_dax_config(), 'fabric', 'mounts', '~/discernment')
+def test_show_has_no_mounts_feature_note(home, capsys):
+    """A non-empty `mounts:` switches the feature on by itself (decision 40),
+    so there's no "inactive" state to flag."""
+    _set(load_dax_config(), 'fabric', 'mounts', '~/discernment')
     capsys.readouterr()
 
     run_env_show(load_dax_config(), 'fabric')
 
-    out = capsys.readouterr().out
-    assert 'inactive' in out
+    assert 'inactive' not in capsys.readouterr().out
 
 
-def test_show_does_not_flag_mounts_when_the_feature_is_active(home, capsys):
+# --- substrate (one global path, decision 41) ---------------------------------
+
+def test_show_displays_the_global_substrate_for_an_env_that_opts_in(home, capsys):
     config = load_dax_config()
-    run_env_set(config, 'fabric', 'mounts', '~/discernment')
-    run_env_set(config, 'fabric', 'features', 'claude,mounts')
-    capsys.readouterr()
+    config['substrate'] = '~/virgil'
+    config['projects']['fabric']['features'] = ['substrate']
 
-    run_env_show(load_dax_config(), 'fabric')
+    run_env_show(config, 'fabric')
 
-    out = capsys.readouterr().out
-    assert 'inactive' not in out
+    assert 'substrate ~/virgil   (global)' in capsys.readouterr().out
 
 
-# --- env set substrate -------------------------------------------------------
-#
-# A single path, unlike the generic `mounts` list: dax needs to know
-# specifically which mount holds shared/wire.sh and shared/new-process.sh, not
-# just that something extra is mounted (docs/design/VALIDATION.md).
+def test_show_says_when_the_global_substrate_is_missing(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['features'] = ['substrate']
 
-def test_env_set_substrate(home):
-    run_env_set(load_dax_config(), 'fabric', 'substrate', '~/virgil')
+    run_env_show(config, 'fabric')
 
-    assert load_dax_config()['projects']['fabric']['substrate'] == '~/virgil'
+    assert 'NOT SET' in capsys.readouterr().out
 
 
-def test_substrate_is_a_documented_field():
-    assert 'substrate' in ENV_FIELDS
-    assert 'substrate' in env_field_help()
+def test_show_omits_substrate_when_the_env_does_not_opt_in(home, capsys):
+    config = load_dax_config()
+    config['substrate'] = '~/virgil'
+
+    run_env_show(config, 'fabric')
+
+    assert '~/virgil' not in capsys.readouterr().out
 
 
-def test_show_lists_substrate_when_set(home, capsys):
-    run_env_set(load_dax_config(), 'fabric', 'substrate', '~/virgil')
-    capsys.readouterr()
+def test_a_per_env_substrate_is_reported_as_retired(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['substrate'] = '~/old'
 
-    run_env_show(load_dax_config(), 'fabric')
-
-    out = capsys.readouterr().out
-    assert '~/virgil' in out
-
-
-def test_show_omits_substrate_line_when_unset(home, capsys):
-    run_env_show(load_dax_config(), 'fabric')
-
-    assert 'substrate' not in capsys.readouterr().out
-
-
-def test_show_flags_substrate_set_without_the_feature_active(home, capsys):
-    run_env_set(load_dax_config(), 'fabric', 'substrate', '~/virgil')
-    capsys.readouterr()
-
-    run_env_show(load_dax_config(), 'fabric')
+    run_env_show(config, 'fabric')
 
     out = capsys.readouterr().out
-    assert 'inactive' in out
+    assert 'retired key substrate — ignored; move its path to a top-level `substrate:`' in out
 
 
 def test_show_does_not_flag_substrate_when_the_feature_is_active(home, capsys):
     config = load_dax_config()
-    run_env_set(config, 'fabric', 'substrate', '~/virgil')
-    run_env_set(config, 'fabric', 'features', 'claude,substrate')
+    _set(config, 'fabric', 'substrate', '~/virgil')
+    _set(config, 'fabric', 'features', 'claude,substrate')
     capsys.readouterr()
 
     run_env_show(load_dax_config(), 'fabric')
@@ -348,31 +232,63 @@ def test_show_does_not_flag_substrate_when_the_feature_is_active(home, capsys):
     assert 'inactive' not in out
 
 
-# --- env accept-shared-files -------------------------------------------------
+# --- key descriptions ------------------------------------------------------
+
+def test_describe_unknown_env_keys_separates_typos_from_retired_keys():
+    assert describe_unknown_env_keys(['tennant']) == 'unknown key(s) tennant — ignored (typo?)'
+    assert describe_unknown_env_keys(['multi_tenant']) == (
+        'retired key(s) multi_tenant — ignored; remove them')
+    assert describe_unknown_env_keys(['tennant', 'tenant_subdir']) == (
+        'unknown key(s) tennant — ignored (typo?); retired key(s) tenant_subdir — ignored; remove them')
+
+
+def test_show_notes_old_claude_entries(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['features'] = ['claude_tenant_state']
+    config['projects']['fabric']['creds'] = ['claude']
+    config['projects']['fabric']['tenant'] = 'personal'
+
+    run_env_show(config, 'fabric')
+
+    out = capsys.readouterr().out
+    assert 'still lists claude_tenant_state (features), claude (creds)' in out
+
+
+def test_show_displays_the_implied_credential_with_nothing_in_creds(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['creds'] = []
+    config['projects']['fabric']['tenant'] = 'personal'
+
+    run_env_show(config, 'fabric')
+
+    assert '-> claude-personal-fabric   [implied]' in capsys.readouterr().out
+
+
+# --- an empty list key ------------------------------------------------------
 #
-# The escape hatch for the drift warning `sync_claude_shared_files` prints at
-# `dax run` time: resolving it is always an explicit act, never automatic.
+# Hand-editing can leave `creds:` with nothing after it, which YAML reads as
+# null; every reader treats that like a missing key.
 
-def test_accept_shared_files_requires_a_tenant(home):
-    with pytest.raises(ValueError, match='no tenant'):
-        run_env_accept_shared_files(load_dax_config(), 'fabric')
+def test_an_empty_creds_key_is_read_as_no_creds(home, capsys):
+    from dax_creds.init import run_creds_list, run_env_list
+    config = load_dax_config()
+    config['projects']['fabric']['creds'] = None
+    config['projects']['fabric']['tenant'] = 'personal'
+
+    run_env_list(config)
+    run_creds_list(config)
+    run_env_show(config, 'fabric')
+
+    assert '-> claude-personal-fabric   [implied]' in capsys.readouterr().out
 
 
-def test_accept_shared_files_unknown_env_raises(home):
-    with pytest.raises(KeyError, match='fabric'):
-        run_env_accept_shared_files(load_dax_config(), 'nope')
+def test_show_says_never_used_for_an_empty_state_tree(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['tenant'] = 'personal'
+    state_tree_path('personal', 'fabric').mkdir(parents=True)
 
+    run_env_show(config, 'fabric')
 
-def test_accept_shared_files_adopts_the_host_version_over_drift(home):
-    run_env_set(load_dax_config(), 'fabric', 'tenant', 'personal')
-    (home / '.claude').mkdir()
-    (home / '.claude' / 'CLAUDE.md').write_text('v1')
-    sync_claude_shared_files('personal', 'fabric')
-
-    tree_file = state_tree_path('personal', 'fabric') / 'CLAUDE.md'
-    tree_file.write_text('edited independently in a container')
-    (home / '.claude' / 'CLAUDE.md').write_text('v2')
-
-    run_env_accept_shared_files(load_dax_config(), 'fabric')
-
-    assert tree_file.read_text() == 'v2'
+    out = capsys.readouterr().out
+    assert '[0B, never used]' in out
+    assert '- ago' not in out
