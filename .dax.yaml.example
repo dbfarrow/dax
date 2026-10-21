@@ -14,9 +14,9 @@ image: dax:latest
 #   timezone: America/New_York
 #   relogin_cooldown_hours: 24
 
-# workdir, dotfiles, and webpreview are always on — no top-level features:
-# list needed for them. Everything else (claude, claude_tenant_state, auggie,
-# github, mounts, substrate, auto_claude, ...) is opt-in per project: add it
+# workdir, dotfiles, webpreview, and claude are always on — no top-level
+# features: list needed for them. Everything else (github, mounts, substrate,
+# auto_claude, ...) is opt-in per project: add it
 # to that project's own `features:` list, a cwd-local .dax.yaml, or pass -f.
 # e.g.:
 #
@@ -36,9 +36,6 @@ image: dax:latest
 # claude closes the window, ends the (only) tmux session, ends the
 # container's foreground process, and (docker run --rm) tears the container
 # down. No shell left behind and nothing to reattach to, by design.
-
-auggiedir:
-  mount: ~/.augment
 
 githubdir:
   mount: ~/.config/gh

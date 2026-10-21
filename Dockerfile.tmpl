@@ -53,11 +53,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     && apt-get update \
     && apt-get install -y gh
 
-# install Node.js and Claude CLI and auggie
+# install Node.js and Claude CLI
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y nodejs \
-    && npm install -g @anthropic-ai/claude-code \
-    && npm install -g @augmentcode/auggie
+    && npm install -g @anthropic-ai/claude-code
 
 # install markdown renderer for dax-preview, and MS Office doc support
 RUN pip3 install --break-system-packages markdown pyyaml ruamel.yaml openpyxl python-docx python-pptx pandas pytest
@@ -437,10 +436,6 @@ RUN chmod +x /usr/bin/gh
 RUN mv /usr/bin/claude /usr/bin/claude-real
 COPY dax_creds/wrappers/claude /usr/bin/claude
 RUN chmod +x /usr/bin/claude
-
-RUN mv /usr/bin/auggie /usr/bin/auggie-real
-COPY dax_creds/wrappers/auggie /usr/bin/auggie
-RUN chmod +x /usr/bin/auggie
 
 COPY dax_creds/wrappers/dax-creds-open-url /usr/bin/dax-creds-open-url
 RUN chmod +x /usr/bin/dax-creds-open-url

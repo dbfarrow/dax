@@ -120,30 +120,29 @@ def _merge_features(base, extra):
 
     Every per-env feature source (an env's own `features:`, a cwd-local
     .dax.yaml, `-f`) goes through here, so a feature listed twice is applied
-    once (a duplicate mount would fail the launch), and the retired names
-    `claude`/`claude_tenant_state` are dropped: Claude is baseline
-    (decisions 35, 36).
+    once (a duplicate mount would fail the launch), and retired names are
+    dropped: `claude`/`claude_tenant_state` (Claude is baseline, decisions
+    35, 36) and `auggie` (removed, decision 39).
     """
-    from dax_creds.config import LEGACY_CLAUDE_FEATURES
+    from dax_creds.config import RETIRED_FEATURES
     merged = list(base)
     for feature in extra or []:
         feature = feature.strip() if isinstance(feature, str) else feature
         if not feature or feature in merged:
             continue
-        if feature in LEGACY_CLAUDE_FEATURES:
-            continue  # `claude` is already in base (baseline); the rest are retired
+        if feature in RETIRED_FEATURES:
+            continue  # `claude` is already in base (baseline); the others are retired
         merged.append(feature)
     return merged
 
 
-def _warn_legacy_claude_entries(found):
-    """One line per env still listing a Claude feature or credential
-    (decision 36): redundant since Claude became automatic, ignored, and
-    reported until hand-removed."""
+def _warn_retired_entries(found):
+    """One line per env still listing a feature or credential dax no longer
+    uses (decisions 36, 39): ignored, and reported until hand-removed."""
     for env_name, entries in found.items():
-        dax_print('[!] ~/.dax.yaml: env {!r} still lists {} — Claude is automatic now; '
-                  'remove {}'.format(env_name, ', '.join(entries),
-                                     'it' if len(entries) == 1 else 'them'))
+        dax_print('[!] ~/.dax.yaml: env {!r} still lists {} — no longer used (Claude is '
+                  'automatic, auggie was removed); remove {}'.format(
+                      env_name, ', '.join(entries), 'it' if len(entries) == 1 else 'them'))
 
 
 def _exit_missing_config():
@@ -348,10 +347,6 @@ def feature_claude(config):
     sync_claude_shared_files(tenant, project_name)
 
     return opts
-
-
-def feature_auggie(config):
-    return _add_volume(config, 'auggiedir')
 
 
 def feature_github(config):
@@ -974,7 +969,7 @@ def cmd_run(args):
         from dax_creds.config import (
             load_dax_config, find_named_project_by_dir, find_enclosing_project,
             get_project_credentials, unknown_env_keys, describe_unknown_env_keys,
-            legacy_claude_entries,
+            retired_entries,
         )
         from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
         dax_config = load_dax_config()
@@ -984,7 +979,7 @@ def cmd_run(args):
         for _env, _keys in unknown_env_keys(dax_config).items():
             dax_print('[!] ~/.dax.yaml: env {!r} has {}'.format(
                 _env, describe_unknown_env_keys(_keys)))
-        _warn_legacy_claude_entries(legacy_claude_entries(dax_config))
+        _warn_retired_entries(retired_entries(dax_config))
         try:
             project_name, project = find_named_project_by_dir(dax_config, Path.cwd())
         except KeyError:
@@ -1258,30 +1253,6 @@ _LOGIN_PROVIDERS = {
 }
 
 
-def _cmd_creds_login_auggie(cred_name, cred_def, config):
-    login_url = cred_def.get('login_url', 'https://auth.augmentcode.com')
-    dax_print(f'[+] dax creds login: auggie OAuth login URL: {login_url}')
-    dax_print('')
-    dax_print('    Auggie uses a localhost OAuth callback that cannot be automatically')
-    dax_print('    brokered across the container/host boundary. To authenticate manually:')
-    dax_print('')
-    dax_print('    1. Pick a free port, e.g. 9876.')
-    dax_print('    2. In one terminal, start auggie in a container and note the callback port:')
-    dax_print(f'         docker run -it --rm --platform=linux/amd64 \\')
-    dax_print(f'           -p 9876:9876 \\')
-    dax_print(f'           -v ~/.augment:/home/{_get_username()}/.augment \\')
-    dax_print(f'           dax:latest auggie --login-url {login_url} login --headless')
-    dax_print('    3. When auggie prints its callback URL (e.g. http://127.0.0.1:35917/callback),')
-    dax_print('       in another terminal start socat to forward your chosen port to it:')
-    dax_print('         docker exec <container> socat TCP-LISTEN:9876,fork TCP:127.0.0.1:35917')
-    dax_print('    4. In your browser, open the auth URL but replace the redirect_uri port')
-    dax_print('       with your chosen port (9876).  Complete login.')
-    dax_print('    5. Once ~/.augment/session.json is written, run:')
-    dax_print(f'         dax creds add {cred_name}')
-    dax_print('')
-    _post_login_import(cred_name, cred_def, config, 'auggie')
-
-
 def _cmd_creds_login_google(cred_name, cred_def, config):
     from dax_creds.providers.google import GoogleProvider
     provider = GoogleProvider(cred_def['provider'])
@@ -1340,10 +1311,6 @@ def cmd_creds_login(cred_name, config):
     cred_def = _login_credential_def(config, cred_name)
 
     provider = cred_def.get('provider')
-    if provider == 'auggie':
-        _cmd_creds_login_auggie(cred_name, cred_def, config)
-        return
-
     if provider in ('gmail', 'drive'):
         _cmd_creds_login_google(cred_name, cred_def, config)
         return
@@ -1467,9 +1434,6 @@ def _disk_token_for(cred_def, provider):
         if provider == 'claude':
             from dax_creds.providers.claude import ClaudeProvider
             return ClaudeProvider().import_from_disk(cred_def)
-        if provider == 'auggie':
-            from dax_creds.providers.auggie import AuggieProvider
-            return AuggieProvider().import_from_disk(cred_def)
     except Exception:
         pass
     return None
@@ -1533,17 +1497,6 @@ def _post_login_import(cred_name, cred_def, config, provider, before=None,
             dax_print(f'[+] {cred_name}: token imported to Keychain.')
         else:
             dax_print(f'[!] {cred_name}: no token found after auth flow.')
-    elif provider == 'auggie':
-        from dax_creds.providers.auggie import AuggieProvider
-        provider_obj = AuggieProvider()
-        token = provider_obj.import_from_disk(cred_def)
-        if token:
-            provider_obj.store(cred_name, token)
-            dax_print(f'[+] {cred_name}: session imported to Keychain.')
-            _clear_auggie_session()
-        else:
-            dax_print(f'[!] {cred_name}: no session found after auth flow.')
-
 
 def _clear_gh_hosts_token():
     hosts_file = Path.home() / '.config' / 'gh' / 'hosts.yml'
@@ -1568,17 +1521,6 @@ def _clear_gh_hosts_token():
             dax_print('[-]   token removed from ~/.config/gh/hosts.yml')
     except Exception as e:
         dax_print(f'[!] could not clear hosts.yml: {e}')
-
-
-def _clear_auggie_session():
-    session_file = Path.home() / '.augment' / 'session.json'
-    if not session_file.exists():
-        return
-    try:
-        session_file.unlink()
-        dax_print('[-]   session removed from ~/.augment/session.json')
-    except Exception as e:
-        dax_print(f'[!] could not clear ~/.augment/session.json: {e}')
 
 
 def cmd_creds(args):
@@ -1747,7 +1689,7 @@ def cmd_config(args):
     """
     from dax_creds.config import (
         load_dax_config, unknown_env_keys, describe_unknown_env_keys,
-        legacy_claude_entries,
+        retired_entries,
     )
     from dax_creds.init import _q_confirm
 
@@ -1808,7 +1750,7 @@ def cmd_config(args):
     dax_print('[+] ~/.dax.yaml saved (previous version: {})'.format(prev))
     for env_name, keys in unknown_env_keys(config).items():
         dax_print('[!] env {!r} has {}'.format(env_name, describe_unknown_env_keys(keys)))
-    _warn_legacy_claude_entries(legacy_claude_entries(config))
+    _warn_retired_entries(retired_entries(config))
 
 
 def _known_tenant_names():
@@ -2934,26 +2876,27 @@ def _restored_entry(config, manifest, env_dir, tenant):
     - Features dax no longer has are written as commented-out `#- <name>`
       list entries, matching ~/.dax.yaml's own toggle convention, so the
       record of what the env used to have survives without being active.
-    - Claude entries are dropped silently, not commented out: the archived
+    - Retired entries are dropped silently, not commented out: the archived
       `claude`/`claude_tenant_state` features and any Claude credential in
       `creds:` are what Claude being baseline with an implied credential
-      replaced (decisions 35, 36), so nothing is lost. This also covers a
+      replaced (decisions 35, 36), and `auggie` was removed (decision 39),
+      so nothing is lost. This also covers a
       renamed restore: the copy's implied name follows its own folder name,
       so it never shares the original's grant (decision 33).
     """
-    from dax_creds.config import LEGACY_CLAUDE_FEATURES, is_claude_credential
+    from dax_creds.config import RETIRED_FEATURES, is_retired_credential
     from ruamel.yaml.comments import CommentedMap, CommentedSeq
     from ruamel.yaml.error import CommentMark
     from ruamel.yaml.tokens import CommentToken
 
     known_features = _feature_names()
-    features = [f for f in (manifest.get('features') or []) if f not in LEGACY_CLAUDE_FEATURES]
+    features = [f for f in (manifest.get('features') or []) if f not in RETIRED_FEATURES]
     kept = [f for f in features if f in known_features]
     dropped = [f for f in features if f not in known_features]
 
     creds = []
     for cred in manifest.get('creds') or []:
-        if not is_claude_credential(config, cred) and cred not in creds:
+        if not is_retired_credential(config, cred) and cred not in creds:
             creds.append(cred)
 
     entry = CommentedMap()

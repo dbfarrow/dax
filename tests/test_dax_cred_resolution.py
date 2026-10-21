@@ -215,8 +215,8 @@ def test_an_env_without_a_tenant_has_no_resolvable_credentials():
 
 # --- old Claude entries (decision 36) ----------------------------------------
 
-def test_legacy_claude_entries_finds_features_and_creds():
-    from dax_creds.config import legacy_claude_entries
+def test_retired_entries_finds_features_and_creds():
+    from dax_creds.config import retired_entries
     config = {
         'credentials': {'claude-fre': {'provider': 'claude'}, 'gh': {'provider': 'github'}},
         'projects': {
@@ -226,7 +226,7 @@ def test_legacy_claude_entries_finds_features_and_creds():
         },
     }
 
-    assert legacy_claude_entries(config) == {
+    assert retired_entries(config) == {
         'a': ['claude_tenant_state (features)', 'claude (creds)'],
         'b': ['claude (features)', 'claude-fre (creds)'],
     }

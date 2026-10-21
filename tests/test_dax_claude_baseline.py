@@ -128,7 +128,7 @@ def test_envs_still_listing_claude_entries_are_reported(tmp_path, monkeypatch, c
 
     out = capsys.readouterr().out
     assert ("env 'fabric' still lists claude_tenant_state (features), claude (creds) "
-            "— Claude is automatic now; remove them") in out
+            "— no longer used (Claude is automatic, auggie was removed); remove them") in out
     assert "env 'ot' still lists claude-ysec-ot (creds)" in out
     assert 'gh (creds)' not in out
 

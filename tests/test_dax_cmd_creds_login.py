@@ -3,7 +3,7 @@ command resolves, and `_post_login_import`, the step that runs right after the
 browser auth flow completes.
 
 Covers the claude branch specifically, since it was just brought in line
-with the existing github/auggie behavior (read the token the auth flow just
+with the existing github behavior (read the token the auth flow just
 wrote to disk, store it in Keychain) rather than only printing a manual
 `dax creds add` hint.
 """

@@ -7,7 +7,7 @@ from dax_creds.config import (
     BARE_PROVIDER_CREDS, ENV_FIELDS, credential_names_for_provider,
     credential_users, derived_credentials,
     last_login_at, relogin_due, resolve_credential_names, state_tree_path,
-    state_trees, unknown_env_keys, legacy_claude_entries,
+    state_trees, unknown_env_keys, retired_entries,
     describe_unknown_env_keys,
 )
 from dax_creds.providers.ssh import SshProvider
@@ -158,14 +158,6 @@ def _define_credential(cred_name, provider_name, browser_enumerator=None):
     if provider_name == 'ssh':
         key_path = _prompt('Key file path', default='~/.ssh/id_ed25519')
         cred_def['key'] = key_path
-    elif provider_name == 'auggie':
-        login_url = _prompt('Login URL (blank for production default)', default='')
-        if login_url:
-            cred_def['login_url'] = login_url
-        picked = _pick_browser(browser_enumerator)
-        cred_def['browser'] = picked['browser']
-        if picked['chrome_profile']:
-            cred_def['chrome_profile'] = picked['chrome_profile']
     elif provider_name in ('gmail', 'drive'):
         client_id = _prompt('OAuth client_id')
         cred_def['client_id'] = client_id
@@ -256,25 +248,6 @@ def _setup_github_credential(cred_name, cred_def, config, replace=False):
         return False
 
 
-def _setup_auggie_credential(cred_name, cred_def, replace=False):
-    from dax_creds.providers.auggie import AuggieProvider
-    provider = AuggieProvider()
-
-    if not replace and provider.check(cred_def, cred_name):
-        print(f'  [{cred_name}] token already in Keychain.')
-        return True
-
-    token = provider.import_from_disk(cred_def)
-    if token:
-        print(f'  [{cred_name}] importing existing token from ~/.augment/session.json')
-        provider.store(cred_name, token)
-        print(f'  [{cred_name}] done.')
-        return True
-
-    _report_no_token(cred_name, provider, cred_def, replace)
-    return False
-
-
 def _setup_google_credential(cred_name, cred_def, replace=False):
     from dax_creds.providers.google import GoogleProvider
     provider = GoogleProvider(cred_def['provider'])
@@ -311,7 +284,7 @@ def run_creds_add(config, cwd=None):
         sys.exit(0)
 
 
-_CRED_PROVIDERS = ['ssh', 'github', 'claude', 'auggie', 'gmail', 'drive']
+_CRED_PROVIDERS = ['ssh', 'github', 'claude', 'gmail', 'drive']
 
 
 def _run_creds_add(config, cwd=None):
@@ -351,8 +324,6 @@ def _run_creds_add(config, cwd=None):
         stored = _setup_ssh_credential(cred_name, cred_def, replace=replace)
     elif provider_name == 'github':
         stored = _setup_github_credential(cred_name, cred_def, config, replace=replace)
-    elif provider_name == 'auggie':
-        stored = _setup_auggie_credential(cred_name, cred_def, replace=replace)
     else:
         stored = _setup_google_credential(cred_name, cred_def, replace=replace)
 
@@ -502,13 +473,6 @@ def _cred_status(config, name, cred_def):
                 warnings.append('[!] key on disk')
         except ImportError:
             pass
-    elif provider == 'auggie':
-        try:
-            from dax_creds.providers.auggie import AuggieProvider
-            if AuggieProvider().has_disk_copy(cred_def):
-                warnings.append('[!] session on disk')
-        except ImportError:
-            pass
 
     return stored, envs, warnings
 
@@ -558,7 +522,7 @@ def run_creds_list(config):
         stored = 'yes' if stored_bool else 'no'
         if provider == 'ssh':
             detail = cred_def.get('key', '')
-        elif provider in ('github', 'claude', 'auggie', 'gmail', 'drive'):
+        elif provider in ('github', 'claude', 'gmail', 'drive'):
             from dax_creds.chrome import browser_label
             detail = browser_label(cred_def.get('browser', 'default'), cred_def.get('chrome_profile'))
         else:
@@ -737,12 +701,12 @@ def run_env_show(config, name):
     if unknown:
         print()
         print(f'  note: {describe_unknown_env_keys(unknown)}')
-    legacy = legacy_claude_entries(
+    legacy = retired_entries(
         {'projects': {name: proj}, 'credentials': config.get('credentials')}).get(name)
     if legacy:
         print()
-        print(f'  note: still lists {", ".join(legacy)} — Claude is automatic now; '
-              'remove them')
+        print(f'  note: still lists {", ".join(legacy)} — no longer used (Claude is '
+              'automatic, auggie was removed); remove them')
     print()
 
 
@@ -874,7 +838,7 @@ def ensure_project_credentials(config, project_creds, keyring=None):
 
     for cred_name, cred_def in project_creds.items():
         provider = cred_def.get('provider')
-        if provider in ('github', 'claude', 'auggie', 'gmail', 'drive'):
+        if provider in ('github', 'claude', 'gmail', 'drive'):
             token = kr.get_password(_KEYCHAIN_SERVICE, cred_name) if kr else None
             if token is None:
                 missing.append(cred_name)
@@ -887,7 +851,6 @@ _PROVIDER_FIELDS = {
     'ssh':    ['key'],
     'github': ['browser'],
     'claude': ['browser'],
-    'auggie': ['login_url'],
     'gmail':  ['client_id', 'client_secret', 'scopes', 'browser'],
     'drive':  ['client_id', 'client_secret', 'scopes', 'browser'],
 }

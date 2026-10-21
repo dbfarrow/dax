@@ -159,10 +159,11 @@ def sync_claude_shared_files(tenant, project):
             tree_file.write_bytes(host_file.read_bytes())
 
 
-# Per-env entries made redundant by Claude becoming a baseline feature with
-# an implied credential (decisions 35, 36): filtered out wherever an env's
-# `features:`/`creds:` are read, and reported until hand-removed.
-LEGACY_CLAUDE_FEATURES = ('claude', 'claude_tenant_state')
+# Per-env entries dax no longer uses, filtered out wherever an env's
+# `features:`/`creds:` are read and reported until hand-removed (decisions
+# 36, 39): `claude`/`claude_tenant_state` because Claude is a baseline feature
+# with an implied credential, `auggie` because its support was removed.
+RETIRED_FEATURES = ('claude', 'claude_tenant_state', 'auggie')
 
 
 def is_claude_credential(config, cred_name):
@@ -178,17 +179,30 @@ def is_claude_credential(config, cred_name):
     return cred_name.startswith('claude-')
 
 
-def legacy_claude_entries(config):
+def is_retired_credential(config, cred_name):
+    """A `creds:` entry dax no longer uses: any Claude one (the env's Claude
+    credential is implied), or an auggie one (support removed). An auggie
+    credential is a bare `auggie` or any name registered with provider
+    auggie."""
+    if is_claude_credential(config, cred_name):
+        return True
+    credentials = (config or {}).get('credentials') or {}
+    if cred_name in credentials:
+        return (credentials[cred_name] or {}).get('provider') == 'auggie'
+    return cred_name == 'auggie'
+
+
+def retired_entries(config):
     """{env name: ['<entry> (features)' / '<entry> (creds)', ...]} for every
-    env still listing a Claude feature or credential, which Claude being
-    automatic has made redundant. Envs with none are omitted."""
+    env still listing a retired feature or credential. Envs with none are
+    omitted."""
     found = {}
     for name, proj in (config.get('projects') or {}).items():
         proj = proj or {}
         entries = ['{} (features)'.format(f) for f in (proj.get('features') or [])
-                   if f in LEGACY_CLAUDE_FEATURES]
+                   if f in RETIRED_FEATURES]
         entries += ['{} (creds)'.format(c) for c in (proj.get('creds') or [])
-                    if is_claude_credential(config, c)]
+                    if is_retired_credential(config, c)]
         if entries:
             found[name] = entries
     return found
@@ -366,7 +380,7 @@ def resolve_credential_names(project, project_name, config=None):
             f"Add `tenant: <tenant>` to its entry in ~/.dax.yaml.")
     resolved = [(derived_credential_name('claude', tenant, project_name), 'claude')]
     for entry in project.get('creds', []) or []:
-        if not is_claude_credential(config, entry):
+        if not is_retired_credential(config, entry):
             resolved.append((entry, None))
     return resolved
 
@@ -436,7 +450,7 @@ def credential_users(config, name):
             # names it lists are still in use: without this, `dax creds
             # remove` would delete a credential a tenantless env still names.
             resolved = [(c, None) for c in (project.get('creds') or [])
-                        if not is_claude_credential(config, c)]
+                        if not is_retired_credential(config, c)]
         if any(resolved_name == name for resolved_name, _ in resolved):
             users.append(project_name)
     return users
