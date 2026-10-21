@@ -44,6 +44,10 @@ def home(tmp_path, monkeypatch):
         'projects: {}\n')
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.setattr('dax._known_tenant_names', lambda: {'acme', 'personal'})
+    # No browsers to choose between, so a new tenant's browser question
+    # (decision 43) is skipped; test_dax_tenant_browser.py covers it.
+    monkeypatch.setattr('dax_creds.chrome.enumerate_browsers', lambda *a, **k: [
+        {'label': 'Default browser', 'browser': 'default', 'chrome_profile': None}])
     return home
 
 

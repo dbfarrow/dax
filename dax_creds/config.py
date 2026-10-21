@@ -391,24 +391,103 @@ def resolve_credential_names(project, project_name, config=None):
     return resolved
 
 
-def synthesized_credential(config, provider):
+def tenant_credential_settings(config, tenant, provider):
+    """The `tenants.<tenant>.<provider>` block (decision 43), or {}. A level
+    that isn't a map is ignored here (and reported by
+    unknown_tenant_entries), so a hand-editing slip never crashes a launch."""
+    block = config.get('tenants') if tenant else None
+    for key in (tenant, provider):
+        if not isinstance(block, dict):
+            return {}
+        block = block.get(key)
+    return dict(block) if isinstance(block, dict) else {}
+
+
+def synthesized_credential(config, provider, tenant=None):
     """The definition dax uses for a derived credential.
 
     Per-provider settings come from a top-level `credential_defaults:` block,
-    because a derived credential has no entry of its own to hold them:
+    because a derived credential has no entry of its own to hold them, with
+    the env's tenant's own block (decision 43) merged over it, so a tenant
+    only states what differs:
 
         credential_defaults:
           claude:
             browser: chrome
             chrome_profile: Profile 2
 
+        tenants:
+          ysecurity:
+            claude:
+              chrome_profile: Profile 5
+
     Browser and profile are properties of the human doing the authenticating,
-    not of the env, so one setting covering every derived Claude credential is
-    the right shape — and without it every per-env login would silently open
-    the default browser instead of the profile the account lives in.
+    and that human uses a different browser profile per client, which is
+    what the tenant marks. Without a setting, every per-env login would
+    silently open the default browser instead of the profile the account
+    lives in.
     """
-    defaults = (config.get('credential_defaults') or {}).get(provider) or {}
-    return dict(defaults, provider=provider)
+    defaults = (config.get('credential_defaults') or {}).get(provider)
+    merged = dict(defaults) if isinstance(defaults, dict) else {}
+    own = tenant_credential_settings(config, tenant, provider)
+    if 'browser' in own and 'chrome_profile' not in own:
+        # A browser and its profile are overridden together: a tenant that
+        # picks plain Chrome (or Firefox) must not inherit the default's
+        # Chrome profile.
+        merged.pop('chrome_profile', None)
+    merged.update(own)
+    merged['provider'] = provider
+    return merged
+
+
+def credential_settings_source(config, tenant, provider):
+    """Where a derived credential's browser setting comes from: 'tenant',
+    'default' (credential_defaults), or None when neither sets one."""
+    if tenant_credential_settings(config, tenant, provider):
+        return 'tenant'
+    if (config.get('credential_defaults') or {}).get(provider):
+        return 'default'
+    return None
+
+
+def unknown_tenant_entries(config):
+    """Problems in the top-level `tenants:` block, as messages: a tenant no
+    registered env uses (almost always a typo, and otherwise silently
+    ignored), or a provider dax never derives a credential for."""
+    tenants = config.get('tenants')
+    if tenants is None:
+        return []
+    if not isinstance(tenants, dict):
+        return ['`tenants:` should be a map of tenant names — ignored']
+    used = {(p or {}).get('tenant') for p in (config.get('projects') or {}).values()
+            if isinstance(p, dict)}
+    problems = []
+    for tenant, block in tenants.items():
+        if tenant not in used:
+            problems.append(f'tenant {tenant!r} in `tenants:` is used by no env yet '
+                            '(typo?)')
+            continue
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            problems.append(f'`tenants.{tenant}` should be a map of providers — ignored')
+            continue
+        for provider, settings in block.items():
+            if provider not in BARE_PROVIDER_CREDS:
+                problems.append(f'`tenants.{tenant}.{provider}` — ignored (only '
+                                f'{", ".join(BARE_PROVIDER_CREDS)} is set per tenant)')
+            elif settings is not None and not isinstance(settings, dict):
+                problems.append(f'`tenants.{tenant}.{provider}` should be a map '
+                                '(browser, chrome_profile) — ignored')
+            else:
+                merged = synthesized_credential(config, provider, tenant)
+                if merged.get('chrome_profile') and merged.get('browser') != 'chrome':
+                    problems.append(
+                        f'`tenants.{tenant}.{provider}` sets chrome_profile '
+                        f'{merged["chrome_profile"]!r}, but its browser is '
+                        f'{merged.get("browser", "default")!r}, so the profile is '
+                        'ignored — add `browser: chrome`')
+    return problems
 
 
 def derived_credentials(config):
@@ -427,7 +506,7 @@ def derived_credentials(config):
             continue  # unresolvable; reported by `dax env show` and `dax run`
         for name, provider in resolved:
             if provider and name not in registry:
-                found[name] = synthesized_credential(config, provider)
+                found[name] = synthesized_credential(config, provider, project.get('tenant'))
     return found
 
 
@@ -478,9 +557,9 @@ def get_project_credentials(config, project, project_name=None):
             creds[name] = registry[name]
         elif provider:
             # No entry of its own — synthesized rather than written to
-            # ~/.dax.yaml so this stays a pure read. Per-provider defaults are
-            # what carry browser/chrome_profile onto it.
-            creds[name] = synthesized_credential(config, provider)
+            # ~/.dax.yaml so this stays a pure read. Per-provider defaults,
+            # then the tenant's own (decision 43), carry browser/chrome_profile.
+            creds[name] = synthesized_credential(config, provider, project.get('tenant'))
         else:
             raise KeyError(name)
     return creds

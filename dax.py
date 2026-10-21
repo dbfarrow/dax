@@ -1039,6 +1039,7 @@ def cmd_run(args):
         from dax_creds.config import (
             load_dax_config, find_named_project_by_dir, find_enclosing_project,
             get_project_credentials, unknown_env_keys, describe_unknown_env_keys,
+            unknown_tenant_entries,
             retired_entries,
         )
         from dax_creds.providers.ssh import SshProvider, start_ephemeral_agent, stop_ephemeral_agent
@@ -1049,6 +1050,8 @@ def cmd_run(args):
         for _env, _keys in unknown_env_keys(dax_config).items():
             dax_print('[!] ~/.dax.yaml: env {!r} has {}'.format(
                 _env, describe_unknown_env_keys(_keys)))
+        for _problem in unknown_tenant_entries(dax_config):
+            dax_print('[!] ~/.dax.yaml: {}'.format(_problem))
         _warn_retired_entries(retired_entries(dax_config))
         try:
             project_name, project = find_named_project_by_dir(dax_config, Path.cwd())
@@ -1744,6 +1747,9 @@ def _config_shape_problem(config):
     for name, entry in (projects or {}).items():
         if not isinstance(entry, dict):
             return 'env {!r} must be a mapping of settings, not {!r}'.format(name, entry)
+    tenants = config.get('tenants')
+    if tenants is not None and not isinstance(tenants, dict):
+        return '`tenants:` must be a mapping of tenant names to settings'
     return None
 
 
@@ -1770,6 +1776,7 @@ def cmd_config(args):
     """
     from dax_creds.config import (
         load_dax_config, unknown_env_keys, describe_unknown_env_keys,
+        unknown_tenant_entries,
         retired_entries,
     )
     from dax_creds.init import _q_confirm
@@ -1831,6 +1838,8 @@ def cmd_config(args):
     dax_print('[+] ~/.dax.yaml saved (previous version: {})'.format(prev))
     for env_name, keys in unknown_env_keys(config).items():
         dax_print('[!] env {!r} has {}'.format(env_name, describe_unknown_env_keys(keys)))
+    for problem in unknown_tenant_entries(config):
+        dax_print('[!] {}'.format(problem))
     _warn_retired_entries(retired_entries(config))
 
 
@@ -1966,6 +1975,52 @@ def _check_bootstrap_dir(config, process_dir):
         sys.exit(1)
 
 
+def _ask_tenant_browser(config, tenant):
+    """For a brand-new tenant, which browser its Claude logins open
+    (decision 43). Returns the `tenants.<tenant>.claude` block to save, or
+    None for "same as default" (nothing written). Skipped when there's no
+    browser to choose between."""
+    from dax_creds.chrome import browser_label, enumerate_browsers
+    from dax_creds.init import _q_select
+    import questionary
+
+    options = [b for b in enumerate_browsers() if b['browser'] != 'default']
+    if not options:
+        return None
+    default = (config.get('credential_defaults') or {}).get('claude') or {}
+    default_label = browser_label(default.get('browser', 'default'), default.get('chrome_profile'))
+    print()
+    print('{!r} is a new tenant. Its Claude logins can open their own browser profile.'.format(tenant))
+    # Not value=None: questionary turns a None value into the title.
+    picked = _q_select('Browser for {} Claude logins:'.format(tenant), [
+        questionary.Choice('Same as default ({})'.format(default_label), value='same')] + [
+        questionary.Choice(b['label'], value=b) for b in options])
+    if picked == 'same':
+        return None
+    block = {'browser': picked['browser']}
+    if picked['chrome_profile']:
+        block['chrome_profile'] = picked['chrome_profile']
+    if (block['browser'], block.get('chrome_profile')) == (
+            default.get('browser', 'default'), default.get('chrome_profile')):
+        return None  # the default, picked by name
+    return block
+
+
+def _tenant_browser_summary(config, tenant, tenant_browser):
+    """The summary row for which browser the env's Claude login opens."""
+    from dax_creds.chrome import browser_label
+    from dax_creds.config import credential_settings_source, synthesized_credential
+
+    if tenant_browser:
+        return '{}   (will be saved for tenant {})'.format(
+            browser_label(tenant_browser['browser'], tenant_browser.get('chrome_profile')), tenant)
+    cred = synthesized_credential(config, 'claude', tenant)
+    label = browser_label(cred.get('browser', 'default'), cred.get('chrome_profile'))
+    if credential_settings_source(config, tenant, 'claude') == 'tenant':
+        return '{}   (tenant {})'.format(label, tenant)
+    return label
+
+
 def _bootstrap_env(config, env_dir):
     """Register `env_dir` (cwd) as a new env: the wizard `dax run` starts
     when cwd isn't registered yet (decision 4: no `dax init`, no
@@ -2010,6 +2065,11 @@ def _bootstrap_env(config, env_dir):
         image = _q_text('Image:', default=config.get('defaults', {}).get('image', 'dax-base'))
 
         tenant = _prompt_tenant(env_dir, _known_tenant_names())
+        used_tenants = {(p or {}).get('tenant') for p in projects.values()}
+        tenant_browser = None
+        known_blocks = config.get('tenants') if isinstance(config.get('tenants'), dict) else {}
+        if tenant not in used_tenants and tenant not in known_blocks:
+            tenant_browser = _ask_tenant_browser(config, tenant)
         state_dir = state_tree_path(tenant, name)
         if state_dir.exists():
             dax_print('[!] {} already exists — leftover Claude state with no env '
@@ -2093,6 +2153,7 @@ def _bootstrap_env(config, env_dir):
             ('tenant', tenant),
             ('credentials', ', '.join(selected) or '(none besides Claude)'),
             ('claude', 'claude-{}-{}, state tree {}'.format(tenant, name, state_dir)),
+            ('claude login', _tenant_browser_summary(config, tenant, tenant_browser)),
             ('kind', 'substrate-backed process' if process else 'coding project'),
         ]
         if process:
@@ -2143,6 +2204,10 @@ def _bootstrap_env(config, env_dir):
         entry['features'] = features
     if save_substrate:
         config['substrate'] = str(process['substrate'])
+    if tenant_browser:
+        if not isinstance(config.get('tenants'), dict):
+            config['tenants'] = {}  # an emptied `tenants:` key loads as None
+        config['tenants'][tenant] = {'claude': tenant_browser}
     config.setdefault('projects', {})[name] = entry
     save_config(config)
     dax_print('[+] registered {}'.format(name))

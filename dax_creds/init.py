@@ -8,7 +8,7 @@ from dax_creds.config import (
     credential_users, derived_credentials,
     last_login_at, relogin_due, resolve_credential_names, state_tree_path,
     state_trees, unknown_env_keys, retired_entries,
-    describe_unknown_env_keys,
+    describe_unknown_env_keys, synthesized_credential, credential_settings_source,
 )
 from dax_creds.providers.ssh import SshProvider
 
@@ -408,12 +408,15 @@ def _add_per_env_credential(config, provider, cwd=None):
     defaults = (config.get('credential_defaults') or {}).get(provider) or {}
     if not defaults:
         print(f'\n  no credential_defaults for {provider} yet — this applies to every '
-              f'derived\n  {provider} credential, not just this one.')
+              f'derived\n  {provider} credential, except where a tenant sets its own '
+              f'under `tenants:`.')
         picked = _pick_browser()
         entry = {'browser': picked['browser']}
         if picked['chrome_profile']:
             entry['chrome_profile'] = picked['chrome_profile']
-        config.setdefault('credential_defaults', {})[provider] = entry
+        if not isinstance(config.get('credential_defaults'), dict):
+            config['credential_defaults'] = {}  # an emptied key loads as None
+        config['credential_defaults'][provider] = entry
 
     save_config(config)
 
@@ -634,6 +637,20 @@ def _home_relative(path):
     except ValueError:
         return str(path)
 
+def _login_browser_note(config, tenant, provider):
+    """Which browser a derived credential's login opens, and why (decision
+    43): the tenant's own setting, credential_defaults, or nothing set."""
+    from dax_creds.chrome import browser_label
+    cred = synthesized_credential(config, provider, tenant)
+    label = browser_label(cred.get('browser', 'default'), cred.get('chrome_profile'))
+    source = credential_settings_source(config, tenant, provider)
+    if source == 'tenant':
+        return f'{label}   (tenant {tenant})'
+    if source == 'default':
+        return f'{label}   (credential_defaults)'
+    return f'{label}   (nothing set)'
+
+
 def run_env_show(config, name):
     """Print one env's full registry entry plus what it resolves to."""
     projects = config.get('projects', {})
@@ -660,6 +677,8 @@ def run_env_show(config, name):
             if derived_provider:
                 print(f'           -> {resolved}   [implied]' if derived_provider == 'claude'
                       else f'           -> {resolved}')
+                if resolved not in (config.get('credentials') or {}):
+                    print(f'              login opens {_login_browser_note(config, tenant, derived_provider)}')
     except ValueError as e:
         print(f'           -> unresolved: {e.args[0]}')
 
