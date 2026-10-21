@@ -501,7 +501,7 @@ def run_creds_list(config):
     # build reverse map: cred_name -> [project_name, ...]
     cred_envs = {name: [] for name in credentials}
     for proj_name, proj in config.get('projects', {}).items():
-        for c in proj.get('creds', []):
+        for c in proj.get('creds') or []:
             if c in cred_envs:
                 cred_envs[c].append(proj_name)
 
@@ -652,6 +652,16 @@ def run_env_show(config, name):
     print(f'  dir      {dir_path}{"" if Path(dir_path).exists() else "   [missing]"}')
     print(f'  image    {proj.get("image", "?")}')
     print(f'  creds    {", ".join(creds) or "(none)"}')
+    # Every env's Claude credential is implied (decision 35), so show the
+    # resolved names rather than leave the convention invisible, and surface
+    # the "no tenant" error here, where it is cheap, rather than at launch.
+    try:
+        for resolved, derived_provider in resolve_credential_names(proj, name, config):
+            if derived_provider:
+                print(f'           -> {resolved}   [implied]' if derived_provider == 'claude'
+                      else f'           -> {resolved}')
+    except ValueError as e:
+        print(f'           -> unresolved: {e.args[0]}')
 
     # Shown even when empty, so it's clear nothing is opted in beyond the
     # always-on baseline (workdir, dotfiles, webpreview, claude).
@@ -669,16 +679,6 @@ def run_env_show(config, name):
         print(f'  substrate {global_substrate or "NOT SET: add a top-level `substrate: <path>` (dax config)"}'
               f'{"   (global)" if global_substrate else ""}')
 
-    # Every env's Claude credential is implied (decision 35), so show the
-    # resolved names rather than leave the convention invisible, and surface
-    # the "no tenant" error here, where it is cheap, rather than at launch.
-    try:
-        for resolved, derived_provider in resolve_credential_names(proj, name, config):
-            if derived_provider:
-                print(f'           -> {resolved}   [implied]' if derived_provider == 'claude'
-                      else f'           -> {resolved}')
-    except ValueError as e:
-        print(f'           -> unresolved: {e.args[0]}')
 
     container = _container_name_for(dir_path)
     if container:
@@ -689,7 +689,14 @@ def run_env_show(config, name):
         state = state_tree_path(tenant, name)
         if state.exists():
             size, used = _tree_stats(state)
-            suffix = f'   [{_human_size(size)}, last used {_human_age(used)} ago]'
+            age = _human_age(used)
+            if not used:
+                when = 'never used'
+            elif age == 'now':
+                when = 'last used just now'
+            else:
+                when = f'last used {age} ago'
+            suffix = f'   [{_human_size(size)}, {when}]'
         else:
             suffix = '   [not created yet]'
         print(f'  state    {state}{suffix}')
@@ -704,8 +711,9 @@ def run_env_show(config, name):
         {'projects': {name: proj}, 'credentials': config.get('credentials')}).get(name)
     if legacy:
         print()
-        print(f'  note: still lists {", ".join(legacy)} — no longer used (Claude is '
-              'automatic, auggie was removed); remove them')
+        print(f'  note: still lists {", ".join(legacy)} — no longer needed (Claude is '
+              'automatic, `mounts:` switches mounts on by itself, auggie was removed); '
+              'remove them')
     print()
 
 
@@ -720,7 +728,7 @@ def run_env_list(config):
     for name, proj in projects.items():
         dir_path = proj.get('dir', '')
         tenant = proj.get('tenant')
-        creds_str = ', '.join(proj.get('creds', [])) or '(none)'
+        creds_str = ', '.join(proj.get('creds') or []) or '(none)'
         dir_exists = Path(dir_path).exists() if dir_path else False
         running = _is_container_running(_container_name_for(dir_path)) if dir_exists else False
 
@@ -876,7 +884,7 @@ def run_creds_update(config, name=None, _prompter=None, _browser_enumerator=None
             }
             envs_map = {n: [] for n in names}
             for proj_name, proj in config.get('projects', {}).items():
-                for c in proj.get('creds', []):
+                for c in proj.get('creds') or []:
                     if c in envs_map:
                         envs_map[c].append(proj_name)
             choices = [

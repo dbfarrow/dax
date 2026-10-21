@@ -115,7 +115,7 @@ def relogin_due(cred_name, config, now=None):
     return (now - last) > timedelta(hours=cooldown_hours)
 
 
-# User-level files a `claude_tenant_state` tree mount replaces wholesale, taking
+# User-level files the Claude state-tree mount replaces wholesale, taking
 # your global CLAUDE.md/settings with it. A nested read-only *file* bind mount
 # was tried first (2026-07-31) and abandoned within hours: unlike a nested
 # directory mount, it didn't deliver the host's content at all — the container
@@ -254,7 +254,7 @@ def yaml_round_trip(required_by):
     put them back, and its default `sort_keys=True` alphabetises everything on
     the way out. Rewriting ~/.dax.yaml through pyyaml therefore deletes every
     comment in it — including commented-out feature lines like
-    `#- claude_tenant_state`, which are configuration, not decoration.
+    `#- auto_claude`, which are configuration, not decoration.
 
     `required_by` names the caller in the error, since a missing dependency
     here surfaces at `dax creds add` time rather than at import time.

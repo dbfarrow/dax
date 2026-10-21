@@ -171,7 +171,7 @@ def test_specific_file_rejects_several_envs_or_removal(home, tmp_path):
 
 
 def test_missing_directory_is_skipped_not_fatal(home, tmp_path, capsys):
-    """A stale registry entry (exactly what `dax envs list`'s `!` marker
+    """A stale registry entry (exactly what `dax env list`'s `!` marker
     flags) must not be able to sink an otherwise-healthy backup run."""
     _register(home, 'good')
     _register(home, 'stale', make_dir=False)

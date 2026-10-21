@@ -1,6 +1,6 @@
 """Tests for ~/.dax.yaml round-trip preservation.
 
-`dax creds add`, `dax creds update`, and `dax init` all rewrite the whole
+`dax creds add`, `dax creds update`, and the `dax run` wizard all rewrite the whole
 config file. Under pyyaml that deleted every comment and alphabetised every
 key, because `safe_load` never sees comments and `dump` defaults to
 `sort_keys=True`. The commented-out feature line `#- claude_tenant_state` is

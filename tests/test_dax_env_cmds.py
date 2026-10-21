@@ -51,9 +51,6 @@ def _set(config, name, field, value, valid_features=None):
     save_config(config)
 
 
-
-# --- set -------------------------------------------------------------------
-
 # --- show ------------------------------------------------------------------
 
 def test_show_reports_unset_tenant(home, capsys):
@@ -154,20 +151,7 @@ def test_show_explains_a_bare_token_that_cannot_resolve(home, capsys):
     assert 'unresolved' in out and 'no tenant' in out
 
 
-# --- field help ------------------------------------------------------------
-
-# --- env set features -------------------------------------------------------
-#
-# Added once per-env features became load-bearing: `claude_tenant_state` is opted
-# into per env, and switching it on means moving `claude` off the global list and
-# onto the envs that still want the shared mount — four edits, which is YAML
-# surgery without this.
-
-# --- env set mounts ----------------------------------------------------------
-#
-# For migrating discernment's processes: each process becomes its own env, and
-# needs the discernment sidecar repo mounted alongside its own — as a sibling
-# under $HOME (feature_mounts), not nested inside another mount.
+# --- mounts ----------------------------------------------------------------
 
 def test_show_lists_mounts_when_set(home, capsys):
     _set(load_dax_config(), 'fabric', 'mounts', '~/discernment')
@@ -182,7 +166,7 @@ def test_show_lists_mounts_when_set(home, capsys):
 def test_show_omits_mounts_line_when_unset(home, capsys):
     run_env_show(load_dax_config(), 'fabric')
 
-    assert 'mounts' not in capsys.readouterr().out
+    assert '  mounts   ' not in capsys.readouterr().out
 
 
 def test_show_has_no_mounts_feature_note(home, capsys):
@@ -234,6 +218,8 @@ def test_a_per_env_substrate_is_reported_as_retired(home, capsys):
 
     out = capsys.readouterr().out
     assert 'retired key substrate — ignored; move its path to a top-level `substrate:`' in out
+
+
 def test_show_does_not_flag_substrate_when_the_feature_is_active(home, capsys):
     config = load_dax_config()
     _set(config, 'fabric', 'substrate', '~/virgil')
@@ -246,8 +232,8 @@ def test_show_does_not_flag_substrate_when_the_feature_is_active(home, capsys):
     assert 'inactive' not in out
 
 
-# --- env accept-shared-files -------------------------------------------------
-#
+# --- key descriptions ------------------------------------------------------
+
 def test_describe_unknown_env_keys_separates_typos_from_retired_keys():
     assert describe_unknown_env_keys(['tennant']) == 'unknown key(s) tennant — ignored (typo?)'
     assert describe_unknown_env_keys(['multi_tenant']) == (
@@ -276,3 +262,33 @@ def test_show_displays_the_implied_credential_with_nothing_in_creds(home, capsys
     run_env_show(config, 'fabric')
 
     assert '-> claude-personal-fabric   [implied]' in capsys.readouterr().out
+
+
+# --- an empty list key ------------------------------------------------------
+#
+# Hand-editing can leave `creds:` with nothing after it, which YAML reads as
+# null; every reader treats that like a missing key.
+
+def test_an_empty_creds_key_is_read_as_no_creds(home, capsys):
+    from dax_creds.init import run_creds_list, run_env_list
+    config = load_dax_config()
+    config['projects']['fabric']['creds'] = None
+    config['projects']['fabric']['tenant'] = 'personal'
+
+    run_env_list(config)
+    run_creds_list(config)
+    run_env_show(config, 'fabric')
+
+    assert '-> claude-personal-fabric   [implied]' in capsys.readouterr().out
+
+
+def test_show_says_never_used_for_an_empty_state_tree(home, capsys):
+    config = load_dax_config()
+    config['projects']['fabric']['tenant'] = 'personal'
+    state_tree_path('personal', 'fabric').mkdir(parents=True)
+
+    run_env_show(config, 'fabric')
+
+    out = capsys.readouterr().out
+    assert '[0B, never used]' in out
+    assert '- ago' not in out

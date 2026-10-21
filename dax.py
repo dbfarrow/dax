@@ -521,8 +521,8 @@ def feature_mounts(config):
     does work) staying that way.
 
     Named `mounts` on the project entry, a list the same way `creds`/`features`
-    are. Opt-in via `features: [mounts]`, same shape as
-    `feature_ports`.
+    are. A non-empty list switches the feature on by itself (decision 40);
+    `mounts` in `features:` is a retired name.
 
     Each entry is `<host_path>`, `<host_path>:<container_name>`, or
     `<host_path>:<container_name>:ro` — the name defaults to
@@ -538,7 +538,7 @@ def feature_mounts(config):
     opt into for the common case.
     """
     opts = []
-    mounts = config.get('mounts', [])
+    mounts = config.get('mounts') or []
     if not mounts:
         dax_print("[!] no mounts defined for this env")
         return opts
@@ -639,7 +639,10 @@ def _feature_names():
 def _print_features():
     dax_print("[!] available features:")
     for name in sorted(_feature_names()):
-        note = '   (always on)' if name in _ALWAYS_ON_FEATURES else ''
+        note = ('   (always on)' if name in _ALWAYS_ON_FEATURES else
+                '   (on when an env has a `mounts:` list)' if name == 'mounts' else
+                '   (opt in per env; path is the top-level `substrate:`)' if name == 'substrate'
+                else '')
         dax_print("\t{}{}".format(name, note))
 
 
@@ -2092,8 +2095,8 @@ def _bootstrap_env(config, env_dir):
     return name, config['projects'][name]
 
 
-# Rebuildable dependency/cache directories: excluded from `dax process
-# export` because the project's own env setup (npm install, pip install,
+# Rebuildable dependency/cache directories: excluded from `dax env
+# archive` because the project's own env setup (npm install, pip install,
 # ...) regenerates them on the destination the first time it's used there,
 # so shipping them across machines just costs archive size and transfer
 # time for nothing. Matched by directory name at any depth, not just the
@@ -3159,7 +3162,7 @@ def _env_archive_explain_text(config):
 dax env archive
 {config_note}
 The BCP/DR backup mechanism: a point-in-time snapshot of one or more
-registered dax envs (their directory, Claude state tree, and registry
+registered envs (their directory, Claude state tree, and registry
 metadata), not an ongoing dotfile mirror. In most cases this replaces
 GitHub as the real backup store for an env, since it captures the Claude
 session state and registry entry GitHub never would.
@@ -3473,7 +3476,8 @@ def main():
     creds_sub = creds_p.add_subparsers(dest='creds_command', required=True)
     creds_sub.add_parser('add', help='Add or update a credential in the global store')
     creds_sub.add_parser('list', help='List registered credentials')
-    remove_p = creds_sub.add_parser('remove', help='Remove a credential value from Keychain')
+    remove_p = creds_sub.add_parser(
+        'remove', help='Remove a credential from Keychain and ~/.dax.yaml (refuses if an env uses it)')
     remove_p.add_argument('name', help='Credential name to remove')
     update_p = creds_sub.add_parser('update', help='Update credential metadata (chrome profile, client_id, etc.)')
     update_p.add_argument('name', nargs='?', default=None, help='Credential name to update (omit to pick interactively)')
@@ -3487,8 +3491,8 @@ def main():
                        'then check it')
 
     env_p = subparsers.add_parser(
-        'env', help='Inspect or remove environments',
-        description='Edit an env by hand-editing its entry in ~/.dax.yaml.')
+        'env', help='List, inspect, back up, restore, or remove environments',
+        description='A new env is created by `dax run` in its folder; edit one with `dax config`.')
     env_sub = env_p.add_subparsers(dest='env_command', required=True)
 
     env_sub.add_parser('list', help='List registered environments, and Claude state '
