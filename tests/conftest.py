@@ -29,6 +29,11 @@ def _isolate_home(tmp_path_factory, monkeypatch):
 def pytest_configure(config):
     config.addinivalue_line(
         'markers',
+        'real_webpreview_port: let feature_webpreview read the stored port and check '
+        'the host for real, instead of the default stand-in (see '
+        '_webpreview_port_stand_in)')
+    config.addinivalue_line(
+        'markers',
         'real_claude_login: let `dax run` look up and refresh the implied Claude '
         'credential for real, instead of the default stand-in (see '
         '_implied_claude_credential_is_logged_in)')
@@ -69,6 +74,21 @@ def _no_image_version_lookup(monkeypatch):
     test_dax_version.py tests the real lookup directly."""
     import dax
     monkeypatch.setattr(dax, '_image_version', lambda image: None)
+
+
+@pytest.fixture(autouse=True)
+def _webpreview_port_stand_in(request, monkeypatch):
+    """Every env now needs a stored webpreview port to launch, and dax refuses
+    a busy one. Most tests build env entries without a port and must not
+    depend on which host ports happen to be free, so by default an env with no
+    stored port launches on 8000 and every port counts as free. Tests of the
+    real behaviour opt out with `@pytest.mark.real_webpreview_port`."""
+    if request.node.get_closest_marker('real_webpreview_port'):
+        return
+    import dax
+    real = dax._stored_preview_port
+    monkeypatch.setattr(dax, '_stored_preview_port', lambda config: real(config) or 8000)
+    monkeypatch.setattr(dax, '_is_port_free', lambda port: True)
 
 
 @pytest.fixture

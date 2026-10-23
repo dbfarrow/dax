@@ -27,6 +27,8 @@ ENV_FIELDS = {
               'read-only instead of the read-write default, e.g. '
               '~/discernment::ro (empty middle field keeps the default name) '
               'or ~/.claude:host-claude:ro',
+    'webpreview': '{port: N}, the env\'s stored webpreview port, written by the '
+                  'creation wizard and `dax env ports --assign`',
 }
 
 

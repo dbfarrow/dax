@@ -2,7 +2,6 @@
 
 import argparse
 import datetime
-import hashlib
 import json
 import os
 import re
@@ -105,6 +104,16 @@ def load_config():
                   "{} are always on; move anything else to a project's own "
                   "features:, a cwd-local .dax.yaml, or -f".format(
                       ', '.join(legacy_features), ', '.join(_ALWAYS_ON_FEATURES)))
+
+    # Retired (2026-10-23): an env's webpreview port is stored on its entry in
+    # ~/.dax.yaml and nowhere else, so a `webpreview:` block in a cwd-local
+    # .dax.yaml, or at the top level of ~/.dax.yaml, is warned about and
+    # ignored rather than allowed to disagree with the stored port.
+    for _source, _block in (('{}'.format(local_cfg_path), local.pop('webpreview', None)),
+                            ('~/.dax.yaml (top level)', defaults.pop('webpreview', None))):
+        if _block is not None:
+            dax_print("[!] `webpreview:` in {} is no longer read — an env's port is stored on "
+                      'its entry in ~/.dax.yaml; see `dax env ports`'.format(_source))
 
     local_features = local.pop('features', [])
     defaults.update(local)
@@ -415,14 +424,11 @@ def _is_port_free(port):
             return False
 
 
-def _find_preview_port(cwd, base=8000, spread=1000):
-    digest = int(hashlib.md5(cwd.encode()).hexdigest(), 16)
-    candidate = base + (digest % spread)
-    for _ in range(spread):
-        if _is_port_free(candidate):
-            return candidate
-        candidate = base + ((candidate - base + 1) % spread)
-    raise RuntimeError("no free port found in range {}-{}".format(base, base + spread - 1))
+def _stored_preview_port(config):
+    """The env's stored webpreview port (its ~/.dax.yaml entry's
+    `webpreview: {port: N}`, promoted by cmd_run), or None."""
+    port = (config.get('webpreview') or {}).get('port')
+    return int(port) if port else None
 
 
 def feature_webpreview(config):
@@ -438,7 +444,20 @@ def feature_webpreview(config):
     (`_ALWAYS_ON_FEATURES` is prepended unconditionally in `load_config`),
     so this ordering is reliable, not incidental.
     """
-    port = config.get('webpreview', {}).get('port') or _find_preview_port(config['cwd'])
+    # The port is assigned once and stored (docs/design/2026-10-23-webpreview-ports.md):
+    # never derived or moved here, so the config and the index page are always
+    # right about it. A missing or busy port stops the launch instead.
+    port = _stored_preview_port(config)
+    env = config.get('env_name') or config.get('envname')
+    if port is None:
+        dax_print("[!] env '{}' has no stored webpreview port. Run `dax env ports --assign` "
+                  '(on the host) to give it one.'.format(env))
+        sys.exit(1)
+    if not _is_port_free(port):
+        dax_print("[!] env '{}'s webpreview port {} is in use by something else, so it was not "
+                  'started. Stop whatever holds the port, or give the env another port with '
+                  '`dax config`.'.format(env, port))
+        sys.exit(1)
     container_home = _container_home(config)
     preview_dir = os.path.join(container_home, config['workdir_name'])
     dax_print("[-]   webpreview port: {}".format(port))
@@ -1116,6 +1135,9 @@ def cmd_run(args):
         config['tenant'] = project.get('tenant')
         config['env_name'] = project_name
         config['_test_only'] = args.test_only
+        config['webpreview'] = dict(project.get('webpreview') or {})
+        if not args.test_only:
+            _refresh_env_index(dax_config)
 
         # The env's own `features:` (per-env opt-ins on top of the always-on
         # baseline), merged so nothing applies twice and the retired Claude
@@ -1715,6 +1737,9 @@ def cmd_env(args):
             run_env_list(config, archived=archived,
                          missing_backup_dir=None if archived is not None else backup_dir,
                          show_all=getattr(args, 'all', False))
+            _refresh_env_index(config)
+        elif args.env_command == 'ports':
+            _run_env_ports(config, args)
         elif args.env_command == 'show':
             run_env_show(config, _resolve_env_name(config, args.name))
         elif args.env_command == 'destroy':
@@ -1739,6 +1764,97 @@ _DAX_CONTAINER_MARKER = '/usr/local/bin/dax-entrypoint.sh'
 
 def _in_dax_container():
     return os.path.exists(_DAX_CONTAINER_MARKER)
+
+
+def _refresh_env_index(dax_config):
+    """Rewrite the env index page (~/.local/state/dax/envs.html) from the
+    registry. Host only: inside a container ~/.local/state is the
+    container's own. Never fatal: the page is a convenience, not something
+    a launch or a listing should fail over."""
+    if _in_dax_container():
+        return None
+    try:
+        from dax_creds.webpreview import write_index
+        return write_index(dax_config, written=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))
+    except Exception as e:
+        dax_print('[!] could not write the env index page: {}'.format(e))
+        return None
+
+
+def _run_env_ports(config, args):
+    """`dax env ports [--assign]`: show every env's stored webpreview port,
+    or give ports to every env that needs one (decisions 3 and 4 of
+    docs/design/2026-10-23-webpreview-ports.md)."""
+    from dax_creds.init import _container_name_for, _is_container_running, _q_confirm, save_config
+    from dax_creds.webpreview import base_port, plan_port_assignment, set_port, stored_port
+
+    projects = config.get('projects') or {}
+    base = base_port(config)
+
+    if not args.assign:
+        rows = []
+        for name, entry in projects.items():
+            port = stored_port(entry)
+            note = '' if port is None or base <= port < base + 1000 else 'outside {}-{}'.format(
+                base, base + 999)
+            rows.append(((entry or {}).get('tenant') or '-', name,
+                         port if port is not None else 'none', note))
+        if not rows:
+            print('No environments registered.')
+            return
+        rows.sort(key=lambda r: (r[0], r[1]))
+        _print_table(('tenant', 'name', 'port', ''), rows)
+        if any(r[2] == 'none' or r[3] for r in rows):
+            print()
+            dax_print('[-] run `dax env ports --assign` to give these envs a port')
+        return
+
+    if _in_dax_container():
+        dax_print('[!] dax env ports --assign only runs on the host: the ports and the env index '
+                  'page it rewrites belong to the host.')
+        sys.exit(1)
+
+    changes = plan_port_assignment(config)
+    if not changes:
+        dax_print('[-] every env already has its own port in {}-{}; nothing to change'.format(
+            base, base + 999))
+        path = _refresh_env_index(config)
+        if path:
+            dax_print('[-] env index page: {}'.format(path))
+        return
+
+    running = []
+    rows = []
+    for name, old, new in changes:
+        is_running = old is not None and _is_container_running(
+            _container_name_for(Path((projects[name] or {}).get('dir', name)).expanduser()))
+        if is_running:
+            running.append(name)
+        rows.append((name, old if old is not None else 'none', new,
+                     'running: keeps {} until restarted'.format(old) if is_running else ''))
+    _print_table(('env', 'old port', 'new port', ''), rows)
+    print()
+    try:
+        if not _q_confirm('Write these {} port(s) to ~/.dax.yaml?'.format(len(changes)),
+                          default=True):
+            dax_print('[-]   cancelled — nothing written')
+            return
+    except KeyboardInterrupt:
+        print()
+        dax_print('[-]   cancelled — nothing written')
+        return
+
+    path = Path.home() / '.dax.yaml'
+    path.with_name('.dax.yaml.prev').write_bytes(path.read_bytes())
+    for name, _old, new in changes:
+        set_port(projects[name], new)
+    save_config(config)
+    dax_print('[+] wrote {} port(s); the previous file is ~/.dax.yaml.prev'.format(len(changes)))
+    if running:
+        dax_print('[!] restart these to move them to their new port: {}'.format(', '.join(running)))
+    index = _refresh_env_index(config)
+    if index:
+        dax_print('[-] env index page: {}'.format(index))
 
 
 def _editor_command():
@@ -2387,6 +2503,10 @@ def _bootstrap_env(config, env_dir):
         # neither appears on the entry.
         creds = list(selected)
         features = ['substrate'] if process else []
+        # Assigned here, once, and stored on the entry (decision 2 of
+        # docs/design/2026-10-23-webpreview-ports.md).
+        from dax_creds.webpreview import port_for_new_env
+        preview_port = port_for_new_env(config, env_dir)
 
         rows = [
             ('env', name),
@@ -2397,6 +2517,7 @@ def _bootstrap_env(config, env_dir):
             ('claude', 'claude-{}-{}, state tree {}'.format(tenant, name, state_dir)),
             ('claude login', _tenant_browser_summary(config, tenant, tenant_browser)),
             ('kind', 'substrate-backed process' if process else 'coding project'),
+            ('webpreview', 'http://localhost:{}/'.format(preview_port)),
         ]
         if process:
             rows += [
@@ -2441,7 +2562,8 @@ def _bootstrap_env(config, env_dir):
                 dax_print('    Remove them, then run `dax run` here again.')
             sys.exit(1)
 
-    entry = {'dir': str(env_dir), 'image': image, 'creds': creds, 'tenant': tenant}
+    entry = {'dir': str(env_dir), 'image': image, 'creds': creds, 'tenant': tenant,
+             'webpreview': {'port': preview_port}}
     if features:
         entry['features'] = features
     if save_substrate:
@@ -3477,12 +3599,17 @@ def _run_env_restore(config, args):
 
         renamed = name != manifest.get('name')
         entry, notes = _restored_entry(config, manifest, env_dir, tenant)
+        # Restore registers a new env, so it gets a port the way the wizard
+        # assigns one; any port the archive recorded belonged to the old folder.
+        from dax_creds.webpreview import port_for_new_env, set_port
+        set_port(entry, port_for_new_env(config, env_dir))
 
         rows = [
             ('archive', '{}{}'.format(archive, '  ({})'.format(archive_date) if archive_date else '')),
             ('archived as', '{}  (from {})'.format(manifest.get('name', '?'), manifest.get('dir', '?'))),
             ('restore as', '{}{}'.format(name, '  (renamed)' if renamed else '')),
             ('into', str(env_dir)),
+            ('webpreview', 'http://localhost:{}/'.format(entry['webpreview']['port'])),
             ('tenant', tenant or '(none)'),
             ('state tree', str(dest_state) if manifest.get('had_state_tree') else '(none in archive)'),
             ('image', entry['image']),
@@ -3514,6 +3641,7 @@ def _run_env_restore(config, args):
                                     dest_state if manifest.get('had_state_tree') else None)
     config.setdefault('projects', {})[name] = entry
     save_config(config)
+    _refresh_env_index(config)
 
     dax_print('[+] restored {} at {}'.format(name, env_dir))
     if stripped:
@@ -3903,6 +4031,15 @@ def main():
     env_archive_p.add_argument(
         '--explain', action='store_true',
         help='Describe what archive captures and where it writes, then exit')
+
+    env_ports_p = env_sub.add_parser(
+        'ports',
+        help="Show each env's stored webpreview port; --assign gives ports to envs that "
+             'need one (no port, or outside the range after changing '
+             '`defaults.webpreview_base_port`)')
+    env_ports_p.add_argument(
+        '--assign', action='store_true',
+        help='Assign and store ports (host only; shows the changes and asks first)')
 
     env_restore_p = env_sub.add_parser(
         'restore',
