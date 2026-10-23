@@ -17,7 +17,6 @@ from dax import (
     feature_X11,
     feature_webpreview,
     feature_auto_claude,
-    _find_preview_port,
     _format_docker_cmd,
 )
 
@@ -309,7 +308,8 @@ def test_feature_substrate_refuses_a_non_executable_wire_sh(tmp_path, monkeypatc
 # test_dax_cmd_run_ssh_bridge.py for that behavior.
 
 
-def test_feature_webpreview_uses_explicit_port(monkeypatch):
+@pytest.mark.real_webpreview_port
+def test_feature_webpreview_uses_the_stored_port(monkeypatch):
     monkeypatch.setattr('dax._is_port_free', lambda p: True)
     config = {
         'cwd': '/home/user/project',
@@ -329,19 +329,37 @@ def test_feature_webpreview_uses_explicit_port(monkeypatch):
     assert 'exec' not in config['_shell_cmd_prefix']
 
 
-def test_feature_webpreview_auto_assigns_port(monkeypatch):
+@pytest.mark.real_webpreview_port
+def test_feature_webpreview_refuses_an_env_with_no_stored_port(monkeypatch, capsys):
     monkeypatch.setattr('dax._is_port_free', lambda p: True)
     config = {
         'cwd': '/home/user/project',
+        'env_name': 'project',
         '_container_home': '/home/user',
         'workdir_name': 'project',
     }
-    opts = feature_webpreview(config)
-    assert '-p' in opts
-    port_mapping = next(o for o in opts if ':' in o and o != '-p')
-    host_port = int(port_mapping.split(':')[0])
-    assert 8000 <= host_port < 9000
-    assert 'DAX_PREVIEW_DIR=/home/user/project' in config['_shell_cmd_prefix']
+    with pytest.raises(SystemExit):
+        feature_webpreview(config)
+    out = capsys.readouterr().out
+    assert "env 'project' has no stored webpreview port" in out
+    assert 'dax env ports --assign' in out
+
+
+@pytest.mark.real_webpreview_port
+def test_feature_webpreview_refuses_a_busy_port_instead_of_moving(monkeypatch, capsys):
+    monkeypatch.setattr('dax._is_port_free', lambda p: p != 9000)
+    config = {
+        'cwd': '/home/user/project',
+        'env_name': 'project',
+        'webpreview': {'port': 9000},
+        '_container_home': '/home/user',
+        'workdir_name': 'project',
+    }
+    with pytest.raises(SystemExit):
+        feature_webpreview(config)
+    out = capsys.readouterr().out
+    assert 'port 9000 is in use' in out and 'was not started' in out
+    assert '_shell_cmd_prefix' not in config
 
 
 def test_feature_auto_claude_sets_final_exec_to_tmux_running_claude():
@@ -369,28 +387,8 @@ def test_feature_auto_claude_does_not_clobber_webpreviews_prefix():
     assert config['_final_exec'] == "tmux new-session -n myproject claude"
 
 
-def test_find_preview_port_is_deterministic():
-    import dax
-    orig = dax._is_port_free
-    dax._is_port_free = lambda p: True
-    try:
-        p1 = _find_preview_port('/home/user/project-a')
-        p2 = _find_preview_port('/home/user/project-a')
-        assert p1 == p2
-    finally:
-        dax._is_port_free = orig
 
 
-def test_find_preview_port_different_dirs_differ():
-    import dax
-    orig = dax._is_port_free
-    dax._is_port_free = lambda p: True
-    try:
-        p1 = _find_preview_port('/home/user/project-a')
-        p2 = _find_preview_port('/home/user/project-b')
-        assert p1 != p2
-    finally:
-        dax._is_port_free = orig
 
 
 # feature_claude_tenant_state moved to
@@ -402,16 +400,6 @@ def test_find_preview_port_different_dirs_differ():
 # env's ~/.dax.yaml entry, and the tree mounts at ~/.claude itself.
 
 
-def test_find_preview_port_skips_busy_ports(monkeypatch):
-    import hashlib
-    cwd = '/home/user/project'
-    digest = int(hashlib.md5(cwd.encode()).hexdigest(), 16)
-    first = 8000 + (digest % 1000)
-    second = 8000 + ((first - 8000 + 1) % 1000)
-
-    monkeypatch.setattr('dax._is_port_free', lambda p: p != first)
-    port = _find_preview_port(cwd)
-    assert port == second
 
 
 # --- _format_docker_cmd -----------------------------------------------------

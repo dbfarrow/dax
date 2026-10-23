@@ -495,3 +495,20 @@ def test_init_and_process_are_gone(tmp_path, sub):
     result = _cli(home, sub)
     assert result.returncode == 2
     assert "invalid choice: '{}'".format(sub) in result.stderr
+
+
+def test_the_new_env_gets_a_stored_webpreview_port_unique_among_envs(home, monkeypatch, capsys):
+    from dax_creds.webpreview import hashed_port
+    env_dir = _env_dir(home)
+    config = load_dax_config()
+    taken = hashed_port(str(env_dir))
+    config['projects']['other'] = {'dir': '/elsewhere', 'tenant': 'acme',
+                                   'webpreview': {'port': taken}}
+    Script(monkeypatch, select=['coding'], confirm=[True])
+
+    name, entry = _bootstrap_env(config, env_dir)
+
+    port = entry['webpreview']['port']
+    assert port != taken and 8000 <= port < 9000
+    assert load_dax_config()['projects']['demo']['webpreview']['port'] == port
+    assert 'http://localhost:{}/'.format(port) in capsys.readouterr().out

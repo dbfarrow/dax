@@ -133,7 +133,7 @@ projects:
 | Key | Description |
 | --- | --- |
 | `image` | Image for envs that don't set their own (wins over `defaults.image`) |
-| `defaults` | `image` (fallback image), `timezone` (used only when the host's can't be detected) and `relogin_cooldown_hours` (how often `dax run` refreshes an env's Claude login; default 24) |
+| `defaults` | `image` (fallback image), `timezone` (used only when the host's can't be detected), `relogin_cooldown_hours` (how often `dax run` refreshes an env's Claude login; default 24) and `webpreview_base_port` (the start of the 1000-port range webpreview ports are assigned from; default 8000) |
 | `githubdir`, `awsdir`, `optdir`, `msfdir` | What the `github`, `aws`, `optdir` and `msf` features mount, each as `{mount: ~/.aws}` (same path inside) or `{host: ~/x, container: ~/y}`; required only by the feature that uses it |
 | `ports` | Extra `host:container` port mappings for the `ports` feature, e.g. `["8080:80"]` |
 | `dotfiles` | Files to mount into every container (`ro` / `rw`) |
@@ -154,9 +154,10 @@ projects:
 | `image` | no | Docker image for this env (the wizard fills in `dax:latest`) |
 | `creds` | no | Credentials to make available. Claude's is implied; don't list it |
 | `features` | no | Opt-in features beyond the always-on ones, e.g. `[substrate, auto_claude]` |
+| `webpreview` | yes, to launch | `{port: N}`, the env's webpreview port. Written by the wizard, restore and `dax env ports --assign`; change it by hand with `dax config` |
 | `mounts` | no | Extra host paths, each mounted read-write at `$HOME/<name>`. `~/x:other` mounts it as `$HOME/other`, and a trailing `:ro` (`~/x:other:ro`, or `~/x::ro` to keep its name) makes it read-only. A non-empty list turns mounting on by itself |
 
-A list key that would be empty can just be left out, or left as `creds:` with nothing after it. `dax run` warns about any key it doesn't recognize, and about entries that are no longer needed: `claude`, `claude_tenant_state`, `auggie` or `mounts` in `features:`; Claude or auggie credentials in `creds:`; and a per-env `substrate:`, `multi_tenant` or `tenant_subdir`. CHANGELOG.md's "Updating `~/.dax.yaml` from 2.x" lists what to do about each.
+A list key that would be empty can just be left out, or left as `creds:` with nothing after it. `dax run` warns about any key it doesn't recognize, and about entries that are no longer needed: `claude`, `claude_tenant_state`, `auggie` or `mounts` in `features:`; Claude or auggie credentials in `creds:`; a per-env `substrate:`, `multi_tenant` or `tenant_subdir`; and a `webpreview:` block in a folder's own `.dax.yaml` or at the top level of `~/.dax.yaml`. CHANGELOG.md's "Updating `~/.dax.yaml` from 2.x" lists what to do about each.
 
 ---
 
@@ -404,6 +405,16 @@ A tenant with `hidden: true` is left out of `dax env list`; a footer line counts
 
 An env with no `~/.dax.yaml` entry and no state tree, only archives, is counted in the same footer line. `dax env list --all` lists each one under the tenant `(archive-only)`, after every other group. Its real tenant is recorded inside the archive, but dax doesn't open archives to find it: on OneDrive, opening one can download the whole file. To bring one back, `cd` into an empty folder with its name and run `dax env restore`.
 
+### `dax env ports [--assign]`
+
+Each env's webpreview port is stored on its entry, so it is the same every run and no two envs share one. New envs get a port from the wizard, and restored envs from restore. `dax env ports` lists every env's port. `dax env ports --assign` gives a port to every env that has none, or whose port is outside the range after you change `defaults.webpreview_base_port`; it shows the changes and asks before writing, keeps `~/.dax.yaml.prev`, and says which renumbered envs are running (they keep their old port until restarted). It runs on the host only.
+
+`dax run` won't start an env without a stored port, or one whose port something else is using; it says which.
+
+#### The env index page
+
+dax keeps a page listing every env with a link to its webpreview at `~/.local/state/dax/envs.html`. Bookmark it once in your browser. `dax run`, `dax env list`, restore and `dax env ports --assign` rewrite it. Each time you open it, the page checks which envs are running.
+
 ### `dax env show [name]`
 
 One env's settings plus what isn't in `~/.dax.yaml`: what kind of env it is (a code project, or a process with its type, skill and title from its `context.md`), its implied Claude credential and which browser its login opens, whether the folder exists, the container's state, and its state tree's size and age. Defaults to the env containing the current folder.
@@ -464,11 +475,15 @@ SSH needs no feature: attaching an `ssh` credential forwards an agent holding th
 
 ### webpreview
 
-`dax-preview` serves the working directory over HTTP with GitHub-style directory listings, rendered Markdown, and a collapsible file tree sidebar. The port is deterministic per project directory (same port every run) and can be overridden:
+`dax-preview` serves the working directory over HTTP with GitHub-style directory listings, rendered Markdown, and a collapsible file tree sidebar, at `http://localhost:<port>/`. The port is stored on the env's entry (see `dax env ports`):
 
 ```yaml
-webpreview:
-  port: 8731
+projects:
+  myenv:
+    dir: /Users/me/myenv
+    tenant: personal
+    webpreview:
+      port: 8731
 ```
 
 ---

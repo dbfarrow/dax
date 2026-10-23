@@ -8,6 +8,29 @@ dax uses [semantic versioning](https://semver.org/):
 
 History before 3.0.0 lives in git.
 
+## 3.0.1 — 2026-10-23
+
+Stored webpreview ports, and a page of links to every env. Design and decisions: `docs/design/2026-10-23-webpreview-ports.md`.
+
+### Upgrading from 3.x
+
+Run `dax env ports --assign` once, on the host. Until an env has a stored port, `dax run` refuses to start it.
+
+### Added
+
+- `dax env ports [--assign]`: lists each env's webpreview port; `--assign` gives ports to envs that have none, or whose port falls outside the range after a base change.
+- The `webpreview: {port: N}` env key, written by the wizard, restore and `--assign`.
+- `defaults.webpreview_base_port` (default 8000): where the 1000-port range starts.
+- The env index page at `~/.local/state/dax/envs.html`: every env with a link to its webpreview, grouped by tenant, with running envs checked live when the page is opened. `dax run`, `dax env list`, restore and `--assign` rewrite it.
+
+### Changed
+
+- A webpreview port is assigned once and stored, unique across envs. It is no longer derived on every run, and never moves to another port: `dax run` refuses an env whose port is in use, or that has no stored port.
+
+### Removed
+
+- The `webpreview:` override in a folder's own `.dax.yaml`, or at the top level of `~/.dax.yaml`. It is ignored, with a warning; the port lives on the env's entry.
+
 ## 3.0.0 — 2026-10-21
 
 The env-lifecycle consolidation. Design and every decision behind it: `docs/design/2026-10-18-env-bootstrap-consolidation.md`.

@@ -714,3 +714,15 @@ def test_process_restore_and_import_are_gone(home, sub):
     result = _cli(home, 'process', sub, 'demo')
     assert result.returncode == 2
     assert 'invalid choice' in result.stderr  # `process` itself is gone since step 4
+
+
+def test_a_restore_gets_a_port_for_its_new_folder(home, monkeypatch):
+    from dax_creds.webpreview import hashed_port
+    _, _ = _archive(home, 'demo', tenant='acme')
+    _destroy('demo', tenant='acme')
+    target = home / 'renamed'
+
+    _restore(monkeypatch, target, source='demo')
+
+    entry = load_dax_config()['projects']['renamed']
+    assert entry['webpreview']['port'] == hashed_port(str(target))
