@@ -118,36 +118,19 @@ decisions, is `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
 - **Files not to back up:** credentials, `~/.claude/projects/`,
   `history.jsonl`, caches, sessions.
 
-## In progress (2026-10-22)
+## In progress (2026-10-29)
 
-**1. Virgil migration: switched over and tested 2026-10-22; discernment not yet retired.**
-`substrate:` points at virgil, and one env passed `wire.sh --check`. virgil was committed
-(`82712aa`) and pushed to the private repo `github.com/dbfarrow/virgil` on 2026-10-23. Left for
-the user: clean the config (§6 of the plan) and delete discernment. The
-closed processes in `archive/` go with it. The substrate now lives
-in `~/virgil` (host `~/fatsec/virgil`). It was copied from discernment's working tree,
-scrubbed, verified (76 files), and `git init`ed on `main` with nothing committed. The plan is
-`~/virgil/docs/VIRGIL-MIGRATION.md`; the copy in discernment is out of date.
-
-- **The user commits virgil and creates the GitHub remote themselves.** Don't do either.
-- **Test:** temporarily set the top-level `substrate:` to `~/fatsec/virgil` in `dax config`,
-  start one substrate env, then run `wire.sh --check` and look at `/context`. dax has no
-  per-env substrate override (decision 41), but only envs started afterward pick up the change.
-- **Afterward:** update the env entries that mount `~/fatsec/discernment` directly. Before
-  deleting discernment, give `archive/` a home: it holds a paused project that telos lists as
-  active.
-- Don't edit discernment's `wire.sh` in place: every substrate env still runs it at startup.
+**1. Retiring discernment.** The substrate now lives in virgil (host `~/fatsec/virgil`, private
+repo `github.com/dbfarrow/virgil`), and `substrate:` points at it. The other envs' direct
+discernment mounts are gone. Left for the user: remove the `discernment` env entry, delete the
+host folder `~/fatsec/discernment`, and delete the private repo `dbfarrow/discernment`. The plan,
+including what was decided along the way, is `~/virgil/docs/VIRGIL-MIGRATION.md`.
 
 **2. Substrate repo split: paused, no deadline.** The goal is to publish dax and the
 substrate's wiring while the content stays private. The plan lives in virgil:
 `~/virgil/docs/REPO-SPLIT.md` (virgil must be mounted). dax's part is to accept a two-repo
 `substrate:` (practice plus content) and check the practice repo's contract version. Which
 project the work happens in is undecided.
-
-**3. Backlog item 3 below is partly out of date.** The write-if-absent fix is already in the real
-`new-process.sh`, which is newer than `docs/design/scripts/new-process.sh`. The real script also
-answers the "merge" question: it refuses on conflict and never rewrites frontmatter. Update the
-item once virgil exists.
 
 ## Backlog
 
@@ -167,10 +150,10 @@ item once virgil exists.
   options. See decision 13's "Known gap" note in
   `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
 
-- **`new-process.sh`: merge frontmatter into an existing `context.md`**
-  rather than refusing when it already exists. It's a design question:
-  what does "merge" mean when the existing file conflicts with the
-  template? The write-if-absent fix for `CLAUDE.md`/`inbox.md` exists only
-  in `docs/design/scripts/new-process.sh` here, an untracked reference copy.
-  Both changes belong in the real script in the virgil/discernment repo,
-  ported by hand.
+- **`new-process.sh`: should it ever merge frontmatter into an existing
+  `context.md`?** Today it refuses on a conflict and never rewrites
+  frontmatter, by design (its header says why). The write-if-absent fix for
+  `CLAUDE.md`/`inbox.md` is already in the real script, in virgil's
+  `shared/`, so `docs/design/scripts/new-process.sh` here (an untracked,
+  older reference copy) is obsolete. Revisit only if refusing becomes a
+  problem in practice.
