@@ -22,7 +22,8 @@ decisions, is `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
   `_bootstrap_env` wizard. The env is named after the folder. A process env
   gets `new-process.sh` run after the confirm. `dax -t run` is a pure
   preview: it refuses in an unregistered folder, and never creates or seeds
-  a state tree.
+  a state tree. `dax run` (but not `-t`) refuses inside a dax container,
+  and `-t` there skips the backup check.
 - **Editing:** `dax config` (host only). It keeps `~/.dax.yaml.prev`, checks
   the result, and, when an env's `tenant:` changed, offers to move its state
   tree and rename its Keychain credential (decision 44).
@@ -80,7 +81,7 @@ decisions, is `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
   (`mounts: ['~/.claude:host-claude']`), then have a session read
   `~/host-claude/projects/` and `history.jsonl`. Don't delete those on the
   host. `tools/migrate_env_state.py` remains for the unambiguous case.
-- **Tests:** 844 passing. Manual runbook:
+- **Tests:** 847 passing. Manual runbook:
   `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
 
 ## Working rules
@@ -105,9 +106,11 @@ decisions, is `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
   container-local copy. Draft the change and have the user apply it on the
   host.
 - **Tests:** `tests/conftest.py` also stubs the implied Claude login (opt
-  out with `@pytest.mark.real_claude_login`), the image-version lookup, and
+  out with `@pytest.mark.real_claude_login`), the image-version lookup,
   the webpreview port (an env with none launches on 8000 and every port
-  counts as free; opt out with `@pytest.mark.real_webpreview_port`). It
+  counts as free; opt out with `@pytest.mark.real_webpreview_port`), and
+  `dax run`'s in-container refusal (opt out with
+  `@pytest.mark.real_container_check`). It
   provides `launch_without_docker` for a real (non-`-t`) `cmd_run`. The
   suite runs inside a container, so a test of host-only behaviour (such as
   the env index page) must patch `dax._in_dax_container` to return False.

@@ -134,3 +134,45 @@ def test_dash_t_never_starts_the_wizard(tmp_path, monkeypatch, capsys):
     assert excinfo.value.code == 1
     assert calls == []
     assert "run `dax run` without -t to set it up" in capsys.readouterr().out
+
+
+@pytest.mark.real_container_check
+def test_cmd_run_refuses_inside_a_dax_container_before_anything_else(
+        tmp_path, monkeypatch, capsys):
+    """In a container there is no docker, and the wizard would register
+    container paths (cwd, `~/...` substrate) as if they were the host's."""
+    import dax
+    monkeypatch.setattr(dax, '_in_dax_container', lambda: True)
+    monkeypatch.chdir(tmp_path)
+    touched = []
+    monkeypatch.setattr(dax, 'load_config', lambda: touched.append('load_config'))
+    monkeypatch.setattr(dax, '_run_backup', lambda *a, **k: touched.append('backup'))
+    monkeypatch.setattr(dax, '_bootstrap_env', lambda *a, **k: touched.append('wizard'))
+
+    with pytest.raises(SystemExit) as excinfo:
+        cmd_run(argparse.Namespace(features=None, ports=None, test_only=False))
+
+    assert excinfo.value.code == 1
+    assert 'dax run only runs on the host' in capsys.readouterr().out
+    assert touched == []
+
+
+@pytest.mark.real_container_check
+def test_cmd_run_preview_still_works_inside_a_dax_container(tmp_path, monkeypatch, capsys):
+    import dax
+    monkeypatch.setattr(dax, '_in_dax_container', lambda: True)
+    home = tmp_path / 'home'
+    repo = home / 'myproj'
+    repo.mkdir(parents=True)
+    _write_yaml(home / '.dax.yaml', {
+        'image': 'test/dax:latest',
+        'projects': {'myproj': {'dir': str(repo), 'creds': [], 'tenant': 'personal'}},
+    })
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.chdir(repo)
+
+    cmd_run(_args())
+
+    out = capsys.readouterr().out
+    assert 'only runs on the host' not in out
+    assert 'test/dax:latest' in out

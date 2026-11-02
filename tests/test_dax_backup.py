@@ -125,7 +125,7 @@ def _args():
     return argparse.Namespace(features=None, ports=None, test_only=True)
 
 
-def test_cmd_run_calls_backup_check_quietly(tmp_path, monkeypatch):
+def _registered_env(tmp_path, monkeypatch):
     home = tmp_path / 'home'
     home.mkdir()
     repo = home / 'myproj'
@@ -135,12 +135,32 @@ def test_cmd_run_calls_backup_check_quietly(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.chdir(repo)
 
+
+def test_cmd_run_calls_backup_check_quietly(tmp_path, monkeypatch):
+    _registered_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(dax, '_in_dax_container', lambda: False)
+
     calls = []
     monkeypatch.setattr(dax, '_run_backup', lambda config, verbose=True, backup_dir=None: calls.append(verbose))
 
     cmd_run(_args())
 
     assert calls == [False]
+
+
+def test_cmd_run_skips_the_backup_check_in_a_container(tmp_path, monkeypatch, capsys):
+    """`backup_dir` is a host path (`/Users/...`); in a container the check
+    could only fail with "Permission denied: '/Users'"."""
+    _registered_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(dax, '_in_dax_container', lambda: True)
+
+    calls = []
+    monkeypatch.setattr(dax, '_run_backup', lambda *a, **k: calls.append(1))
+
+    cmd_run(_args())
+
+    assert calls == []
+    assert 'backup check failed' not in capsys.readouterr().out
 
 
 def test_explain_prints_without_touching_dax_yaml_or_running_backup(tmp_path, monkeypatch, capsys):

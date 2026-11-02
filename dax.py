@@ -1015,7 +1015,21 @@ def _sync_and_clear_claude_credential(config, project_creds):
         dax_print('[!] could not sync Claude credential to Keychain: {}'.format(e))
 
 
+def _refuse_run_in_container(args):
+    """`dax run` launches only from the host: a container has no docker, and
+    every path the wizard would register (the env's folder, the substrate,
+    the state tree) means something else in there. `-t` only prints the
+    `docker run` command, so it still works anywhere."""
+    if args.test_only or not _in_dax_container():
+        return
+    dax_print('[!] dax run only runs on the host. Inside a dax container there is no docker '
+              'to launch with, and the paths it would register are container paths.')
+    dax_print('    Run `dax run` in a host terminal, from the folder the env belongs to.')
+    sys.exit(1)
+
+
 def cmd_run(args):
+    _refuse_run_in_container(args)
     config = load_config()
     username = _get_username()
     config['_container_home'] = '/home/{}'.format(username)
@@ -1023,11 +1037,13 @@ def cmd_run(args):
     # Same check `dax backup` runs by hand, just automatic now — quiet
     # unless something actually changed. A failure here (permissions, disk
     # full) is a warning, never a reason to block the actual container
-    # launch, which is the thing this command is actually for.
-    try:
-        _run_backup(config, verbose=False)
-    except Exception as e:
-        dax_print("[!] backup check failed: {}".format(e))
+    # launch, which is the thing this command is actually for. Skipped in a
+    # container (only `-t` gets this far there): `backup_dir` is a host path.
+    if not _in_dax_container():
+        try:
+            _run_backup(config, verbose=False)
+        except Exception as e:
+            dax_print("[!] backup check failed: {}".format(e))
 
     name = config['envname']
     # Lands the shell at the project mount instead of $HOME — workdir is one

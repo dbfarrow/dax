@@ -37,6 +37,10 @@ def pytest_configure(config):
         'real_claude_login: let `dax run` look up and refresh the implied Claude '
         'credential for real, instead of the default stand-in (see '
         '_implied_claude_credential_is_logged_in)')
+    config.addinivalue_line(
+        'markers',
+        'real_container_check: let `dax run` check for a dax container for real, '
+        'instead of the default stand-in (see _dax_run_on_the_host)')
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +93,19 @@ def _webpreview_port_stand_in(request, monkeypatch):
     real = dax._stored_preview_port
     monkeypatch.setattr(dax, '_stored_preview_port', lambda config: real(config) or 8000)
     monkeypatch.setattr(dax, '_is_port_free', lambda port: True)
+
+
+@pytest.fixture(autouse=True)
+def _dax_run_on_the_host(request, monkeypatch):
+    """`dax run` refuses inside a dax container, and this suite runs inside
+    one. So by default `cmd_run` behaves as on the host. Only `cmd_run`'s
+    own refusal is stubbed, not `_in_dax_container` itself, so other
+    host-only behaviour (the env index page) stays off. Tests of the
+    refusal opt out with `@pytest.mark.real_container_check`."""
+    if request.node.get_closest_marker('real_container_check'):
+        return
+    import dax
+    monkeypatch.setattr(dax, '_refuse_run_in_container', lambda args: None)
 
 
 @pytest.fixture
