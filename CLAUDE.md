@@ -10,7 +10,7 @@ This file is the current state only. How dax got here (every decision since
 commands named there no longer exist. The 3.0 design, with all 45
 decisions, is `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
 
-## Current state — dax 3.0.1 (2026-10-23)
+## Current state — dax 3.1.0 (2026-11-02)
 
 - **Commands:** `build`, `run`, `features`, `backup`, `creds`
   (`add`/`list`/`update`/`login`/`remove`), `config`, `env`

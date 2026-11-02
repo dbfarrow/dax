@@ -8,6 +8,20 @@ dax uses [semantic versioning](https://semver.org/):
 
 History before 3.0.0 lives in git.
 
+## 3.1.0 — 2026-11-02
+
+### Upgrading from 3.0.x
+
+Run `dax build` on the host, then relaunch running containers so they pick up the new image.
+
+### Added
+
+- `uv` and `uvx` (0.13.6) in the image.
+
+### Fixed
+
+- `dax run` inside a dax container now refuses up front. Before, in an unregistered folder it started the new-env wizard, which could only fail or register container paths as the env's folder and substrate. `dax run -t` still works in a container, and skips the backup check there, which used to warn about the unreachable host `backup_dir`.
+
 ## 3.0.1 — 2026-10-23
 
 Stored webpreview ports, and a page of links to every env. Design and decisions: `docs/design/2026-10-23-webpreview-ports.md`.
