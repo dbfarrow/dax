@@ -1015,6 +1015,20 @@ def _sync_and_clear_claude_credential(config, project_creds):
         dax_print('[!] could not sync Claude credential to Keychain: {}'.format(e))
 
 
+def _set_tab_title(title):
+    """Set the terminal tab's title (iTerm2 and xterm-style terminals; an
+    empty title gives the tab back to the terminal's own). Sent from the
+    host before the container starts, so it holds for the whole session:
+    tmux inside the container keeps titles its programs set (Claude's,
+    say) to itself rather than passing them out. Only to a real terminal,
+    never into a pipe or a test's captured output."""
+    if not sys.stdout.isatty():
+        return
+    title = ''.join(c for c in title if c >= ' ' and c != '\x7f')
+    sys.stdout.write('\033]1;{}\007'.format(title))
+    sys.stdout.flush()
+
+
 def _refuse_run_in_container(args):
     """`dax run` launches only from the host: a container has no docker, and
     every path the wizard would register (the env's folder, the substrate,
@@ -1350,8 +1364,11 @@ def cmd_run(args):
     dax_print("[+] running:\n  " + _format_docker_cmd(cmd))
     try:
         if not args.test_only:
+            _set_tab_title(config.get('env_name') or name)
             subprocess.run(cmd)
     finally:
+        if not args.test_only:
+            _set_tab_title('')
         if daemon_proc:
             dax_print("[+] stopping credential daemon")
             daemon_proc.terminate()
