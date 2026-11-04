@@ -8,6 +8,12 @@ dax uses [semantic versioning](https://semver.org/):
 
 History before 3.0.0 lives in git.
 
+## 3.1.1 — 2026-11-04
+
+### Changed
+
+- `dax run` names the terminal tab after the env for the session, and clears the title when the container exits so the terminal's own returns. Not under `-t`, and only when dax is writing to a terminal.
+
 ## 3.1.0 — 2026-11-02
 
 ### Upgrading from 3.0.x

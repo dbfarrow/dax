@@ -10,7 +10,7 @@ This file is the current state only. How dax got here (every decision since
 commands named there no longer exist. The 3.0 design, with all 45
 decisions, is `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
 
-## Current state — dax 3.1.0 (2026-11-02)
+## Current state — dax 3.1.1 (2026-11-04)
 
 - **Commands:** `build`, `run`, `features`, `backup`, `creds`
   (`add`/`list`/`update`/`login`/`remove`), `config`, `env`
@@ -23,7 +23,8 @@ decisions, is `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
   gets `new-process.sh` run after the confirm. `dax -t run` is a pure
   preview: it refuses in an unregistered folder, and never creates or seeds
   a state tree. `dax run` (but not `-t`) refuses inside a dax container,
-  and `-t` there skips the backup check.
+  and `-t` there skips the backup check. `dax run` titles the terminal
+  tab with the env's registered name, and clears it on exit.
 - **Editing:** `dax config` (host only). It keeps `~/.dax.yaml.prev`, checks
   the result, and, when an env's `tenant:` changed, offers to move its state
   tree and rename its Keychain credential (decision 44).
@@ -81,7 +82,7 @@ decisions, is `docs/design/2026-10-18-env-bootstrap-consolidation.md`.
   (`mounts: ['~/.claude:host-claude']`), then have a session read
   `~/host-claude/projects/` and `history.jsonl`. Don't delete those on the
   host. `tools/migrate_env_state.py` remains for the unambiguous case.
-- **Tests:** 847 passing. Manual runbook:
+- **Tests:** 852 passing. Manual runbook:
   `docs/testing/2026-10-19-env-lifecycle-test-sequence.md`.
 
 ## Working rules
