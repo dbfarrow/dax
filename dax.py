@@ -3834,7 +3834,9 @@ def _run_backup(config, verbose=True, backup_dir=None):
     if backup_dir is None:
         backup_dir = _default_backup_dir(config)
 
-    paths = []
+    # Always backed up, unconfigured: it defines every env, and holds
+    # credential metadata that exists nowhere else.
+    paths = ['~/.dax.yaml']
     for f in config.get('dotfiles', {}).get('ro', []):
         paths.append(f)
     for f in config.get('dotfiles', {}).get('rw', []):
@@ -3932,6 +3934,7 @@ Copies a fixed list of host files into backup/ inside this repo checkout
 plain file copy, not an archive and not off-site storage on its own.
 
 What it copies, read fresh from ~/.dax.yaml each run:
+  - ~/.dax.yaml itself, always (no setting needed)
   - dotfiles.ro   (read-only mounts, e.g. .zshrc, .vimrc)
       currently: {ro}
   - dotfiles.rw   (read-write mounts, e.g. .gitconfig, .claude.json)

@@ -83,7 +83,23 @@ def test_reports_a_missing_path_as_skipped_without_crashing(tmp_path, monkeypatc
 
     updated, unchanged, skipped = _run_backup(config, backup_dir=tmp_path / 'backup_dest')
 
-    assert skipped == ['~/.does-not-exist']
+    assert skipped == ['~/.dax.yaml', '~/.does-not-exist']
+
+
+def test_always_backs_up_dax_yaml_without_being_configured(tmp_path, monkeypatch):
+    """~/.dax.yaml defines every env and holds credential metadata that
+    exists nowhere else, so it's backed up with no `backup:` entry, and
+    listing it there as well copies it only once."""
+    home = tmp_path / 'home'
+    home.mkdir()
+    (home / '.dax.yaml').write_text('projects: {}\n')
+    backup_dir = tmp_path / 'backup_dest'
+    config = _config(monkeypatch, home, backup=['~/.dax.yaml'])
+
+    updated, unchanged, skipped = _run_backup(config, backup_dir=backup_dir)
+
+    assert updated == ['~/.dax.yaml']
+    assert (backup_dir / '.dax.yaml').read_text() == 'projects: {}\n'
 
 
 def test_quiet_mode_suppresses_unchanged_and_skipped_but_not_backed_up(tmp_path, monkeypatch, capsys):
