@@ -794,7 +794,7 @@ def cmd_build(args):
     latest_tag = 'dax:latest'
 
     dax_print("[+] building container")
-    build_cmd = ['docker', 'build'] + _get_user_build_args() + ['--platform=linux/amd64']
+    build_cmd = ['docker', 'build'] + _get_user_build_args()
     if args.clean:
         build_cmd.append('--no-cache')
     build_cmd += ['--label', '{}={}'.format(_VERSION_LABEL, version),
@@ -1069,7 +1069,6 @@ def cmd_run(args):
     workdir = os.path.join(_container_home(config), config['workdir_name'])
     cmd = [
         'docker', 'run', '-it', '--rm',
-        '--platform=linux/amd64',
         '--name', name,
         '-h', '{}.fatsec.docker'.format(name),
         '-w', workdir,
@@ -1510,7 +1509,6 @@ def cmd_creds_login(cred_name, config):
 
     cmd = [
         'docker', 'run', '-it', '--rm',
-        '--platform=linux/amd64',
         '--add-host=host.docker.internal:host-gateway',
         '-e', f'DAX_CREDS_SOCK=tcp:host.docker.internal:{port}',
         '-e', f'DAX_CREDS_LOGIN_CRED={cred_name}',

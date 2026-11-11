@@ -435,7 +435,7 @@ def test_format_docker_cmd_pairs_workdir_flag_with_its_path():
 
 def test_format_docker_cmd_realistic_mixed_command():
     cmd = [
-        'docker', 'run', '-it', '--rm', '--platform=linux/amd64',
+        'docker', 'run', '-it', '--rm',
         '--name', 'fatsec-fabric', '-h', 'fatsec-fabric.fatsec.docker',
         '--volume=/Users/dfarrow/fatsec/fabric:/home/dfarrow/fabric',
         '-e', 'DAX_TENANT_STATE=1', '-e', 'DAX_PROJECT_NAME=fabric',
@@ -443,7 +443,7 @@ def test_format_docker_cmd_realistic_mixed_command():
     ]
     lines = _format_docker_cmd(cmd).split('\n  ')
     assert lines == [
-        'docker', 'run', '-it', '--rm', '--platform=linux/amd64',
+        'docker', 'run', '-it', '--rm',
         '--name fatsec-fabric', '-h fatsec-fabric.fatsec.docker',
         '--volume=/Users/dfarrow/fatsec/fabric:/home/dfarrow/fabric',
         '-e DAX_TENANT_STATE=1', '-e DAX_PROJECT_NAME=fabric',
