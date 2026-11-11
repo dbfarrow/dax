@@ -780,6 +780,9 @@ def cmd_build(args):
             '# install custom CA certificate\n'
             'COPY ca.crt /usr/local/share/ca-certificates/\n'
             'RUN update-ca-certificates\n'
+            # Node (npm, Claude Code) ignores the system store and only
+            # trusts its bundled CAs plus this file.
+            'ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ca.crt\n'
         )
 
     dockerfile = render_dockerfile(user, shell, passwd, ca_cert_block)
